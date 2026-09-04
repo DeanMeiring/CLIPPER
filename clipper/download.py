@@ -5,9 +5,10 @@ import json
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
@@ -90,11 +91,59 @@ def is_url(source: str) -> bool:
 
 
 def _base_ydl_opts() -> dict:
-    opts = {"quiet": True, "no_warnings": False, "noplaylist": True}
+    opts = {
+        "quiet": True, "no_warnings": False, "noplaylist": True,
+        # A persistently failing source (e.g. a 403 on a restricted/expired
+        # VOD) can otherwise have yt-dlp retry with growing backoff for a
+        # very long time -- bound that so a bad source fails in minutes,
+        # not indefinitely. _run_with_timeout below is the hard backstop
+        # in case even this isn't enough (a genuinely stalled connection).
+        "socket_timeout": 30,
+        "retries": 3,
+        "extractor_retries": 3,
+        "fragment_retries": 3,
+    }
     cookiefile = _cookiefile()
     if cookiefile:
         opts["cookiefile"] = cookiefile
     return opts
+
+
+_T = TypeVar("_T")
+
+
+class DownloadTimeout(RuntimeError):
+    pass
+
+
+def _run_with_timeout(fn: Callable[[], _T], timeout_seconds: float) -> _T:
+    """Run fn() in a daemon thread with a hard wall-clock ceiling. yt-dlp
+    has no built-in way to bound how long a single extract_info call can
+    take, and a call that hangs (a stalled connection, a source that keeps
+    erroring through every retry) can't be interrupted by anything else in
+    the pipeline -- including the emergency-stop signal, since it's one
+    blocking call with no checkpoint inside it. This turns an indefinite
+    hang into a clean, timed-out error instead."""
+    result: list = []
+    error: list = []
+
+    def _run() -> None:
+        try:
+            result.append(fn())
+        except Exception as e:  # noqa: BLE001 - re-raised on the caller's thread below
+            error.append(e)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise DownloadTimeout(
+            f"Timed out after {timeout_seconds:.0f}s -- the source may be "
+            "unavailable, restricted, or the connection stalled"
+        )
+    if error:
+        raise error[0]
+    return result[0]
 
 
 def probe_video(source: str) -> VideoInfo:
@@ -102,8 +151,11 @@ def probe_video(source: str) -> VideoInfo:
     used to decide whether a source needs the long-VOD highlight pipeline."""
     import yt_dlp
 
-    with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
-        info = ydl.extract_info(source, download=False)
+    def _extract() -> dict:
+        with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
+            return ydl.extract_info(source, download=False)
+
+    info = _run_with_timeout(_extract, timeout_seconds=90.0)
 
     extractor = (info.get("extractor_key") or info.get("extractor") or "").lower()
     video_id = str(info.get("id", ""))
@@ -143,8 +195,11 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
         "force_keyframes_at_cuts": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(source, download=True)
+    def _extract() -> None:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(source, download=True)
+
+    _run_with_timeout(_extract, timeout_seconds=240.0)
 
     candidates = list(out_dir.glob(f"{out_name}.*"))
     video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
@@ -197,11 +252,14 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
     else:
         print("[clipper] no cookiefile configured", flush=True)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(source, download=True)
-        video_id = info["id"]
-        title = info.get("title", video_id)
-        duration = float(info.get("duration") or 0.0)
+    def _extract() -> dict:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(source, download=True)
+
+    info = _run_with_timeout(_extract, timeout_seconds=600.0)
+    video_id = info["id"]
+    title = info.get("title", video_id)
+    duration = float(info.get("duration") or 0.0)
 
     video_path = out_dir / f"{video_id}.mp4"
     if not video_path.exists():
