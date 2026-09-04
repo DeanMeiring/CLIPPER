@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import os
 import queue
+import secrets
 import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass
@@ -26,7 +28,26 @@ from clipper.transcribe import get_transcript
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
+security = HTTPBasic(auto_error=False)
+
+
+def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> None:
+    """Gate every protected route behind APP_PASSWORD (any username works --
+    only the password is checked). If APP_PASSWORD isn't set, auth is skipped
+    entirely, so local dev works with no setup."""
+    password = os.environ.get("APP_PASSWORD")
+    if not password:
+        return
+    if credentials is None or not secrets.compare_digest(credentials.password, password):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
 app = FastAPI(title="clipper")
+protected = APIRouter(dependencies=[Depends(require_auth)])
 
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
@@ -109,7 +130,7 @@ def _worker() -> None:
 threading.Thread(target=_worker, daemon=True).start()
 
 
-@app.post("/api/jobs")
+@protected.post("/api/jobs")
 def create_job(req: JobRequest) -> dict:
     job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
@@ -125,7 +146,7 @@ def create_job(req: JobRequest) -> dict:
     return {"job_id": job_id}
 
 
-@app.get("/api/jobs/{job_id}")
+@protected.get("/api/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -134,7 +155,7 @@ def get_job(job_id: str) -> dict:
         return {k: v for k, v in job.items() if k != "request"}
 
 
-@app.get("/api/jobs/{job_id}/clips/{filename}")
+@protected.get("/api/jobs/{job_id}/clips/{filename}")
 def get_clip(job_id: str, filename: str) -> FileResponse:
     path = BASE_DIR / job_id / filename
     if not path.is_file():
@@ -147,9 +168,12 @@ def healthz() -> dict:
     return {"ok": True}
 
 
-@app.get("/", response_class=HTMLResponse)
+@protected.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
+
+
+app.include_router(protected)
 
 
 INDEX_HTML = """<!doctype html>
