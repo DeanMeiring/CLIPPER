@@ -24,6 +24,53 @@ class ClipPick:
     reason: str
 
 
+@dataclass
+class WindowPick:
+    """Like ClipPick, but start/end are local to one candidate window's own
+    downloaded file (0 at the window's start), not the source VOD's absolute
+    time -- used by select_from_candidate_windows for the long-VOD pipeline,
+    where each candidate window is downloaded/transcribed as its own file."""
+    window_index: int
+    start: float
+    end: float
+    title: str
+    hook_caption: str
+    upload_title: str
+    reason: str
+
+
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 2000) -> list:
+    try:
+        import anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
+        ) from e
+
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
+            "or pass --api-key."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
+    raw = raw.strip()
+    raw = re.sub(r"^```(json)?", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
+
+
 def _chunk_transcript(words: List[Word], mark_every: float = 10.0) -> str:
     """Render the transcript as running text with periodic [mm:ss] markers,
     so the model can point back at real timestamps without us sending every
@@ -67,20 +114,6 @@ def select_clips(
     source_title: Optional[str] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
-    try:
-        import anthropic
-    except ImportError as e:
-        raise RuntimeError(
-            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
-        ) from e
-
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
-            "or pass --api-key."
-        )
-
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
@@ -115,21 +148,7 @@ Transcript:
 {transcript_text}
 """
 
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
-    raw = raw.strip()
-    raw = re.sub(r"^```(json)?", "", raw).strip()
-    raw = re.sub(r"```$", "", raw).strip()
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
+    data = _ask_claude_for_json(prompt, api_key, model)
 
     picks: List[ClipPick] = []
     for item in data:
@@ -160,3 +179,108 @@ Transcript:
             non_overlapping.append(p)
             last_end = p.end
     return non_overlapping[:n_clips]
+
+
+def select_from_candidate_windows(
+    windows: List[dict],
+    n_clips: int = 5,
+    min_len: float = 20.0,
+    max_len: float = 90.0,
+    focus: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model: str = DEFAULT_MODEL,
+    source_title: Optional[str] = None,
+) -> List[WindowPick]:
+    """Pick the best clips from a set of pre-filtered candidate windows
+    (long-VOD pipeline) instead of one continuous transcript.
+
+    Each item in `windows` is a dict: {"index": int, "duration": float,
+    "words": List[Word], "signal": str} -- words are timestamped local to
+    that window (0 at its start), since each window is downloaded and
+    transcribed as its own standalone file.
+    """
+    if not windows:
+        return []
+
+    focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
+    source_line = f"\nSource VOD title: {source_title}\n" if source_title else ""
+
+    blocks = []
+    for w in windows:
+        transcript_text = _chunk_transcript(w["words"], mark_every=15.0)
+        blocks.append(
+            f"--- Candidate window {w['index']} "
+            f"(duration {w['duration']:.0f}s, signal: {w['signal']}) ---\n"
+            f"{transcript_text}\n"
+        )
+    windows_text = "\n".join(blocks)
+
+    prompt = f"""You are picking the best highlight clips from a set of CANDIDATE windows
+that were already pre-filtered out of a much longer livestream VOD (chat
+activity spikes and/or moments viewers already clipped). Each candidate
+window below is its own short segment with its own transcript, timestamped
+LOCALLY from 0 at the start of that window -- not the VOD's absolute time.
+{source_line}{focus_line}
+Not every candidate window is actually a good clip -- some chat spikes are
+noise, reactions to something off-screen, or don't read well out of context.
+Pick only the ones that would genuinely work as a standalone short-form clip.
+
+Pick up to {n_clips} windows. For each one you pick, give a start/end IN
+SECONDS LOCAL TO THAT WINDOW (0 to its duration) -- use the whole window or
+trim it tighter around the actual moment. Each clip must:
+- be between {min_len:.0f} and {max_len:.0f} seconds long
+- work as a standalone moment, not a random mid-sentence cut
+- start right at (or just before) the moment that hooks attention
+
+Respond with ONLY a JSON array, no other text, in this exact shape:
+[
+  {{
+    "window_index": 3,
+    "start": 4.0,
+    "end": 52.0,
+    "title": "short internal label, not shown on screen",
+    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters",
+    "reason": "one sentence on why this moment works as a clip"
+  }}
+]
+
+Candidate windows:
+{windows_text}
+"""
+
+    data = _ask_claude_for_json(prompt, api_key, model)
+
+    by_index = {w["index"]: w for w in windows}
+    picks: List[WindowPick] = []
+    seen_indices = set()
+    for item in data:
+        try:
+            idx = int(item["window_index"])
+            window = by_index[idx]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if idx in seen_indices:
+            continue
+        try:
+            start = max(0.0, float(item["start"]))
+            end = min(window["duration"], float(item["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end - start < min_len * 0.6:
+            continue
+        if end - start > max_len * 1.2:
+            end = start + max_len
+        title = str(item.get("title", "")).strip() or "Untitled clip"
+        seen_indices.add(idx)
+        picks.append(WindowPick(
+            window_index=idx,
+            start=round(start, 2),
+            end=round(end, 2),
+            title=title,
+            hook_caption=str(item.get("hook_caption", "")).strip(),
+            upload_title=str(item.get("upload_title", "")).strip() or title,
+            reason=str(item.get("reason", "")).strip(),
+        ))
+
+    return picks[:n_clips]
