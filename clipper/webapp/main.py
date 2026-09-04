@@ -278,6 +278,7 @@ def _run_job(job_id: str) -> None:
             "title": pick.title,
             "hook_caption": pick.hook_caption,
             "upload_title": pick.upload_title,
+            "description": pick.description,
             "reason": pick.reason,
         })
         _set(job_id, clips=list(clips_meta))
@@ -589,7 +590,8 @@ INDEX_HTML = """<!doctype html>
   .clip em { color: var(--muted); font-size: 0.88rem; display: block; margin-top: 4px; font-style: italic; }
   .title-row { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
   .title-row input { flex: 1; margin-top: 0; font-weight: 600; }
-  .title-row button { margin-top: 0; padding: 8px 12px; font-size: 0.82rem; }
+  .title-row textarea { flex: 1; margin-top: 0; font-family: inherit; font-size: 0.85rem; resize: vertical; align-self: stretch; }
+  .title-row button { margin-top: 0; padding: 8px 12px; font-size: 0.82rem; align-self: flex-start; }
   .checkbox-row { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
   .checkbox-row input { width: auto; margin-top: 0; accent-color: var(--accent); }
   .checkbox-row label { margin-top: 0; text-transform: none; font-weight: 600; color: var(--text); font-size: 0.9rem; }
@@ -1011,6 +1013,27 @@ async function poll(jobId) {
     titleRow.appendChild(titleInput);
     titleRow.appendChild(copyBtn);
     div.appendChild(titleRow);
+
+    if (c.description) {
+      const descRow = document.createElement('div');
+      descRow.className = 'title-row';
+      const descInput = document.createElement('textarea');
+      descInput.readOnly = true;
+      descInput.rows = 3;
+      descInput.value = c.description;
+      const descCopyBtn = document.createElement('button');
+      descCopyBtn.type = 'button';
+      descCopyBtn.textContent = 'Copy description';
+      descCopyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(descInput.value).then(() => {
+          descCopyBtn.textContent = 'Copied!';
+          setTimeout(() => { descCopyBtn.textContent = 'Copy description'; }, 1500);
+        });
+      });
+      descRow.appendChild(descInput);
+      descRow.appendChild(descCopyBtn);
+      div.appendChild(descRow);
+    }
 
     const link = document.createElement('a');
     link.href = `/api/jobs/${jobId}/clips/${c.file}`;

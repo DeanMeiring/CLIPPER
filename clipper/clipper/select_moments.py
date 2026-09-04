@@ -21,6 +21,7 @@ class ClipPick:
     title: str
     hook_caption: str
     upload_title: str
+    description: str
     reason: str
 
 
@@ -36,6 +37,7 @@ class WindowPick:
     title: str
     hook_caption: str
     upload_title: str
+    description: str
     reason: str
 
 
@@ -140,6 +142,7 @@ Respond with ONLY a JSON array, no other text, in this exact shape:
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
     "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters",
+    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
     "reason": "one sentence on why this moment works as a clip"
   }}
 ]
@@ -168,6 +171,7 @@ Transcript:
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
             upload_title=str(item.get("upload_title", "")).strip() or title,
+            description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
         ))
 
@@ -241,6 +245,7 @@ Respond with ONLY a JSON array, no other text, in this exact shape:
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
     "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters",
+    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
     "reason": "one sentence on why this moment works as a clip"
   }}
 ]
@@ -280,6 +285,7 @@ Candidate windows:
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
             upload_title=str(item.get("upload_title", "")).strip() or title,
+            description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
         ))
 

@@ -131,6 +131,7 @@ def main(argv=None) -> int:
             "title": pick.title,
             "hook_caption": pick.hook_caption,
             "upload_title": pick.upload_title,
+            "description": pick.description,
             "reason": pick.reason,
         })
 
