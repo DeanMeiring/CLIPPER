@@ -112,12 +112,19 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         "subtitleslangs": [lang],
         "subtitlesformat": "vtt",
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,
         "noplaylist": True,
     }
     cookiefile = _cookiefile()
     if cookiefile:
         ydl_opts["cookiefile"] = cookiefile
+        try:
+            n_lines = sum(1 for line in open(cookiefile) if line.strip() and not line.startswith("#"))
+        except OSError:
+            n_lines = -1
+        print(f"[clipper] cookiefile: {cookiefile} ({n_lines} cookie lines)", flush=True)
+    else:
+        print("[clipper] no cookiefile configured", flush=True)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source, download=True)
