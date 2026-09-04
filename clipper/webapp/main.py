@@ -317,36 +317,111 @@ INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>clipper</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 1.4rem; }
-  label { display: block; margin-top: 14px; font-size: 0.9rem; font-weight: 600; }
-  input, textarea { width: 100%; padding: 8px; margin-top: 4px; font-size: 1rem; box-sizing: border-box; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, textarea {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
   .row { display: flex; gap: 12px; }
   .row > div { flex: 1; }
-  button { margin-top: 18px; padding: 10px 18px; font-size: 1rem; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  #status { margin-top: 24px; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; }
-  #progress-wrap { display: none; margin-top: 12px; }
-  #progress-meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: #888; margin-bottom: 4px; }
-  #progress-track { background: #8883; border-radius: 8px; height: 14px; overflow: hidden; }
-  #progress-bar { background: #2e8b57; height: 100%; width: 0%; transition: width 0.6s ease; }
-  #cancel-btn { display: none; margin-top: 10px; background: #b33; color: #fff; border: none; border-radius: 6px; }
-  #cancel-btn:hover { background: #a22; }
-  .clip { margin-top: 10px; padding: 10px; border: 1px solid #8888; border-radius: 8px; }
-  .clip a { display: inline-block; margin-top: 6px; }
-  .title-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #status { margin-top: 22px; white-space: pre-wrap; font-family: ui-monospace, "SF Mono", monospace; font-size: 0.82rem; color: var(--muted); }
+  #progress-wrap { display: none; margin-top: 14px; }
+  #progress-meta { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); margin-bottom: 6px; }
+  #progress-track { background: var(--track); border-radius: 999px; height: 10px; overflow: hidden; }
+  #progress-bar { background: linear-gradient(90deg, var(--accent), var(--accent2)); height: 100%; width: 0%; border-radius: 999px; transition: width 0.6s ease; }
+  #cancel-btn { display: none; margin-top: 10px; margin-left: 10px; background: var(--danger); }
+  #cancel-btn:hover:not(:disabled) { background: var(--danger-hover); opacity: 1; }
+  .clip {
+    margin-top: 12px; padding: 14px 16px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .clip a { display: inline-block; margin-top: 8px; font-size: 0.88rem; color: var(--accent); text-decoration: none; font-weight: 600; }
+  .clip a:hover { text-decoration: underline; }
+  .clip strong { font-size: 0.98rem; }
+  .clip em { color: var(--muted); font-size: 0.88rem; display: block; margin-top: 4px; font-style: italic; }
+  .title-row { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
   .title-row input { flex: 1; margin-top: 0; font-weight: 600; }
-  .title-row button { margin-top: 0; padding: 6px 10px; font-size: 0.85rem; }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
-  .checkbox-row input { width: auto; margin-top: 0; }
-  .checkbox-row label { margin-top: 0; }
-  .hint { font-size: 0.8rem; color: #888; font-weight: 400; margin-top: 2px; }
+  .title-row button { margin-top: 0; padding: 8px 12px; font-size: 0.82rem; }
+  .checkbox-row { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+  .checkbox-row input { width: auto; margin-top: 0; accent-color: var(--accent); }
+  .checkbox-row label { margin-top: 0; text-transform: none; font-weight: 600; color: var(--text); font-size: 0.9rem; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 2px; text-transform: none; letter-spacing: normal; }
+  .actions { display: flex; align-items: center; gap: 0; }
 </style>
 </head>
 <body>
-<h1>clipper</h1>
-<p>Paste a YouTube URL, get back short vertical highlight clips picked by Claude.</p>
+<div class="page">
+<div class="card">
+
+<div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
+<p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
 
 <label>Video URL</label>
 <input id="source" placeholder="https://www.youtube.com/watch?v=...">
@@ -374,8 +449,10 @@ INDEX_HTML = """<!doctype html>
   <label for="whisper">Accurate captions (Whisper)<div class="hint">Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).</div></label>
 </div>
 
-<button id="submit">Generate clips</button>
-<button id="cancel-btn" type="button">Emergency stop</button>
+<div class="actions">
+  <button id="submit">Generate clips</button>
+  <button id="cancel-btn" type="button">Emergency stop</button>
+</div>
 
 <div id="status"></div>
 <div id="progress-wrap">
@@ -386,6 +463,9 @@ INDEX_HTML = """<!doctype html>
   <div id="progress-track"><div id="progress-bar"></div></div>
 </div>
 <div id="clips"></div>
+
+</div>
+</div>
 
 <script>
 const statusEl = document.getElementById('status');
