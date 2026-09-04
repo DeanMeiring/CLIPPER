@@ -829,13 +829,16 @@ async function loadJobsList() {
       badge.textContent = jobBadgeText(job);
       row.appendChild(badge);
 
-      if (jobBadgeClass(job) === 'running') {
+      const running = jobBadgeClass(job) === 'running';
+      const hasClips = (job.clips || []).length > 0;
+      if (running || hasClips) {
         const viewBtn = document.createElement('button');
         viewBtn.type = 'button';
-        viewBtn.textContent = 'View';
+        viewBtn.textContent = running ? 'View' : 'View clips';
         viewBtn.addEventListener('click', () => attachToJob(job.id));
         row.appendChild(viewBtn);
-      } else {
+      }
+      if (!running) {
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'job-delete';
@@ -858,12 +861,15 @@ loadJobsList();
 if (jobsTimer) clearInterval(jobsTimer);
 jobsTimer = setInterval(loadJobsList, 5000);
 
-function attachToJob(jobId) {
+async function attachToJob(jobId) {
   currentJobId = jobId;
-  setRunning(true);
   if (timer) clearInterval(timer);
-  timer = setInterval(() => poll(jobId), 2000);
+  const resp = await fetch(`/api/jobs/${jobId}`);
+  const stillRunning = resp.ok && !['done', 'error', 'cancelled'].includes((await resp.clone().json()).state);
+  setRunning(stillRunning);
+  if (stillRunning) timer = setInterval(() => poll(jobId), 2000);
   poll(jobId);
+  clipsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function setRunning(running) {
