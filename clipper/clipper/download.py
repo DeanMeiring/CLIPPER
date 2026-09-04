@@ -114,11 +114,6 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        # The "web" client is the one most often hit by YouTube's evolving
-        # anti-bot/consent changes (e.g. "The page needs to be reloaded").
-        # Android's extraction path is less brittle; fall back to web if it
-        # doesn't have what we need.
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
     cookiefile = _cookiefile()
     if cookiefile:
