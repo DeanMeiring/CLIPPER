@@ -106,7 +106,11 @@ def _estimate_normal_seconds(duration: float, whisper: bool, num_clips: int) -> 
 
 def _estimate_long_vod_seconds(num_candidates: int, num_clips: int) -> float:
     scan = 60.0
-    candidates = num_candidates * 25.0
+    # Measured from real Railway logs (job 7d6a980653fa): candidates 1-3 took
+    # 128s, 147s, and 124s end-to-end (download + transcribe), bottlenecked
+    # on Railway's outbound bandwidth (~1MiB/s on a ~110MiB window), not on
+    # whisper. The original 25s/candidate guess was off by more than 5x.
+    candidates = num_candidates * 135.0
     select = 20.0
     render = num_clips * 25.0
     return scan + candidates + select + render
