@@ -607,6 +607,8 @@ INDEX_HTML = """<!doctype html>
   .modal-actions button { margin-top: 0; width: 100%; }
   .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
   .modal-actions button.ghost:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+  #notify-test-btn { display: block; width: 100%; margin-top: 16px; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
+  #notify-test-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); opacity: 1; }
   .mood-btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); text-align: left; }
   .mood-btn:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
   .clip {
@@ -709,6 +711,8 @@ INDEX_HTML = """<!doctype html>
   <label style="margin-top:0">Active &amp; saved jobs</label>
   <div id="jobs-list"></div>
 </div>
+
+<button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
 
 </div>
 </div>
@@ -1106,6 +1110,20 @@ deleteBtn.addEventListener('click', async () => {
     deleteBtn.textContent = "🗑 I've downloaded these — delete from server";
   }
   deleteBtn.disabled = false;
+});
+
+const notifyTestBtn = document.getElementById('notify-test-btn');
+notifyTestBtn.addEventListener('click', async () => {
+  notifyTestBtn.disabled = true;
+  notifyTestBtn.textContent = 'Sending...';
+  const resp = await fetch('/api/notify-test', { method: 'POST' });
+  notifyTestBtn.textContent = resp.ok
+    ? '✅ Sent -- check Telegram'
+    : '❌ Failed -- check CLIPPER_BOT_API is set and message the bot first';
+  setTimeout(() => {
+    notifyTestBtn.textContent = '🔔 Test Telegram notification';
+    notifyTestBtn.disabled = false;
+  }, 3000);
 });
 </script>
 </body>
