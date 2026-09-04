@@ -5,9 +5,11 @@ at once.
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import secrets
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -28,6 +30,9 @@ from clipper.transcribe import get_transcript
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+JOB_META_NAME = "job.json"
+TERMINAL_STATES = ("done", "error", "cancelled")
 
 
 class JobCancelled(Exception):
@@ -75,11 +80,61 @@ class JobRequest(BaseModel):
     whisper: bool = True
 
 
+def _job_public(job: dict) -> dict:
+    return {k: v for k, v in job.items() if k != "request"}
+
+
+def _persist(job_id: str) -> None:
+    """Write job state to disk alongside its clips, so a job's status and
+    finished clips survive a container restart (Railway app-sleep, a
+    redeploy, a crash) -- previously everything lived only in the `jobs`
+    dict in RAM and was lost the moment the process restarted."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return
+        data = _job_public(job)
+    out_dir = BASE_DIR / job_id
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / JOB_META_NAME).write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass  # best-effort -- a disk hiccup here shouldn't take down the job
+
+
+def _load_persisted_jobs() -> None:
+    """Repopulate `jobs` from disk on startup. A job that wasn't in a
+    terminal state when the process died can't be resumed (the pipeline
+    has no checkpointing mid-stage), so it's marked as interrupted rather
+    than left to hang forever in the UI."""
+    if not BASE_DIR.exists():
+        return
+    for job_dir in BASE_DIR.iterdir():
+        meta_path = job_dir / JOB_META_NAME
+        if not job_dir.is_dir() or not meta_path.exists():
+            continue
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        job_id = data.get("id") or job_dir.name
+        if data.get("state") not in TERMINAL_STATES:
+            data["state"] = "error"
+            data["error"] = "Interrupted -- the server restarted before this job finished. Please re-submit."
+            data["message"] = "Interrupted by restart."
+        jobs[job_id] = data
+        try:
+            meta_path.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+
 def _set(job_id: str, **kwargs) -> None:
     with jobs_lock:
         job = jobs.get(job_id)
         if job is not None:
             job.update(kwargs)
+    _persist(job_id)
 
 
 def _progress(job_id: str, value: float) -> None:
@@ -244,6 +299,7 @@ def _worker() -> None:
             job_queue.task_done()
 
 
+_load_persisted_jobs()
 threading.Thread(target=_worker, daemon=True).start()
 
 
@@ -262,8 +318,26 @@ def create_job(req: JobRequest) -> dict:
             "request": req,
         }
         cancel_events[job_id] = threading.Event()
+    _persist(job_id)
     job_queue.put(job_id)
     return {"job_id": job_id}
+
+
+@protected.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    """Remove a finished job's clips and metadata from the volume -- the
+    "I've downloaded these" button in the UI. Refuses a job that's still
+    running so a click doesn't yank files out from under an active render."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- stop it first")
+        jobs.pop(job_id, None)
+        cancel_events.pop(job_id, None)
+    shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+    return {"ok": True}
 
 
 @protected.get("/api/jobs/{job_id}")
@@ -398,6 +472,8 @@ INDEX_HTML = """<!doctype html>
   #progress-bar { background: linear-gradient(90deg, var(--accent), var(--accent2)); height: 100%; width: 0%; border-radius: 999px; transition: width 0.6s ease; }
   #cancel-btn { display: none; margin-top: 10px; margin-left: 10px; background: var(--danger); }
   #cancel-btn:hover:not(:disabled) { background: var(--danger-hover); opacity: 1; }
+  #delete-btn { display: none; margin-top: 16px; width: 100%; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
+  #delete-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
   .clip {
     margin-top: 12px; padding: 14px 16px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
@@ -463,6 +539,7 @@ INDEX_HTML = """<!doctype html>
   <div id="progress-track"><div id="progress-bar"></div></div>
 </div>
 <div id="clips"></div>
+<button id="delete-btn" type="button">🗑 I've downloaded these — delete from server</button>
 
 </div>
 </div>
@@ -470,6 +547,7 @@ INDEX_HTML = """<!doctype html>
 <script>
 const statusEl = document.getElementById('status');
 const clipsEl = document.getElementById('clips');
+const deleteBtn = document.getElementById('delete-btn');
 const submitBtn = document.getElementById('submit');
 const cancelBtn = document.getElementById('cancel-btn');
 const progressWrap = document.getElementById('progress-wrap');
@@ -596,8 +674,28 @@ async function poll(jobId) {
     setRunning(false);
     cancelBtn.disabled = false;
     cancelBtn.textContent = 'Emergency stop';
+    deleteBtn.style.display = (job.clips || []).length ? 'block' : 'none';
+  } else {
+    deleteBtn.style.display = 'none';
   }
 }
+
+deleteBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if (!confirm('Delete these clips from the server? This can\\'t be undone.')) return;
+  deleteBtn.disabled = true;
+  deleteBtn.textContent = 'Deleting...';
+  const resp = await fetch(`/api/jobs/${currentJobId}`, { method: 'DELETE' });
+  if (resp.ok) {
+    clipsEl.innerHTML = '';
+    statusEl.textContent = 'Deleted.';
+    deleteBtn.style.display = 'none';
+    currentJobId = null;
+  } else {
+    deleteBtn.textContent = "🗑 I've downloaded these — delete from server";
+  }
+  deleteBtn.disabled = false;
+});
 </script>
 </body>
 </html>
