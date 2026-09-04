@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+_test/out/
+_test/test_source.mp4
+clips/
