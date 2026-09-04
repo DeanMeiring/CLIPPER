@@ -90,7 +90,7 @@ def _run_job(job_id: str) -> None:
     picks = select_clips(
         words, dl.duration,
         n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
-        focus=req.focus,
+        focus=req.focus, source_title=dl.title,
     )
     if not picks:
         _set(job_id, state="error", error="Model returned no usable picks.")
@@ -112,6 +112,7 @@ def _run_job(job_id: str) -> None:
             "duration": round(pick.end - pick.start, 2),
             "title": pick.title,
             "hook_caption": pick.hook_caption,
+            "upload_title": pick.upload_title,
             "reason": pick.reason,
         })
         _set(job_id, clips=list(clips_meta))
@@ -197,6 +198,9 @@ INDEX_HTML = """<!doctype html>
   #status { margin-top: 24px; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; }
   .clip { margin-top: 10px; padding: 10px; border: 1px solid #8888; border-radius: 8px; }
   .clip a { display: inline-block; margin-top: 6px; }
+  .title-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+  .title-row input { flex: 1; margin-top: 0; font-weight: 600; }
+  .title-row button { margin-top: 0; padding: 6px 10px; font-size: 0.85rem; }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
   .checkbox-row input { width: auto; margin-top: 0; }
   .checkbox-row label { margin-top: 0; }
@@ -280,9 +284,44 @@ async function poll(jobId) {
   (job.clips || []).forEach(c => {
     const div = document.createElement('div');
     div.className = 'clip';
-    div.innerHTML = `<strong>${c.title}</strong> (${c.duration}s)<br>` +
-      `<em>${c.hook_caption || ''}</em><br>` +
-      `<a href="/api/jobs/${jobId}/clips/${c.file}" download>Download ${c.file}</a>`;
+
+    const heading = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = c.title;
+    heading.appendChild(strong);
+    heading.appendChild(document.createTextNode(` (${c.duration}s)`));
+    div.appendChild(heading);
+
+    if (c.hook_caption) {
+      const em = document.createElement('em');
+      em.textContent = c.hook_caption;
+      div.appendChild(em);
+    }
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'title-row';
+    const titleInput = document.createElement('input');
+    titleInput.readOnly = true;
+    titleInput.value = c.upload_title || c.title;
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.textContent = 'Copy title';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(titleInput.value).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy title'; }, 1500);
+      });
+    });
+    titleRow.appendChild(titleInput);
+    titleRow.appendChild(copyBtn);
+    div.appendChild(titleRow);
+
+    const link = document.createElement('a');
+    link.href = `/api/jobs/${jobId}/clips/${c.file}`;
+    link.setAttribute('download', '');
+    link.textContent = `Download ${c.file}`;
+    div.appendChild(link);
+
     clipsEl.appendChild(div);
   });
 

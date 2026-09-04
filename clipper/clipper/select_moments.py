@@ -20,6 +20,7 @@ class ClipPick:
     end: float
     title: str
     hook_caption: str
+    upload_title: str
     reason: str
 
 
@@ -63,6 +64,7 @@ def select_clips(
     focus: Optional[str] = None,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
+    source_title: Optional[str] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
     try:
@@ -81,6 +83,7 @@ def select_clips(
 
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
+    source_line = f"\nSource video title: {source_title}\n" if source_title else ""
 
     prompt = f"""You are picking highlight clips from a video transcript for short-form
 content (YouTube Shorts / TikTok / Reels). The transcript below has [mm:ss]
@@ -88,7 +91,7 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{focus_line}
+{source_line}{focus_line}
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
 - work as a standalone moment (a hook, a punchline, a strong claim, a story
@@ -103,6 +106,7 @@ Respond with ONLY a JSON array, no other text, in this exact shape:
     "end": 58.0,
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters",
     "reason": "one sentence on why this moment works as a clip"
   }}
 ]
@@ -138,11 +142,13 @@ Transcript:
             continue
         if end - start > max_len * 1.2:
             end = start + max_len
+        title = str(item.get("title", "")).strip() or "Untitled clip"
         picks.append(ClipPick(
             start=round(start, 2),
             end=round(end, 2),
-            title=str(item.get("title", "")).strip() or "Untitled clip",
+            title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
+            upload_title=str(item.get("upload_title", "")).strip() or title,
             reason=str(item.get("reason", "")).strip(),
         ))
 
