@@ -29,6 +29,7 @@ from clipper.render import render_clip
 from clipper.select_moments import select_clips
 from clipper.transcribe import get_transcript
 from clipper.trending import get_trending_sections
+from clipper.notify import send_telegram
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -312,6 +313,23 @@ def _keepalive_loop(stop_event: threading.Event) -> None:
             pass
 
 
+def _notify_job_finished(job_id: str) -> None:
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return
+    label = job.get("source_title") or job.get("source_url") or job_id
+    state = job.get("state")
+    if state == "done":
+        n = len(job.get("clips") or [])
+        text = f'✅ Clipper done: "{label}" -- {n} clip(s) ready.'
+    elif state == "cancelled":
+        text = f'⏹ Clipper stopped: "{label}".'
+    else:
+        text = f'❌ Clipper failed: "{label}" -- {job.get("error") or "unknown error"}'
+    send_telegram(text)
+
+
 def _worker() -> None:
     while True:
         job_id = job_queue.get()
@@ -326,6 +344,7 @@ def _worker() -> None:
         finally:
             stop_keepalive.set()
             cancel_events.pop(job_id, None)
+            _notify_job_finished(job_id)
             job_queue.task_done()
 
 
