@@ -266,17 +266,24 @@ def _existing_clip_windows(
     return windows
 
 
-def _merge_overlapping(windows: List[CandidateWindow]) -> List[CandidateWindow]:
+def _merge_overlapping(windows: List[CandidateWindow], max_span: float = 180.0) -> List[CandidateWindow]:
+    """Merge overlapping windows, but never let a merged window exceed
+    max_span. Without this cap, a densely-clipped stretch of a popular VOD
+    (many viewer clips a few seconds apart) chain-merges into one enormous
+    window -- the exact thing this whole pipeline exists to avoid
+    downloading/transcribing. A capped merge splits a dense cluster into
+    several bounded windows instead."""
     if not windows:
         return []
     windows = sorted(windows, key=lambda w: w.start)
     merged = [windows[0]]
     for w in windows[1:]:
         last = merged[-1]
-        if w.start <= last.end:
+        candidate_end = max(last.end, w.end)
+        if w.start <= last.end and (candidate_end - last.start) <= max_span:
             merged[-1] = CandidateWindow(
                 start=last.start,
-                end=max(last.end, w.end),
+                end=candidate_end,
                 score=max(last.score, w.score) + min(last.score, w.score) * 0.25,
                 source=last.source if last.source == w.source else f"{last.source}+{w.source}",
                 detail=last.detail if last.score >= w.score else w.detail,
