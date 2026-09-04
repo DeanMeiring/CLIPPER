@@ -287,9 +287,35 @@ def _run_job(job_id: str) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
+def _keepalive_loop(stop_event: threading.Event) -> None:
+    """Railway's sleepApplication only watches HTTP traffic to the service
+    -- a background job running with nobody polling looks idle to it even
+    while it's actively downloading/transcoding, so the container gets
+    slept mid-job. Pinging our own public healthz endpoint counts as real
+    activity (confirmed by Railway's own docs: "outbound polling ... will
+    keep the service awake"), so this keeps the container up for exactly
+    as long as a job is in flight -- no manual toggle, no redeploy (which
+    a sleepApplication config change would require anyway, killing the
+    very job it's meant to protect). Idle again within ~10 minutes of the
+    last job finishing, same as if this never ran."""
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        return
+    import requests
+
+    url = f"https://{domain}/healthz"
+    while not stop_event.wait(240):  # well under Railway's ~10min idle window
+        try:
+            requests.get(url, timeout=10)
+        except Exception:
+            pass
+
+
 def _worker() -> None:
     while True:
         job_id = job_queue.get()
+        stop_keepalive = threading.Event()
+        threading.Thread(target=_keepalive_loop, args=(stop_keepalive,), daemon=True).start()
         try:
             _run_job(job_id)
         except JobCancelled:
@@ -297,6 +323,7 @@ def _worker() -> None:
         except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
             _set(job_id, state="error", error=str(e))
         finally:
+            stop_keepalive.set()
             cancel_events.pop(job_id, None)
             job_queue.task_done()
 
@@ -611,6 +638,9 @@ const progressBar = document.getElementById('progress-bar');
 const progressPct = document.getElementById('progress-pct');
 const progressEta = document.getElementById('progress-eta');
 const TRENDING_SECTIONS = ['youtube_channels', 'twitch_vods', 'trending_live'];
+let timer = null;
+let currentJobId = null;
+let jobStartedAt = null;
 
 function formatViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
