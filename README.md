@@ -1,5 +1,8 @@
 # clipper
 
+Also deployable as a small web app (`webapp/`) — see [Web app (Railway)](#web-app-railway)
+below for a browser UI on top of the same pipeline.
+
 Turn a long video (YouTube link or a local file) into a batch of short,
 vertical (9:16), captioned highlight clips — the kind of tool Opus Clip /
 Vizard / Klap sell as a subscription, except this one runs on your own
@@ -135,3 +138,23 @@ clipper/
 Each module works standalone too, if you ever want to script around just
 one piece of it (e.g. use `reframe.py` on its own to auto-crop existing
 clips you already made elsewhere).
+
+## Web app (Railway)
+
+`webapp/main.py` is a small FastAPI wrapper around the same pipeline: paste
+a video URL in the browser, it downloads/transcribes/picks/renders in the
+background, and you download the resulting clips from the page. One job
+runs at a time.
+
+Deploy: push this repo to Railway (the included `Dockerfile` installs
+ffmpeg and the Python deps), set `ANTHROPIC_API_KEY` as a service
+variable, and generate a domain. Enable "sleep on idle" in the Railway
+service settings if you want it to spin down between uses and wake on the
+next visit.
+
+Runs locally too:
+
+```
+pip install -r requirements.txt
+uvicorn webapp.main:app --reload
+```
