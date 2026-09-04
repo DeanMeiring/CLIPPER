@@ -28,7 +28,7 @@ from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
 from clipper.transcribe import get_transcript
-from clipper.trending import get_trending_creators
+from clipper.trending import get_trending_sections
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -373,25 +373,30 @@ def get_clip(job_id: str, filename: str) -> FileResponse:
     return FileResponse(path, media_type="video/mp4", filename=filename)
 
 
-_trending_cache: dict = {"at": 0.0, "entries": []}
+_trending_cache: dict = {"at": 0.0, "sections": {}}
 _TRENDING_CACHE_SECONDS = 180.0
 
 
 @protected.get("/api/trending")
 def trending() -> dict:
-    """Latest live stream / VOD / upload per configured creator (see
-    clipper/trending.py) -- cached briefly so refreshing the page doesn't
-    re-hit the Twitch/YouTube APIs (and YouTube's daily quota) every time."""
+    """Three rows for the UI: configured creators' latest YouTube upload,
+    configured creators' latest Twitch VOD, and Twitch's biggest live
+    streams globally (see clipper/trending.py). Cached briefly so
+    refreshing the page doesn't re-hit the Twitch/YouTube APIs (and
+    YouTube's daily quota) every time."""
     now = time.time()
     if now - _trending_cache["at"] > _TRENDING_CACHE_SECONDS:
         try:
-            entries = get_trending_creators()
+            sections = get_trending_sections()
         except Exception as e:
             print(f"[trending] lookup failed: {e}", flush=True)
-            entries = _trending_cache["entries"]
-        _trending_cache["entries"] = entries
+            sections = _trending_cache["sections"]
+        _trending_cache["sections"] = sections
         _trending_cache["at"] = now
-    return {"creators": [vars(e) for e in _trending_cache["entries"]]}
+    return {
+        name: [vars(e) for e in entries]
+        for name, entries in _trending_cache["sections"].items()
+    }
 
 
 @app.get("/healthz")
@@ -512,8 +517,9 @@ INDEX_HTML = """<!doctype html>
   .checkbox-row input { width: auto; margin-top: 0; accent-color: var(--accent); }
   .checkbox-row label { margin-top: 0; text-transform: none; font-weight: 600; color: var(--text); font-size: 0.9rem; }
   .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 2px; text-transform: none; letter-spacing: normal; }
-  #trending-wrap { display: none; margin-bottom: 18px; }
-  #trending-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+  #trending-wrap { margin-bottom: 4px; }
+  .trending-section { margin-bottom: 16px; }
+  .trending-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
   .creator-card {
     flex: 0 0 auto; width: 128px; cursor: pointer;
     background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
@@ -535,8 +541,18 @@ INDEX_HTML = """<!doctype html>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
 
 <div id="trending-wrap">
-  <label style="margin-top:0">Trending now</label>
-  <div id="trending-row"></div>
+  <div class="trending-section" id="section-youtube_channels" style="display:none">
+    <label style="margin-top:0">Latest uploads — YouTube</label>
+    <div class="trending-row"></div>
+  </div>
+  <div class="trending-section" id="section-twitch_vods" style="display:none">
+    <label>Latest VODs — Twitch</label>
+    <div class="trending-row"></div>
+  </div>
+  <div class="trending-section" id="section-trending_live" style="display:none">
+    <label>Trending live now — Twitch (100k+ viewers)</label>
+    <div class="trending-row"></div>
+  </div>
 </div>
 
 <label>Video URL</label>
@@ -594,52 +610,60 @@ const progressWrap = document.getElementById('progress-wrap');
 const progressBar = document.getElementById('progress-bar');
 const progressPct = document.getElementById('progress-pct');
 const progressEta = document.getElementById('progress-eta');
-const trendingWrap = document.getElementById('trending-wrap');
-const trendingRow = document.getElementById('trending-row');
-let timer = null;
-let currentJobId = null;
-let jobStartedAt = null;
+const TRENDING_SECTIONS = ['youtube_channels', 'twitch_vods', 'trending_live'];
+
+function formatViewers(n) {
+  if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
+  return String(n);
+}
+
+function buildCreatorCard(c) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'creator-card';
+
+  const img = document.createElement('img');
+  if (c.thumbnail) img.src = c.thumbnail;
+  card.appendChild(img);
+
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = c.name;
+  card.appendChild(name);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = c.title || '';
+  card.appendChild(meta);
+
+  if (c.live) {
+    const badge = document.createElement('span');
+    badge.className = 'live-badge';
+    badge.textContent = c.viewers ? `LIVE · ${formatViewers(c.viewers)} viewers` : 'LIVE';
+    card.appendChild(badge);
+  }
+
+  card.addEventListener('click', () => {
+    document.getElementById('source').value = c.url;
+    document.getElementById('source').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  return card;
+}
 
 async function loadTrending() {
   try {
     const resp = await fetch('/api/trending');
     if (!resp.ok) return;
-    const { creators } = await resp.json();
-    if (!creators || !creators.length) return;
-    trendingRow.innerHTML = '';
-    creators.forEach(c => {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'creator-card';
-
-      const img = document.createElement('img');
-      if (c.thumbnail) img.src = c.thumbnail;
-      card.appendChild(img);
-
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = c.name;
-      card.appendChild(name);
-
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.textContent = c.title || '';
-      card.appendChild(meta);
-
-      if (c.live) {
-        const badge = document.createElement('span');
-        badge.className = 'live-badge';
-        badge.textContent = 'LIVE';
-        card.appendChild(badge);
-      }
-
-      card.addEventListener('click', () => {
-        document.getElementById('source').value = c.url;
-        document.getElementById('source').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
-      trendingRow.appendChild(card);
+    const sections = await resp.json();
+    TRENDING_SECTIONS.forEach(key => {
+      const entries = sections[key] || [];
+      const sectionEl = document.getElementById(`section-${key}`);
+      if (!sectionEl) return;
+      const row = sectionEl.querySelector('.trending-row');
+      row.innerHTML = '';
+      entries.forEach(c => row.appendChild(buildCreatorCard(c)));
+      sectionEl.style.display = entries.length ? 'block' : 'none';
     });
-    trendingWrap.style.display = 'block';
   } catch (e) {
     // trending is a nice-to-have -- never block the rest of the page on it
   }
