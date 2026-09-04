@@ -448,11 +448,12 @@ _TRENDING_CACHE_SECONDS = 180.0
 
 @protected.get("/api/trending")
 def trending() -> dict:
-    """Three rows for the UI: configured creators' latest YouTube upload,
-    configured creators' latest Twitch VOD, and Twitch's biggest live
-    streams globally (see clipper/trending.py). Cached briefly so
-    refreshing the page doesn't re-hit the Twitch/YouTube APIs (and
-    YouTube's daily quota) every time."""
+    """Four rows for the UI: configured creators' latest YouTube upload,
+    configured creators' latest Twitch VOD, Twitch's biggest live streams
+    globally, and popular Twitch creators not already on the watchlist
+    (see clipper/trending.py). Cached briefly so refreshing the page
+    doesn't re-hit the Twitch/YouTube APIs (and YouTube's daily quota)
+    every time."""
     now = time.time()
     if now - _trending_cache["at"] > _TRENDING_CACHE_SECONDS:
         try:
@@ -663,6 +664,10 @@ INDEX_HTML = """<!doctype html>
     <label>Trending live now — Twitch (100k+ viewers)</label>
     <div class="trending-row"></div>
   </div>
+  <div class="trending-section" id="section-suggested_creators" style="display:none">
+    <label>Suggested creators — Twitch (popular, not on your watchlist)</label>
+    <div class="trending-row"></div>
+  </div>
 </div>
 
 <label>Video URL</label>
@@ -753,7 +758,7 @@ const progressWrap = document.getElementById('progress-wrap');
 const progressBar = document.getElementById('progress-bar');
 const progressPct = document.getElementById('progress-pct');
 const progressEta = document.getElementById('progress-eta');
-const TRENDING_SECTIONS = ['youtube_channels', 'twitch_vods', 'trending_live'];
+const TRENDING_SECTIONS = ['youtube_channels', 'twitch_vods', 'trending_live', 'suggested_creators'];
 const jobsListEl = document.getElementById('jobs-list');
 const stopModal = document.getElementById('stop-modal-overlay');
 let timer = null;
