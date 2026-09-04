@@ -157,6 +157,14 @@ setting an `APP_PASSWORD` variable — every route except `/healthz` then
 requires HTTP Basic auth (any username, that password) before it'll run.
 Leave `APP_PASSWORD` unset for local dev to skip auth entirely.
 
+**YouTube downloads from a cloud IP** — Railway's IPs (like most datacenter
+IPs) regularly hit YouTube's "sign in to confirm you're not a bot" wall,
+which only real session cookies get past. If you hit that, export cookies
+from a logged-in browser (e.g. the "Get cookies.txt LOCALLY" extension) and
+set the file's contents as the `YTDLP_COOKIES` variable — it's written to
+a temp file and passed to yt-dlp automatically. (Or point `YTDLP_COOKIES_FILE`
+at a path already on disk, e.g. a mounted volume.)
+
 Runs locally too:
 
 ```
