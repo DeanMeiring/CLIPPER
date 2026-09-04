@@ -205,6 +205,9 @@ def _existing_clip_windows(
         user_resp.raise_for_status()
         user_data = user_resp.json().get("data") or []
         if not user_data:
+            print(f"[highlights] Twitch user lookup for login={broadcaster_login!r} returned no results "
+                  f"-- likely not the account's real Twitch login (a display name with different casing/"
+                  f"spacing won't match)", flush=True)
             return []
         broadcaster_id = user_data[0]["id"]
 
@@ -226,6 +229,8 @@ def _existing_clip_windows(
         return []
 
     vod_clips = [c for c in clips if c.get("video_id") == str(vod_id) and c.get("vod_offset") is not None]
+    print(f"[highlights] Twitch clips: {len(clips)} total for broadcaster_id={broadcaster_id}, "
+          f"{len(vod_clips)} matched vod_id={vod_id}", flush=True)
     if not vod_clips:
         return []
 
@@ -282,7 +287,11 @@ def find_candidate_windows(
         print("[highlights] no chat messages found (chat disabled, or fetch failed) -- relying on other signals", flush=True)
 
     if broadcaster_login and vod_id:
+        print(f"[highlights] checking Twitch clips for broadcaster_login={broadcaster_login!r} vod_id={vod_id!r}", flush=True)
         windows.extend(_existing_clip_windows(broadcaster_login, vod_id))
+    else:
+        print(f"[highlights] skipping Twitch clips lookup (broadcaster_login={broadcaster_login!r}, "
+              f"vod_id={vod_id!r}, TWITCH_CLIENT_ID set={bool(os.environ.get('TWITCH_CLIENT_ID'))})", flush=True)
 
     windows = _merge_overlapping(windows)
     windows.sort(key=lambda w: w.score, reverse=True)
