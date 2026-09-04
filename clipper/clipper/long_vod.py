@@ -39,15 +39,23 @@ def gather_candidates(
     raw_dir: Path,
     max_windows: int = 20,
     on_progress: Optional[Callable[[str], None]] = None,
+    on_candidate_progress: Optional[Callable[[int, int], None]] = None,
+    should_cancel: Optional[Callable[[], None]] = None,
 ) -> List[dict]:
     """Find, download, and transcribe candidate windows. Returns a list of
     dicts ready for select_from_candidate_windows, each also carrying its
-    downloaded video_path for the render step."""
+    downloaded video_path for the render step.
+
+    `should_cancel`, if given, is called at each cancellable point and is
+    expected to raise if the caller wants to abort the job."""
 
     def report(msg: str) -> None:
         if on_progress:
             on_progress(msg)
         print(f"[long_vod] {msg}", flush=True)
+
+    if should_cancel:
+        should_cancel()
 
     report("Scanning chat activity for highlight moments...")
     windows = find_candidate_windows(
@@ -62,7 +70,11 @@ def gather_candidates(
 
     candidates = []
     for i, w in enumerate(windows):
+        if should_cancel:
+            should_cancel()
         report(f"Candidate {i + 1}/{len(windows)}: {w.start:.0f}s-{w.end:.0f}s ({w.detail})")
+        if on_candidate_progress:
+            on_candidate_progress(i, len(windows))
         try:
             video_path = download_range(source, raw_dir, w.start, w.end, out_name=f"cand_{i:03d}")
         except Exception as e:
