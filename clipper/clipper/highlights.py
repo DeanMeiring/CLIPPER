@@ -60,9 +60,10 @@ def _fetch_chat_messages(video_url: str, timeout_seconds: float = 300.0) -> List
 
     import threading
     import time
+    import traceback
 
     messages: List[dict] = []
-    error: List[Exception] = []
+    error_info: List[str] = []
     deadline = time.monotonic() + timeout_seconds
 
     def _run():
@@ -72,8 +73,8 @@ def _fetch_chat_messages(video_url: str, timeout_seconds: float = 300.0) -> List
                 messages.append(msg)
                 if time.monotonic() > deadline:
                     break
-        except Exception as e:  # chat disabled, VOD deleted, library hiccup, etc.
-            error.append(e)
+        except Exception:  # chat disabled, VOD deleted, library hiccup, etc.
+            error_info.append(traceback.format_exc())
 
     # A daemon thread: if the fetch truly hangs (e.g. a library edge case
     # treating the VOD as still live), .join()'s timeout below still
@@ -87,8 +88,8 @@ def _fetch_chat_messages(video_url: str, timeout_seconds: float = 300.0) -> List
     if thread.is_alive():
         print(f"[highlights] chat fetch hit the {timeout_seconds:.0f}s timeout "
               f"with {len(messages)} messages collected so far; continuing with those", flush=True)
-    elif error:
-        print(f"[highlights] chat replay fetch failed for {video_url}: {error[0]}", flush=True)
+    elif error_info:
+        print(f"[highlights] chat replay fetch failed for {video_url}:\n{error_info[0]}", flush=True)
 
     return messages
 
