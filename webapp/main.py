@@ -473,6 +473,16 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+@protected.post("/api/notify-test")
+def notify_test() -> dict:
+    """Send a one-off Telegram test message -- verify the bot token/chat
+    setup works without waiting for a real job to finish."""
+    ok = send_telegram("\U0001F914 Test message from clipper -- if you got this, notifications are working.")
+    if not ok:
+        raise HTTPException(503, "Could not send -- check CLIPPER_BOT_API is set and you've messaged the bot at least once")
+    return {"ok": True}
+
+
 @protected.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
