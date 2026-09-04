@@ -565,11 +565,11 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open { display: flex; }
   .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
@@ -577,6 +577,8 @@ INDEX_HTML = """<!doctype html>
   .modal-actions button { margin-top: 0; width: 100%; }
   .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
   .modal-actions button.ghost:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+  .mood-btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); text-align: left; }
+  .mood-btn:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
   .clip {
     margin-top: 12px; padding: 14px 16px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
@@ -688,6 +690,20 @@ INDEX_HTML = """<!doctype html>
       <button id="stop-save-btn" type="button">Save progress</button>
       <button id="stop-yes-btn" type="button" class="danger">Yes, stop &amp; delete</button>
       <button id="stop-no-btn" type="button" class="ghost">No, continue</button>
+    </div>
+  </div>
+</div>
+
+<div id="mood-modal-overlay">
+  <div class="modal">
+    <p>What mood are you looking for?</p>
+    <p class="hint">This becomes the instruction Claude uses when picking clips -- pick one, or skip to let it judge freely.</p>
+    <div class="modal-actions">
+      <button type="button" class="mood-btn" data-mood="the funniest moments -- genuine comedy, banter, or jokes that land">😂 Funny</button>
+      <button type="button" class="mood-btn" data-mood="insane clutch plays -- high-pressure moments where they pull off something incredible at the last second">🔥 Insane clutch</button>
+      <button type="button" class="mood-btn" data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;">🤯 Crazy moment</button>
+      <button type="button" class="mood-btn" data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh">💀 Dark humor</button>
+      <button id="mood-skip-btn" type="button" class="ghost">Skip -- no preference</button>
     </div>
   </div>
 </div>
@@ -856,7 +872,7 @@ function setRunning(running) {
   progressWrap.style.display = running ? 'block' : 'none';
 }
 
-document.getElementById('submit').addEventListener('click', async () => {
+async function submitJob() {
   clipsEl.innerHTML = '';
   statusEl.textContent = 'Submitting...';
   setRunning(true);
@@ -888,6 +904,29 @@ document.getElementById('submit').addEventListener('click', async () => {
   timer = setInterval(() => poll(job_id), 2000);
   poll(job_id);
   loadJobsList();
+}
+
+const moodModal = document.getElementById('mood-modal-overlay');
+
+document.getElementById('submit').addEventListener('click', () => {
+  if (!document.getElementById('focus').value.trim()) {
+    moodModal.classList.add('open');
+    return;
+  }
+  submitJob();
+});
+
+document.querySelectorAll('.mood-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('focus').value = btn.dataset.mood;
+    moodModal.classList.remove('open');
+    submitJob();
+  });
+});
+
+document.getElementById('mood-skip-btn').addEventListener('click', () => {
+  moodModal.classList.remove('open');
+  submitJob();
 });
 
 cancelBtn.addEventListener('click', () => {
