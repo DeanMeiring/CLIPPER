@@ -104,11 +104,20 @@ def probe_video(source: str) -> VideoInfo:
     with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
         info = ydl.extract_info(source, download=False)
 
+    extractor = (info.get("extractor_key") or info.get("extractor") or "").lower()
+    video_id = str(info.get("id", ""))
+    if "twitch" in extractor and video_id.startswith("v") and video_id[1:].isdigit():
+        # yt-dlp prefixes Twitch VOD ids with "v" as its own internal
+        # convention; Twitch's actual API (e.g. a clip's video_id field)
+        # uses the bare numeric id, so anything comparing against Twitch's
+        # own data needs this stripped.
+        video_id = video_id[1:]
+
     return VideoInfo(
-        id=str(info.get("id", "")),
+        id=video_id,
         duration=float(info.get("duration") or 0.0),
         title=info.get("title", ""),
-        extractor=(info.get("extractor_key") or info.get("extractor") or "").lower(),
+        extractor=extractor,
         broadcaster_login=info.get("uploader_id") or info.get("uploader") or None,
     )
 
