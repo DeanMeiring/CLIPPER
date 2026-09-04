@@ -41,7 +41,35 @@ class WindowPick:
     reason: str
 
 
-def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 2000) -> list:
+def _salvage_json_array(raw: str) -> Optional[list]:
+    """Best-effort recovery when the model's JSON array doesn't parse
+    outright -- most often the response got cut off mid-object (hit
+    max_tokens partway through a long `description` field) or one field
+    has a stray unescaped character. Walks the array decoding one
+    complete object at a time and keeps whatever parsed cleanly before
+    the break, so one bad/truncated pick doesn't throw away the whole
+    batch of candidates."""
+    if not raw.startswith("["):
+        return None
+    decoder = json.JSONDecoder()
+    items: list = []
+    idx = 1  # past the leading '['
+    n = len(raw)
+    while idx < n:
+        while idx < n and raw[idx] in " \t\n\r,":
+            idx += 1
+        if idx >= n or raw[idx] == "]":
+            break
+        try:
+            obj, end = decoder.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            break
+        items.append(obj)
+        idx = end
+    return items or None
+
+
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 4096) -> list:
     try:
         import anthropic
     except ImportError as e:
@@ -62,6 +90,8 @@ def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_to
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
+    if resp.stop_reason == "max_tokens":
+        print("[select_moments] response hit max_tokens -- may be truncated", flush=True)
     raw = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
     raw = raw.strip()
     raw = re.sub(r"^```(json)?", "", raw).strip()
@@ -70,6 +100,13 @@ def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_to
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
+        salvaged = _salvage_json_array(raw)
+        if salvaged:
+            print(
+                f"[select_moments] JSON parse failed, salvaged {len(salvaged)} "
+                f"complete pick(s) out of the response: {e}", flush=True,
+            )
+            return salvaged
         raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
 
 
@@ -134,7 +171,8 @@ Pick up to {n_clips} clips. Each clip must:
 - not overlap with any other clip you pick
 - start right at (or just before) the moment that hooks attention, not mid-thought
 
-Respond with ONLY a JSON array, no other text, in this exact shape:
+Respond with ONLY a JSON array, no other text, in this exact shape (escape any
+double-quote characters that appear inside a string value, e.g. \" ):
 [
   {{
     "start": 12.5,
@@ -236,7 +274,8 @@ trim it tighter around the actual moment. Each clip must:
 - work as a standalone moment, not a random mid-sentence cut
 - start right at (or just before) the moment that hooks attention
 
-Respond with ONLY a JSON array, no other text, in this exact shape:
+Respond with ONLY a JSON array, no other text, in this exact shape (escape any
+double-quote characters that appear inside a string value, e.g. \" ):
 [
   {{
     "window_index": 3,
