@@ -152,6 +152,11 @@ variable, and generate a domain. Enable "sleep on idle" in the Railway
 service settings if you want it to spin down between uses and wake on the
 next visit.
 
+**Password-protect it** (recommended for a public Railway domain) by
+setting an `APP_PASSWORD` variable — every route except `/healthz` then
+requires HTTP Basic auth (any username, that password) before it'll run.
+Leave `APP_PASSWORD` unset for local dev to skip auth entirely.
+
 Runs locally too:
 
 ```
