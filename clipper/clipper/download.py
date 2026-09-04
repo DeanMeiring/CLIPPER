@@ -1,13 +1,43 @@
 """Fetch a source video (YouTube URL or local file) plus captions if available."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+_cookiefile_cache: Optional[str] = None
+
+
+def _cookiefile() -> Optional[str]:
+    """Path to a Netscape-format cookies.txt for yt-dlp, or None.
+
+    Cloud IPs (Railway included) regularly get YouTube's "sign in to
+    confirm you're not a bot" wall, which only real session cookies get
+    past. Set YTDLP_COOKIES_FILE to a path already on disk (e.g. a mounted
+    volume), or YTDLP_COOKIES to the raw file contents (exported from a
+    logged-in browser via an extension like "Get cookies.txt LOCALLY") and
+    it's written to a temp file once and reused.
+    """
+    global _cookiefile_cache
+    direct = os.environ.get("YTDLP_COOKIES_FILE")
+    if direct:
+        return direct
+    if _cookiefile_cache:
+        return _cookiefile_cache
+    raw = os.environ.get("YTDLP_COOKIES")
+    if not raw:
+        return None
+    fd, path = tempfile.mkstemp(prefix="yt_cookies_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(raw)
+    _cookiefile_cache = path
+    return path
 
 
 @dataclass
@@ -58,6 +88,9 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         "no_warnings": True,
         "noplaylist": True,
     }
+    cookiefile = _cookiefile()
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source, download=True)
