@@ -15,6 +15,7 @@ chat and streams where the community clips more than it types.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import statistics
@@ -178,6 +179,8 @@ def _chat_spike_windows(
 def _existing_clip_windows(
     broadcaster_login: str,
     vod_id: str,
+    created_at: Optional[float] = None,
+    duration: Optional[float] = None,
     pad_before: float = 20.0,
     pad_after: float = 40.0,
 ) -> List[CandidateWindow]:
@@ -211,10 +214,23 @@ def _existing_clip_windows(
             return []
         broadcaster_id = user_data[0]["id"]
 
+        clip_params: dict = {"broadcaster_id": broadcaster_id, "first": 100}
+        if created_at is not None:
+            # Without a time window, /helix/clips paginates a popular
+            # streamer's ENTIRE clip history -- an old VOD's clips can sit
+            # far past any reasonable page cap. Narrow to the broadcast's
+            # own window (generous slack for timestamp imprecision) so we
+            # actually reach the clips that matter.
+            slack = 7200.0
+            start_dt = datetime.datetime.fromtimestamp(created_at - slack, tz=datetime.timezone.utc)
+            end_dt = datetime.datetime.fromtimestamp(created_at + (duration or 0.0) + slack, tz=datetime.timezone.utc)
+            clip_params["started_at"] = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            clip_params["ended_at"] = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         clips = []
         cursor = None
-        for _ in range(10):  # cap pagination -- plenty for one VOD's worth of clips
-            params = {"broadcaster_id": broadcaster_id, "first": 100}
+        for _ in range(10):  # cap pagination -- with the time window above, plenty for one VOD
+            params = dict(clip_params)
             if cursor:
                 params["after"] = cursor
             resp = requests.get("https://api.twitch.tv/helix/clips", params=params, headers=headers, timeout=15)
@@ -275,6 +291,7 @@ def find_candidate_windows(
     duration: float,
     broadcaster_login: Optional[str] = None,
     vod_id: Optional[str] = None,
+    created_at: Optional[float] = None,
     max_windows: int = 20,
 ) -> List[CandidateWindow]:
     """Return up to max_windows candidate highlight windows, best first."""
@@ -288,7 +305,7 @@ def find_candidate_windows(
 
     if broadcaster_login and vod_id:
         print(f"[highlights] checking Twitch clips for broadcaster_login={broadcaster_login!r} vod_id={vod_id!r}", flush=True)
-        windows.extend(_existing_clip_windows(broadcaster_login, vod_id))
+        windows.extend(_existing_clip_windows(broadcaster_login, vod_id, created_at=created_at, duration=duration))
     else:
         print(f"[highlights] skipping Twitch clips lookup (broadcaster_login={broadcaster_login!r}, "
               f"vod_id={vod_id!r}, TWITCH_CLIENT_ID set={bool(os.environ.get('TWITCH_CLIENT_ID'))})", flush=True)

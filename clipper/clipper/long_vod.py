@@ -52,7 +52,7 @@ def gather_candidates(
     report("Scanning chat activity for highlight moments...")
     windows = find_candidate_windows(
         source, info.duration,
-        broadcaster_login=info.broadcaster_login, vod_id=info.id,
+        broadcaster_login=info.broadcaster_login, vod_id=info.id, created_at=info.created_at,
         max_windows=max_windows,
     )
     if not windows:

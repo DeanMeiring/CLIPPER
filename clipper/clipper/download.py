@@ -82,6 +82,7 @@ class VideoInfo:
     title: str
     extractor: str          # e.g. "twitch:vod", "youtube"
     broadcaster_login: Optional[str]  # best-effort; None if not applicable/unavailable
+    created_at: Optional[float] = None  # unix timestamp the VOD/stream started, if known
 
 
 def is_url(source: str) -> bool:
@@ -119,6 +120,7 @@ def probe_video(source: str) -> VideoInfo:
         title=info.get("title", ""),
         extractor=extractor,
         broadcaster_login=info.get("uploader_id") or info.get("uploader") or None,
+        created_at=float(info["timestamp"]) if info.get("timestamp") else None,
     )
 
 
