@@ -58,7 +58,7 @@ def main(argv=None) -> int:
     picks = select_clips(
         words, dl.duration,
         n_clips=args.clips, min_len=args.min_len, max_len=args.max_len,
-        focus=args.focus, api_key=args.api_key,
+        focus=args.focus, api_key=args.api_key, source_title=dl.title,
     )
     if not picks:
         print("      Model returned no usable picks.", file=sys.stderr)
@@ -97,6 +97,7 @@ def main(argv=None) -> int:
             "duration": round(pick.end - pick.start, 2),
             "title": pick.title,
             "hook_caption": pick.hook_caption,
+            "upload_title": pick.upload_title,
             "reason": pick.reason,
         })
 
