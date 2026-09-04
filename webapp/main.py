@@ -708,7 +708,6 @@ const stopModal = document.getElementById('stop-modal-overlay');
 let timer = null;
 let jobsTimer = null;
 let currentJobId = null;
-let jobStartedAt = null;
 let pendingDeleteOnCancel = false;
 
 function formatViewers(n) {
@@ -845,7 +844,6 @@ jobsTimer = setInterval(loadJobsList, 5000);
 
 function attachToJob(jobId) {
   currentJobId = jobId;
-  jobStartedAt = Date.now();
   setRunning(true);
   if (timer) clearInterval(timer);
   timer = setInterval(() => poll(jobId), 2000);
@@ -886,7 +884,6 @@ document.getElementById('submit').addEventListener('click', async () => {
   const { job_id } = await resp.json();
   pendingDeleteOnCancel = false;
   currentJobId = job_id;
-  jobStartedAt = Date.now();
   if (timer) clearInterval(timer);
   timer = setInterval(() => poll(job_id), 2000);
   poll(job_id);
@@ -924,8 +921,8 @@ async function poll(jobId) {
   const pct = Math.round((job.progress || 0) * 100);
   progressBar.style.width = pct + '%';
   progressPct.textContent = pct + '%';
-  if (job.estimate_minutes) {
-    const elapsedMin = (Date.now() - jobStartedAt) / 60000;
+  if (job.estimate_minutes && job.created_at) {
+    const elapsedMin = (Date.now() - job.created_at * 1000) / 60000;
     const remainingMin = Math.max(0, job.estimate_minutes - elapsedMin);
     progressEta.textContent = job.state === 'done' || job.state === 'error' || job.state === 'cancelled'
       ? ''
