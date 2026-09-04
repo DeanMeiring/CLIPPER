@@ -1,6 +1,7 @@
 """Fetch a source video (YouTube URL or local file) plus captions if available."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -14,15 +15,41 @@ URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _cookiefile_cache: Optional[str] = None
 
 
+def _cookies_to_netscape(raw: str) -> str:
+    """Accept either a Netscape cookies.txt already, or a JSON cookie export
+    (e.g. the Cookie-Editor browser extension's {"url":..., "cookies":[...]}
+    or a bare array of the same objects) and return Netscape format, which
+    is what yt-dlp's cookiefile option expects."""
+    raw = raw.strip()
+    if not raw or raw[0] not in "{[":
+        return raw  # already Netscape (or empty)
+
+    data = json.loads(raw)
+    cookies = data["cookies"] if isinstance(data, dict) else data
+
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in cookies:
+        domain = c.get("domain", "")
+        flag = "TRUE" if domain.startswith(".") else "FALSE"
+        path = c.get("path", "/")
+        secure = "TRUE" if c.get("secure") else "FALSE"
+        expiry = int(c["expirationDate"]) if c.get("expirationDate") else 0
+        lines.append("\t".join([
+            domain, flag, path, secure, str(expiry), c.get("name", ""), c.get("value", ""),
+        ]))
+    return "\n".join(lines) + "\n"
+
+
 def _cookiefile() -> Optional[str]:
     """Path to a Netscape-format cookies.txt for yt-dlp, or None.
 
     Cloud IPs (Railway included) regularly get YouTube's "sign in to
     confirm you're not a bot" wall, which only real session cookies get
     past. Set YTDLP_COOKIES_FILE to a path already on disk (e.g. a mounted
-    volume), or YTDLP_COOKIES to the raw file contents (exported from a
-    logged-in browser via an extension like "Get cookies.txt LOCALLY") and
-    it's written to a temp file once and reused.
+    volume), or YTDLP_COOKIES to the exported cookies -- either a Netscape
+    cookies.txt (e.g. from "Get cookies.txt LOCALLY") or a JSON export
+    (e.g. from "Cookie-Editor") -- and it's converted if needed, written to
+    a temp file once, and reused.
     """
     global _cookiefile_cache
     direct = os.environ.get("YTDLP_COOKIES_FILE")
@@ -35,7 +62,7 @@ def _cookiefile() -> Optional[str]:
         return None
     fd, path = tempfile.mkstemp(prefix="yt_cookies_", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(raw)
+        f.write(_cookies_to_netscape(raw))
     _cookiefile_cache = path
     return path
 
