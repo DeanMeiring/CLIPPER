@@ -11,6 +11,7 @@ Two sources, in order of preference:
 """
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,8 +63,10 @@ def words_from_vtt(vtt_path: Path) -> List[Word]:
 
         body_lines = lines[lines.index(cue_line) + 1:]
         body = " ".join(body_lines)
+        body = html.unescape(body)  # &gt;&gt; -> >>, &amp; -> &, etc.
         body = re.sub(r"<[^>]+>", "", body)  # strip <c> timing tags
         body = re.sub(r"\[.*?\]", "", body)  # strip [Music] etc.
+        body = re.sub(r">{1,2}", "", body)  # strip >> speaker-change markers
         toks = [t for t in body.split() if t.strip()]
         if not toks:
             continue

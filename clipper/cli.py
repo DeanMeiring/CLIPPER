@@ -9,7 +9,7 @@ from pathlib import Path
 from .download import download_video
 from .transcribe import get_transcript
 from .select_moments import select_clips
-from .reframe import compute_crop_window
+from .reframe import compute_layout
 from .captions import build_ass
 from .render import render_clip
 
@@ -71,9 +71,9 @@ def main(argv=None) -> int:
 
         clip_words = [w for w in words if w.start >= pick.start and w.end <= pick.end]
 
-        crop = compute_crop_window(
+        layout = compute_layout(
             dl.video_path, pick.start, pick.end,
-            target_ratio=(args.width, args.height),
+            target_w=args.width, target_h=args.height,
         )
 
         out_path = out_dir / f"clip_{i:02d}.mp4"
@@ -85,7 +85,7 @@ def main(argv=None) -> int:
             build_ass(clip_words, pick.start, ass_path)
 
         render_clip(
-            dl.video_path, pick.start, pick.end, crop, ass_path, out_path,
+            dl.video_path, pick.start, pick.end, layout, ass_path, out_path,
             out_w=args.width, out_h=args.height,
         )
         print(f"      -> {out_path}")

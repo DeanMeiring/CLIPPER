@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from clipper.captions import build_ass
 from clipper.download import download_video
-from clipper.reframe import compute_crop_window
+from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
 from clipper.transcribe import get_transcript
@@ -60,7 +60,10 @@ class JobRequest(BaseModel):
     num_clips: int = 5
     min_len: float = 20.0
     max_len: float = 90.0
-    whisper: bool = False
+    # YouTube's auto-caption timestamps lag the actual audio noticeably --
+    # Whisper aligns word timing to the audio itself, so default to it for
+    # captions that don't look delayed. Slower, but accurate.
+    whisper: bool = True
 
 
 def _set(job_id: str, **kwargs) -> None:
@@ -97,11 +100,11 @@ def _run_job(job_id: str) -> None:
     for i, pick in enumerate(picks, start=1):
         _set(job_id, state="rendering", message=f'Rendering clip {i}/{len(picks)}: "{pick.title}"')
         clip_words = [w for w in words if w.start >= pick.start and w.end <= pick.end]
-        crop = compute_crop_window(dl.video_path, pick.start, pick.end, target_ratio=(1080, 1920))
+        layout = compute_layout(dl.video_path, pick.start, pick.end, target_w=1080, target_h=1920)
         out_path = out_dir / f"clip_{i:02d}.mp4"
         ass_path = out_dir / f"_clip_{i:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
-        render_clip(dl.video_path, pick.start, pick.end, crop, ass_path, out_path)
+        render_clip(dl.video_path, pick.start, pick.end, layout, ass_path, out_path)
         clips_meta.append({
             "file": out_path.name,
             "start": pick.start,
@@ -194,6 +197,10 @@ INDEX_HTML = """<!doctype html>
   #status { margin-top: 24px; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; }
   .clip { margin-top: 10px; padding: 10px; border: 1px solid #8888; border-radius: 8px; }
   .clip a { display: inline-block; margin-top: 6px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .checkbox-row input { width: auto; margin-top: 0; }
+  .checkbox-row label { margin-top: 0; }
+  .hint { font-size: 0.8rem; color: #888; font-weight: 400; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -221,6 +228,11 @@ INDEX_HTML = """<!doctype html>
   </div>
 </div>
 
+<div class="checkbox-row">
+  <input id="whisper" type="checkbox" checked>
+  <label for="whisper">Accurate captions (Whisper)<div class="hint">Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).</div></label>
+</div>
+
 <button id="submit">Generate clips</button>
 
 <div id="status"></div>
@@ -240,6 +252,7 @@ document.getElementById('submit').addEventListener('click', async () => {
     num_clips: parseInt(document.getElementById('num_clips').value, 10),
     min_len: parseFloat(document.getElementById('min_len').value),
     max_len: parseFloat(document.getElementById('max_len').value),
+    whisper: document.getElementById('whisper').checked,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',
