@@ -24,6 +24,7 @@ class CreatorEntry:
     live: bool
     published_at: Optional[str]  # ISO timestamp, if known
     thumbnail: Optional[str]
+    viewers: Optional[int] = None  # only set for the global trending-live row
 
 
 _twitch_token: Optional[str] = None
@@ -53,10 +54,10 @@ def _get_twitch_token() -> Optional[str]:
     return _twitch_token
 
 
-def get_twitch_creators(logins: List[str]) -> List[CreatorEntry]:
-    """One entry per login: the live stream if they're live, else their
-    most recent VOD. Skips a login cleanly on any per-login failure so one
-    bad name doesn't blank out the rest."""
+def get_twitch_vods(logins: List[str]) -> List[CreatorEntry]:
+    """One entry per login: their most recent VOD (archived broadcast),
+    regardless of whether they're currently live. Skips a login cleanly on
+    any per-login failure so one bad name doesn't blank out the rest."""
     logins = [l.strip().lower() for l in logins if l.strip()]
     if not logins:
         return []
@@ -75,14 +76,8 @@ def get_twitch_creators(logins: List[str]) -> List[CreatorEntry]:
         )
         users_resp.raise_for_status()
         users = {u["login"]: u for u in users_resp.json().get("data") or []}
-
-        streams_resp = requests.get(
-            "https://api.twitch.tv/helix/streams", params={"user_login": logins}, headers=headers, timeout=15,
-        )
-        streams_resp.raise_for_status()
-        live_by_login = {s["user_login"].lower(): s for s in streams_resp.json().get("data") or []}
     except Exception as e:
-        print(f"[trending] Twitch lookup failed: {e}", flush=True)
+        print(f"[trending] Twitch user lookup failed: {e}", flush=True)
         return []
 
     for login in logins:
@@ -90,37 +85,69 @@ def get_twitch_creators(logins: List[str]) -> List[CreatorEntry]:
         if not user:
             print(f"[trending] Twitch login {login!r} not found -- skipping", flush=True)
             continue
-        stream = live_by_login.get(login)
         try:
-            if stream:
-                entries.append(CreatorEntry(
-                    platform="twitch", name=user.get("display_name", login),
-                    url=f"https://www.twitch.tv/{login}",
-                    title=stream.get("title", ""), live=True,
-                    published_at=stream.get("started_at"),
-                    thumbnail=(stream.get("thumbnail_url") or "").replace("{width}", "320").replace("{height}", "180"),
-                ))
-            else:
-                videos_resp = requests.get(
-                    "https://api.twitch.tv/helix/videos",
-                    params={"user_id": user["id"], "type": "archive", "first": 1},
-                    headers=headers, timeout=15,
-                )
-                videos_resp.raise_for_status()
-                videos = videos_resp.json().get("data") or []
-                if not videos:
-                    continue
-                v = videos[0]
-                entries.append(CreatorEntry(
-                    platform="twitch", name=user.get("display_name", login),
-                    url=v["url"], title=v.get("title", ""), live=False,
-                    published_at=v.get("published_at") or v.get("created_at"),
-                    thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
-                ))
+            videos_resp = requests.get(
+                "https://api.twitch.tv/helix/videos",
+                params={"user_id": user["id"], "type": "archive", "first": 1},
+                headers=headers, timeout=15,
+            )
+            videos_resp.raise_for_status()
+            videos = videos_resp.json().get("data") or []
+            if not videos:
+                continue
+            v = videos[0]
+            entries.append(CreatorEntry(
+                platform="twitch", name=user.get("display_name", login),
+                url=v["url"], title=v.get("title", ""), live=False,
+                published_at=v.get("published_at") or v.get("created_at"),
+                thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
+            ))
         except Exception as e:
-            print(f"[trending] Twitch lookup for {login!r} failed: {e}", flush=True)
+            print(f"[trending] Twitch VOD lookup for {login!r} failed: {e}", flush=True)
             continue
 
+    return entries
+
+
+def get_trending_live_streams(min_viewers: int = 100_000, limit: int = 12) -> List[CreatorEntry]:
+    """The biggest live streams on Twitch right now, not limited to the
+    configured creator list. Twitch's public API has no equivalent "top
+    VODs by view count" endpoint (video lookups are per-broadcaster only),
+    so this row is live streams only. Falls back to the top 5 regardless
+    of the viewer threshold if nothing is currently over it -- true 100k+
+    concurrent viewers is rare outside of major events, and an empty row
+    would be less useful than an honestly-labeled smaller number."""
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    token = _get_twitch_token()
+    if not client_id or not token:
+        return []
+
+    import requests
+
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(
+            "https://api.twitch.tv/helix/streams", params={"first": limit}, headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        streams = resp.json().get("data") or []
+    except Exception as e:
+        print(f"[trending] Twitch top-streams lookup failed: {e}", flush=True)
+        return []
+
+    qualifying = [s for s in streams if (s.get("viewer_count") or 0) >= min_viewers]
+    chosen = qualifying if qualifying else streams[:5]
+
+    entries = []
+    for s in chosen:
+        entries.append(CreatorEntry(
+            platform="twitch", name=s.get("user_name", ""),
+            url=f"https://www.twitch.tv/{s.get('user_login', '')}",
+            title=s.get("title", ""), live=True,
+            published_at=s.get("started_at"),
+            thumbnail=(s.get("thumbnail_url") or "").replace("{width}", "320").replace("{height}", "180"),
+            viewers=s.get("viewer_count"),
+        ))
     return entries
 
 
@@ -184,9 +211,14 @@ def get_youtube_creators(channels: List[str]) -> List[CreatorEntry]:
     return entries
 
 
-def get_trending_creators() -> List[CreatorEntry]:
+def get_trending_sections() -> dict:
+    """The three rows the UI shows: configured creators' latest YouTube
+    upload, configured creators' latest Twitch VOD, and Twitch's biggest
+    live streams globally (not limited to the configured list)."""
     twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
     youtube_channels = os.environ.get("TRENDING_YOUTUBE_CHANNELS", "").split(",")
-    entries = get_twitch_creators(twitch_logins) + get_youtube_creators(youtube_channels)
-    entries.sort(key=lambda e: (not e.live, e.published_at or ""), reverse=True)
-    return entries
+    return {
+        "youtube_channels": get_youtube_creators(youtube_channels),
+        "twitch_vods": get_twitch_vods(twitch_logins),
+        "trending_live": get_trending_live_streams(),
+    }
