@@ -141,6 +141,16 @@ def _mmss_to_seconds(text: str) -> Optional[float]:
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
+def _with_shorts_tag(title: str) -> str:
+    """Force #Shorts onto the upload title regardless of what the model
+    produced -- YouTube's auto-detection of vertical clips as Shorts can be
+    inconsistent above ~60s, and the hashtag makes the intent unambiguous
+    no matter which upload path is used."""
+    if re.search(r"#shorts\b", title, re.IGNORECASE):
+        return title
+    return f"{title} #Shorts"
+
+
 def select_clips(
     words: List[Word],
     video_duration: float,
@@ -208,7 +218,7 @@ Transcript:
             end=round(end, 2),
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
-            upload_title=str(item.get("upload_title", "")).strip() or title,
+            upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
         ))
@@ -323,7 +333,7 @@ Candidate windows:
             end=round(end, 2),
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
-            upload_title=str(item.get("upload_title", "")).strip() or title,
+            upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
         ))
