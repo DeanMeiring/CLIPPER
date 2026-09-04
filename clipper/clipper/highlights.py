@@ -68,7 +68,12 @@ def _fetch_chat_messages(video_url: str, timeout_seconds: float = 300.0) -> List
 
     def _run():
         try:
-            chat = ChatDownloader().get_chat(video_url)
+            # interruptible_retry defaults to True, which polls stdin for a
+            # "press a key to retry now" prompt -- crashes here since this
+            # runs as a headless background service with no real stdin.
+            # max_attempts capped low so a real rejection (rate limit, GQL
+            # schema drift) fails fast instead of retrying 15 times.
+            chat = ChatDownloader().get_chat(video_url, interruptible_retry=False, max_attempts=3)
             for msg in chat:
                 messages.append(msg)
                 if time.monotonic() > deadline:
