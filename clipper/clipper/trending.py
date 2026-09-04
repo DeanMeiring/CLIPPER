@@ -151,6 +151,70 @@ def get_trending_live_streams(min_viewers: int = 100_000, limit: int = 12) -> Li
     return entries
 
 
+def get_suggested_creators(exclude_logins: List[str], limit: int = 12) -> List[CreatorEntry]:
+    """Discovery row: currently-popular Twitch creators NOT already in the
+    configured watchlist (TRENDING_TWITCH_LOGINS). Looks at the biggest live
+    streams right now (a good proxy for "has a lot of viewers"), filters out
+    anyone already configured, then surfaces each remaining creator's most
+    recent VOD so it's a clippable source like the other rows -- the viewer
+    count shown is what got them noticed, not a property of the VOD."""
+    exclude = {l.strip().lower() for l in exclude_logins if l.strip()}
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    token = _get_twitch_token()
+    if not client_id or not token:
+        return []
+
+    import requests
+
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(
+            "https://api.twitch.tv/helix/streams", params={"first": 100}, headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        streams = resp.json().get("data") or []
+    except Exception as e:
+        print(f"[trending] Twitch suggested-creators lookup failed: {e}", flush=True)
+        return []
+
+    seen: set = set()
+    candidates = []
+    for s in streams:
+        login = (s.get("user_login") or "").lower()
+        if not login or login in exclude or login in seen:
+            continue
+        seen.add(login)
+        candidates.append(s)
+    candidates.sort(key=lambda s: s.get("viewer_count") or 0, reverse=True)
+    candidates = candidates[:limit]
+
+    entries: List[CreatorEntry] = []
+    for s in candidates:
+        try:
+            videos_resp = requests.get(
+                "https://api.twitch.tv/helix/videos",
+                params={"user_id": s.get("user_id"), "type": "archive", "first": 1},
+                headers=headers, timeout=15,
+            )
+            videos_resp.raise_for_status()
+            videos = videos_resp.json().get("data") or []
+            if not videos:
+                continue
+            v = videos[0]
+            entries.append(CreatorEntry(
+                platform="twitch", name=s.get("user_name", ""),
+                url=v["url"], title=v.get("title", ""), live=True,
+                published_at=v.get("published_at") or v.get("created_at"),
+                thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
+                viewers=s.get("viewer_count"),
+            ))
+        except Exception as e:
+            print(f"[trending] Twitch suggested-creator VOD lookup for {s.get('user_login')!r} failed: {e}", flush=True)
+            continue
+
+    return entries
+
+
 def get_youtube_creators(channels: List[str]) -> List[CreatorEntry]:
     """One entry per channel: their most recent upload. `channels` entries
     may be a channel ID (UC...) or an @handle."""
@@ -212,13 +276,15 @@ def get_youtube_creators(channels: List[str]) -> List[CreatorEntry]:
 
 
 def get_trending_sections() -> dict:
-    """The three rows the UI shows: configured creators' latest YouTube
-    upload, configured creators' latest Twitch VOD, and Twitch's biggest
-    live streams globally (not limited to the configured list)."""
+    """The four rows the UI shows: configured creators' latest YouTube
+    upload, configured creators' latest Twitch VOD, Twitch's biggest live
+    streams globally (not limited to the configured list), and popular
+    Twitch creators NOT already in the configured watchlist (discovery)."""
     twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
     youtube_channels = os.environ.get("TRENDING_YOUTUBE_CHANNELS", "").split(",")
     return {
         "youtube_channels": get_youtube_creators(youtube_channels),
         "twitch_vods": get_twitch_vods(twitch_logins),
         "trending_live": get_trending_live_streams(),
+        "suggested_creators": get_suggested_creators(twitch_logins),
     }
