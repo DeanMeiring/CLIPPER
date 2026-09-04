@@ -19,7 +19,8 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass
-from clipper.download import download_video
+from clipper.download import download_video, is_url, probe_video
+from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
@@ -76,35 +77,69 @@ def _run_job(job_id: str) -> None:
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
 
-    _set(job_id, state="downloading", message=f"Fetching source: {req.source}")
-    dl = download_video(req.source, raw_dir)
-    _set(job_id, source_title=dl.title, duration=dl.duration)
+    _set(job_id, state="checking", message=f"Checking source: {req.source}")
+    info = None
+    if is_url(req.source):
+        try:
+            info = probe_video(req.source)
+        except Exception:
+            info = None  # fall through to the normal download pipeline
 
-    _set(job_id, state="transcribing", message="Getting transcript...")
-    words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=req.whisper)
-    if not words:
-        _set(job_id, state="error", error="No speech/captions found -- nothing to clip.")
-        return
+    # Both pipelines below normalize to: source_title, and a list of
+    # (video_path, words, pick) tuples ready for the shared render loop.
+    if info and is_long_vod(info):
+        source_title, duration = info.title, info.duration
+        _set(job_id, source_title=source_title, duration=duration,
+             message=f"Long Twitch VOD ({duration / 3600:.1f}h) -- scanning chat highlights instead of downloading the whole stream")
 
-    _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments...")
-    picks = select_clips(
-        words, dl.duration,
-        n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
-        focus=req.focus, source_title=dl.title,
-    )
-    if not picks:
+        candidates = gather_candidates(
+            req.source, info, raw_dir,
+            on_progress=lambda msg: _set(job_id, state="scanning", message=msg),
+        )
+        if not candidates:
+            _set(job_id, state="error", error="No candidate highlight moments found in the chat replay.")
+            return
+
+        _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments from {len(candidates)} candidates...")
+        mapped = select_and_map(
+            candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
+            focus=req.focus, api_key=None, source_title=source_title,
+        )
+        cand_words = {c["index"]: c["words"] for c in candidates}
+        render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
+    else:
+        _set(job_id, state="downloading", message=f"Fetching source: {req.source}")
+        dl = download_video(req.source, raw_dir)
+        source_title = dl.title
+        _set(job_id, source_title=dl.title, duration=dl.duration)
+
+        _set(job_id, state="transcribing", message="Getting transcript...")
+        words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=req.whisper)
+        if not words:
+            _set(job_id, state="error", error="No speech/captions found -- nothing to clip.")
+            return
+
+        _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments...")
+        picks = select_clips(
+            words, dl.duration,
+            n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
+            focus=req.focus, source_title=dl.title,
+        )
+        render_items = [(dl.video_path, words, pick) for pick in picks]
+
+    if not render_items:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
 
     clips_meta = []
-    for i, pick in enumerate(picks, start=1):
-        _set(job_id, state="rendering", message=f'Rendering clip {i}/{len(picks)}: "{pick.title}"')
+    for i, (video_path, words, pick) in enumerate(render_items, start=1):
+        _set(job_id, state="rendering", message=f'Rendering clip {i}/{len(render_items)}: "{pick.title}"')
         clip_words = [w for w in words if w.start >= pick.start and w.end <= pick.end]
-        layout = compute_layout(dl.video_path, pick.start, pick.end, target_w=1080, target_h=1920)
+        layout = compute_layout(video_path, pick.start, pick.end, target_w=1080, target_h=1920)
         out_path = out_dir / f"clip_{i:02d}.mp4"
         ass_path = out_dir / f"_clip_{i:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
-        render_clip(dl.video_path, pick.start, pick.end, layout, ass_path, out_path)
+        render_clip(video_path, pick.start, pick.end, layout, ass_path, out_path)
         clips_meta.append({
             "file": out_path.name,
             "start": pick.start,

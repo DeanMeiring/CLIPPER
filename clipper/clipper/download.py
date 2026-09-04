@@ -75,8 +75,71 @@ class DownloadResult:
     captions_path: Optional[Path]  # .vtt if YouTube provided one, else None
 
 
+@dataclass
+class VideoInfo:
+    id: str
+    duration: float
+    title: str
+    extractor: str          # e.g. "twitch:vod", "youtube"
+    broadcaster_login: Optional[str]  # best-effort; None if not applicable/unavailable
+
+
 def is_url(source: str) -> bool:
     return bool(URL_RE.match(source))
+
+
+def _base_ydl_opts() -> dict:
+    opts = {"quiet": True, "no_warnings": False, "noplaylist": True}
+    cookiefile = _cookiefile()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    return opts
+
+
+def probe_video(source: str) -> VideoInfo:
+    """Fetch metadata (duration, title, platform) without downloading --
+    used to decide whether a source needs the long-VOD highlight pipeline."""
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
+        info = ydl.extract_info(source, download=False)
+
+    return VideoInfo(
+        id=str(info.get("id", "")),
+        duration=float(info.get("duration") or 0.0),
+        title=info.get("title", ""),
+        extractor=(info.get("extractor_key") or info.get("extractor") or "").lower(),
+        broadcaster_login=info.get("uploader_id") or info.get("uploader") or None,
+    )
+
+
+def download_range(source: str, out_dir: Path, start: float, end: float, out_name: str) -> Path:
+    """Download only [start, end] seconds of `source` as a standalone file --
+    for pulling a short candidate window out of a long VOD without fetching
+    the whole thing. Needs a server that supports HTTP range requests, which
+    real video CDNs (YouTube, Twitch) do."""
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    outtmpl = str(out_dir / f"{out_name}.%(ext)s")
+    ydl_opts = {
+        **_base_ydl_opts(),
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "outtmpl": outtmpl,
+        "merge_output_format": "mp4",
+        "download_ranges": download_range_func(None, [(start, end)]),
+        "force_keyframes_at_cuts": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(source, download=True)
+
+    candidates = list(out_dir.glob(f"{out_name}.*"))
+    video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
+    if not video_candidates:
+        raise RuntimeError(f"download_range: no output file found for {out_name}")
+    return video_candidates[0]
 
 
 def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResult:
@@ -104,6 +167,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
 
     outtmpl = str(out_dir / "%(id)s.%(ext)s")
     ydl_opts = {
+        **_base_ydl_opts(),
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
@@ -111,13 +175,9 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         "writeautomaticsub": True,
         "subtitleslangs": [lang],
         "subtitlesformat": "vtt",
-        "quiet": True,
-        "no_warnings": False,
-        "noplaylist": True,
     }
-    cookiefile = _cookiefile()
+    cookiefile = ydl_opts.get("cookiefile")
     if cookiefile:
-        ydl_opts["cookiefile"] = cookiefile
         try:
             n_lines = sum(1 for line in open(cookiefile) if line.strip() and not line.startswith("#"))
         except OSError:
