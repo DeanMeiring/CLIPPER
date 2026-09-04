@@ -1,0 +1,21 @@
+[project]
+name = "clipper"
+version = "0.1.0"
+description = "Turn a long video into vertical, AI-picked, captioned highlight clips."
+requires-python = ">=3.9"
+dependencies = [
+    "yt-dlp>=2024.1.0",
+    "anthropic>=0.40.0",
+    "opencv-python>=4.9.0",
+    "faster-whisper>=1.0.0",
+]
+
+[project.scripts]
+clipper = "clipper.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["clipper*"]
