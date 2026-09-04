@@ -338,18 +338,33 @@ def create_job(req: JobRequest) -> dict:
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
+            "source_url": req.source,
+            "created_at": time.time(),
             "state": "queued",
             "message": "Queued",
             "progress": 0.0,
             "estimate_minutes": None,
             "clips": [],
             "error": None,
+            "saved": False,
             "request": req,
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
     job_queue.put(job_id)
     return {"job_id": job_id}
+
+
+@protected.get("/api/jobs")
+def list_jobs() -> dict:
+    """All non-deleted jobs (running, queued, done, or stopped-and-saved)
+    -- backs the "Active & saved jobs" panel so a job stays reachable even
+    after navigating away, and so a "Save progress" stop has somewhere to
+    show up."""
+    with jobs_lock:
+        items = [_job_public(j) for j in jobs.values()]
+    items.sort(key=lambda j: j.get("created_at") or 0, reverse=True)
+    return {"jobs": items}
 
 
 @protected.delete("/api/jobs/{job_id}")
@@ -379,16 +394,23 @@ def get_job(job_id: str) -> dict:
 
 
 @protected.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: str) -> dict:
+def cancel_job(job_id: str, save: bool = False) -> dict:
+    """Stop a running job. `save=true` keeps its files and marks it
+    "saved" (shows up in the Active & saved jobs list, deleted only when
+    the user explicitly deletes it); `save=false` is a plain stop -- the
+    caller is expected to DELETE it once it reaches "cancelled" if they
+    don't want it kept."""
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "job not found")
         event = cancel_events.get(job_id)
-        if event is None or job["state"] in ("done", "error", "cancelled"):
+        if event is None or job["state"] in TERMINAL_STATES:
             return {"ok": True, "state": job["state"]}
         event.set()
-        job["message"] = "Stopping..."
+        job["saved"] = save
+        job["message"] = "Stopping (progress will be kept)..." if save else "Stopping..."
+    _persist(job_id)
     return {"ok": True, "state": "cancelling"}
 
 
@@ -529,6 +551,32 @@ INDEX_HTML = """<!doctype html>
   #cancel-btn:hover:not(:disabled) { background: var(--danger-hover); opacity: 1; }
   #delete-btn { display: none; margin-top: 16px; width: 100%; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
   #delete-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
+  #jobs-panel { margin-top: 20px; }
+  #jobs-list { display: flex; flex-direction: column; gap: 8px; }
+  .job-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+  .job-row .job-info { flex: 1; min-width: 0; }
+  .job-row .job-source { font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-row .job-meta { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+  .job-badge { font-size: 0.68rem; font-weight: 700; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
+  .job-badge.running { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .job-badge.saved { background: color-mix(in srgb, #d97706 18%, transparent); color: #d97706; }
+  .job-badge.done { background: color-mix(in srgb, #16a34a 18%, transparent); color: #16a34a; }
+  .job-badge.error { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+  .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
+  .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
+  #stop-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  #stop-modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
+  .modal p { margin: 0 0 8px; font-size: 0.95rem; }
+  .modal .hint { margin-bottom: 16px; }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; }
+  .modal-actions button { margin-top: 0; width: 100%; }
+  .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .modal-actions button.ghost:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
   .clip {
     margin-top: 12px; padding: 14px 16px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
@@ -624,7 +672,24 @@ INDEX_HTML = """<!doctype html>
 <div id="clips"></div>
 <button id="delete-btn" type="button">🗑 I've downloaded these — delete from server</button>
 
+<div id="jobs-panel">
+  <label style="margin-top:0">Active &amp; saved jobs</label>
+  <div id="jobs-list"></div>
 </div>
+
+</div>
+</div>
+
+<div id="stop-modal-overlay">
+  <div class="modal">
+    <p>Stop this job now?</p>
+    <p class="hint">A step already in progress (a download, a render) finishes first -- this isn't instant.</p>
+    <div class="modal-actions">
+      <button id="stop-save-btn" type="button">Save progress</button>
+      <button id="stop-yes-btn" type="button" class="danger">Yes, stop &amp; delete</button>
+      <button id="stop-no-btn" type="button" class="ghost">No, continue</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -638,9 +703,13 @@ const progressBar = document.getElementById('progress-bar');
 const progressPct = document.getElementById('progress-pct');
 const progressEta = document.getElementById('progress-eta');
 const TRENDING_SECTIONS = ['youtube_channels', 'twitch_vods', 'trending_live'];
+const jobsListEl = document.getElementById('jobs-list');
+const stopModal = document.getElementById('stop-modal-overlay');
 let timer = null;
+let jobsTimer = null;
 let currentJobId = null;
 let jobStartedAt = null;
+let pendingDeleteOnCancel = false;
 
 function formatViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
@@ -700,6 +769,89 @@ async function loadTrending() {
 }
 loadTrending();
 
+function jobBadgeClass(job) {
+  if (['queued', 'checking', 'downloading', 'scanning', 'transcribing', 'selecting', 'rendering'].includes(job.state)) return 'running';
+  if (job.state === 'cancelled' && job.saved) return 'saved';
+  if (job.state === 'done') return 'done';
+  return 'error';
+}
+
+function jobBadgeText(job) {
+  if (jobBadgeClass(job) === 'running') return 'Running';
+  if (jobBadgeClass(job) === 'saved') return 'Saved';
+  if (job.state === 'done') return 'Done';
+  if (job.state === 'cancelled') return 'Stopped';
+  return 'Error';
+}
+
+async function loadJobsList() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    jobsListEl.innerHTML = '';
+    jobs.forEach(job => {
+      const row = document.createElement('div');
+      row.className = 'job-row';
+
+      const info = document.createElement('div');
+      info.className = 'job-info';
+      const source = document.createElement('div');
+      source.className = 'job-source';
+      source.textContent = job.source_title || job.source_url || job.id;
+      info.appendChild(source);
+      const meta = document.createElement('div');
+      meta.className = 'job-meta';
+      const pct = Math.round((job.progress || 0) * 100);
+      meta.textContent = job.state === 'done'
+        ? `${(job.clips || []).length} clip(s)`
+        : `${pct}% -- ${job.message || ''}`;
+      info.appendChild(meta);
+      row.appendChild(info);
+
+      const badge = document.createElement('span');
+      badge.className = 'job-badge ' + jobBadgeClass(job);
+      badge.textContent = jobBadgeText(job);
+      row.appendChild(badge);
+
+      if (jobBadgeClass(job) === 'running') {
+        const viewBtn = document.createElement('button');
+        viewBtn.type = 'button';
+        viewBtn.textContent = 'View';
+        viewBtn.addEventListener('click', () => attachToJob(job.id));
+        row.appendChild(viewBtn);
+      } else {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'job-delete';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', async () => {
+          delBtn.disabled = true;
+          await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' });
+          loadJobsList();
+        });
+        row.appendChild(delBtn);
+      }
+
+      jobsListEl.appendChild(row);
+    });
+  } catch (e) {
+    // best-effort panel -- never block the rest of the page on it
+  }
+}
+loadJobsList();
+if (jobsTimer) clearInterval(jobsTimer);
+jobsTimer = setInterval(loadJobsList, 5000);
+
+function attachToJob(jobId) {
+  currentJobId = jobId;
+  jobStartedAt = Date.now();
+  setRunning(true);
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => poll(jobId), 2000);
+  poll(jobId);
+}
+
 function setRunning(running) {
   submitBtn.disabled = running;
   cancelBtn.style.display = running ? 'inline-block' : 'none';
@@ -732,19 +884,35 @@ document.getElementById('submit').addEventListener('click', async () => {
     return;
   }
   const { job_id } = await resp.json();
+  pendingDeleteOnCancel = false;
   currentJobId = job_id;
   jobStartedAt = Date.now();
   if (timer) clearInterval(timer);
   timer = setInterval(() => poll(job_id), 2000);
   poll(job_id);
+  loadJobsList();
 });
 
-cancelBtn.addEventListener('click', async () => {
+cancelBtn.addEventListener('click', () => {
   if (!currentJobId) return;
-  cancelBtn.disabled = true;
-  cancelBtn.textContent = 'Stopping...';
-  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+  stopModal.classList.add('open');
 });
+
+document.getElementById('stop-no-btn').addEventListener('click', () => {
+  stopModal.classList.remove('open');
+});
+
+async function doStop(save) {
+  stopModal.classList.remove('open');
+  if (!currentJobId) return;
+  pendingDeleteOnCancel = !save;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = save ? 'Saving & stopping...' : 'Stopping...';
+  await fetch(`/api/jobs/${currentJobId}/cancel?save=${save}`, { method: 'POST' });
+}
+
+document.getElementById('stop-save-btn').addEventListener('click', () => doStop(true));
+document.getElementById('stop-yes-btn').addEventListener('click', () => doStop(false));
 
 async function poll(jobId) {
   const resp = await fetch(`/api/jobs/${jobId}`);
@@ -817,6 +985,12 @@ async function poll(jobId) {
     cancelBtn.disabled = false;
     cancelBtn.textContent = 'Emergency stop';
     deleteBtn.style.display = (job.clips || []).length ? 'block' : 'none';
+    if (job.state === 'cancelled' && pendingDeleteOnCancel) {
+      pendingDeleteOnCancel = false;
+      fetch(`/api/jobs/${jobId}`, { method: 'DELETE' }).then(loadJobsList);
+    } else {
+      loadJobsList();
+    }
   } else {
     deleteBtn.style.display = 'none';
   }
@@ -833,6 +1007,7 @@ deleteBtn.addEventListener('click', async () => {
     statusEl.textContent = 'Deleted.';
     deleteBtn.style.display = 'none';
     currentJobId = null;
+    loadJobsList();
   } else {
     deleteBtn.textContent = "🗑 I've downloaded these — delete from server";
   }
