@@ -28,7 +28,7 @@ from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
 from clipper.transcribe import get_transcript
-from clipper.trending import get_trending_sections
+from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
@@ -469,6 +469,19 @@ def trending() -> dict:
     }
 
 
+@protected.get("/api/search-creator")
+def search_creator_endpoint(q: str) -> dict:
+    """On-demand lookup for one creator by name -- not limited to the
+    configured watchlist rows. Not cached: a manual search is infrequent
+    enough that hitting the Twitch/YouTube APIs live is fine."""
+    try:
+        results = search_creator(q)
+    except Exception as e:
+        print(f"[trending] search failed: {e}", flush=True)
+        results = []
+    return {"results": [vars(e) for e in results]}
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -642,6 +655,10 @@ INDEX_HTML = """<!doctype html>
   .creator-card .meta { font-size: 0.7rem; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .live-badge { display: inline-block; background: var(--danger); color: #fff; font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-top: 6px; letter-spacing: 0.03em; }
   .actions { display: flex; align-items: center; gap: 0; }
+  #search-row { display: flex; gap: 8px; margin-top: 0; }
+  #search-row input { flex: 1; margin-top: 0; }
+  #search-row button { margin-top: 0; padding: 0 16px; white-space: nowrap; }
+  #search-results-section { margin-bottom: 16px; display: none; }
 </style>
 </head>
 <body>
@@ -650,6 +667,16 @@ INDEX_HTML = """<!doctype html>
 
 <div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
+
+<label style="margin-top:0">Search a creator</label>
+<div id="search-row">
+  <input id="search-input" placeholder="Twitch login or YouTube handle...">
+  <button id="search-btn" type="button">Search</button>
+</div>
+<div class="trending-section" id="search-results-section">
+  <div class="trending-row" id="search-results"></div>
+  <div class="hint" id="search-status" style="display:none"></div>
+</div>
 
 <div id="trending-wrap">
   <div class="trending-section" id="section-youtube_channels" style="display:none">
@@ -823,6 +850,41 @@ async function loadTrending() {
   }
 }
 loadTrending();
+
+const searchInput = document.getElementById('search-input');
+const searchBtn = document.getElementById('search-btn');
+const searchResultsSection = document.getElementById('search-results-section');
+const searchResultsRow = document.getElementById('search-results');
+const searchStatus = document.getElementById('search-status');
+
+async function runCreatorSearch() {
+  const q = searchInput.value.trim();
+  if (!q) return;
+  searchResultsSection.style.display = 'block';
+  searchResultsRow.innerHTML = '';
+  searchStatus.style.display = 'block';
+  searchStatus.textContent = 'Searching...';
+  searchBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/search-creator?q=${encodeURIComponent(q)}`);
+    const data = await resp.json();
+    const results = data.results || [];
+    if (!results.length) {
+      searchStatus.textContent = `No creator found for "${q}".`;
+    } else {
+      searchStatus.style.display = 'none';
+      results.forEach(c => searchResultsRow.appendChild(buildCreatorCard(c)));
+    }
+  } catch (e) {
+    searchStatus.textContent = 'Search failed -- try again.';
+  } finally {
+    searchBtn.disabled = false;
+  }
+}
+searchBtn.addEventListener('click', runCreatorSearch);
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runCreatorSearch();
+});
 
 function jobBadgeClass(job) {
   if (['queued', 'checking', 'downloading', 'scanning', 'transcribing', 'selecting', 'rendering'].includes(job.state)) return 'running';
