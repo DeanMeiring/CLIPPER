@@ -18,6 +18,7 @@ build_ass, render_clip) -- unchanged, since every candidate window is just
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -72,6 +73,13 @@ def gather_candidates(
     for i, w in enumerate(windows):
         if should_cancel:
             should_cancel()
+        if i > 0:
+            # A pause between range-requests against the same VOD -- back-
+            # to-back rapid-fire requests are the likely trigger for Twitch
+            # rate-limiting the source mid-run (observed as downloads
+            # degrading into tiny error-page-sized files partway through a
+            # long candidate list).
+            time.sleep(3)
         report(f"Candidate {i + 1}/{len(windows)}: {w.start:.0f}s-{w.end:.0f}s ({w.detail})")
         if on_candidate_progress:
             on_candidate_progress(i, len(windows))
