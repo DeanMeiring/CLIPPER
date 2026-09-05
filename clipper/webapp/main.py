@@ -327,6 +327,9 @@ def _notify_job_finished(job_id: str) -> None:
         text = f'⏹ Clipper stopped: "{label}".'
     else:
         text = f'❌ Clipper failed: "{label}" -- {job.get("error") or "unknown error"}'
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if domain:
+        text += f"\n\nhttps://{domain}"
     send_telegram(text)
 
 
