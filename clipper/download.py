@@ -116,6 +116,14 @@ class DownloadTimeout(RuntimeError):
     pass
 
 
+class CorruptDownload(RuntimeError):
+    """A download "succeeded" but the file is too small to be real video --
+    kept distinct from other failures so callers can specifically notice a
+    run of these (a strong signal the source itself is being rate-limited/
+    blocked, not just one flaky request) and stop early instead of grinding
+    through every remaining candidate for nothing."""
+
+
 def _run_with_timeout(fn: Callable[[], _T], timeout_seconds: float) -> _T:
     """Run fn() in a daemon thread with a hard wall-clock ceiling. yt-dlp
     has no built-in way to bound how long a single extract_info call can
@@ -190,7 +198,7 @@ _MIN_VIDEO_BYTES = 50_000
 def _check_not_corrupt(path: Path, label: str) -> None:
     size = path.stat().st_size
     if size < _MIN_VIDEO_BYTES:
-        raise RuntimeError(
+        raise CorruptDownload(
             f"{label}: downloaded file is only {size} bytes -- likely an error "
             "response from the source rather than real video (rate-limited?)"
         )

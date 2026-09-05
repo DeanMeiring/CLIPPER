@@ -22,12 +22,19 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from .download import VideoInfo, download_range
+from .download import CorruptDownload, VideoInfo, download_range
 from .highlights import find_candidate_windows
 from .select_moments import WindowPick, select_from_candidate_windows
 from .transcribe import get_transcript
 
 LONG_VOD_THRESHOLD_SECONDS = 90 * 60  # 90 minutes
+
+# A run of corrupt downloads this long means the source itself is being
+# rate-limited or blocked (seen in practice: every single candidate for a
+# VOD failing identically) rather than one flaky request -- grinding
+# through the rest of the candidate list at that point just burns ~30-90s
+# per candidate for a guaranteed failure, so stop early instead.
+MAX_CONSECUTIVE_CORRUPT_DOWNLOADS = 4
 
 
 def is_long_vod(info: VideoInfo) -> bool:
@@ -70,6 +77,7 @@ def gather_candidates(
     report(f"Found {len(windows)} candidate moment(s); downloading and transcribing each...")
 
     candidates = []
+    consecutive_corrupt = 0
     for i, w in enumerate(windows):
         if should_cancel:
             should_cancel()
@@ -85,9 +93,23 @@ def gather_candidates(
             on_candidate_progress(i, len(windows))
         try:
             video_path = download_range(source, raw_dir, w.start, w.end, out_name=f"cand_{i:03d}")
+        except CorruptDownload as e:
+            consecutive_corrupt += 1
+            report(f"  download failed, skipping: {e}")
+            if consecutive_corrupt >= MAX_CONSECUTIVE_CORRUPT_DOWNLOADS:
+                report(
+                    f"  {consecutive_corrupt} downloads in a row came back corrupt -- "
+                    "the source looks rate-limited or blocked right now. Stopping early "
+                    "instead of repeating this for every remaining candidate; try again "
+                    "later or with a different VOD."
+                )
+                break
+            continue
         except Exception as e:
+            consecutive_corrupt = 0
             report(f"  download failed, skipping: {e}")
             continue
+        consecutive_corrupt = 0
         try:
             words = get_transcript(video_path, None, prefer_whisper=True)
         except Exception as e:
