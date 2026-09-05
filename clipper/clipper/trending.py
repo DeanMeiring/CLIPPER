@@ -275,22 +275,25 @@ def get_youtube_creators(channels: List[str]) -> List[CreatorEntry]:
     return entries
 
 
-def _search_twitch_creator(login: str) -> Optional[CreatorEntry]:
+def _search_twitch_creator(login: str, vod_limit: int = 10) -> List[CreatorEntry]:
     """One-off lookup for a single Twitch login, unlike get_twitch_vods/
-    get_suggested_creators which work off a pre-fetched list -- checks if
-    they're live first (more useful than a stale VOD when they are), falling
-    back to their latest VOD otherwise."""
+    get_suggested_creators which work off a pre-fetched list -- a LIVE
+    entry first if they're currently streaming, followed by up to
+    `vod_limit` of their most recent VODs (not just the latest one), so
+    searching a creator surfaces their back-catalog to pick from rather
+    than only ever the newest upload."""
     login = login.strip().lstrip("@").lower()
     if not login:
-        return None
+        return []
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     token = _get_twitch_token()
     if not client_id or not token:
-        return None
+        return []
 
     import requests
 
     headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    entries: List[CreatorEntry] = []
     try:
         users_resp = requests.get(
             "https://api.twitch.tv/helix/users", params={"login": login}, headers=headers, timeout=15,
@@ -298,7 +301,7 @@ def _search_twitch_creator(login: str) -> Optional[CreatorEntry]:
         users_resp.raise_for_status()
         users = users_resp.json().get("data") or []
         if not users:
-            return None
+            return []
         user = users[0]
 
         streams_resp = requests.get(
@@ -308,48 +311,46 @@ def _search_twitch_creator(login: str) -> Optional[CreatorEntry]:
         streams = streams_resp.json().get("data") or []
         if streams:
             s = streams[0]
-            return CreatorEntry(
+            entries.append(CreatorEntry(
                 platform="twitch", name=s.get("user_name", ""),
                 url=f"https://www.twitch.tv/{login}",
                 title=s.get("title", ""), live=True,
                 published_at=s.get("started_at"),
                 thumbnail=(s.get("thumbnail_url") or "").replace("{width}", "320").replace("{height}", "180"),
                 viewers=s.get("viewer_count"),
-            )
+            ))
 
         videos_resp = requests.get(
             "https://api.twitch.tv/helix/videos",
-            params={"user_id": user["id"], "type": "archive", "first": 1},
+            params={"user_id": user["id"], "type": "archive", "first": vod_limit},
             headers=headers, timeout=15,
         )
         videos_resp.raise_for_status()
         videos = videos_resp.json().get("data") or []
-        if not videos:
-            return None
-        v = videos[0]
-        return CreatorEntry(
-            platform="twitch", name=user.get("display_name", login),
-            url=v["url"], title=v.get("title", ""), live=False,
-            published_at=v.get("published_at") or v.get("created_at"),
-            thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
-        )
+        for v in videos:
+            entries.append(CreatorEntry(
+                platform="twitch", name=user.get("display_name", login),
+                url=v["url"], title=v.get("title", ""), live=False,
+                published_at=v.get("published_at") or v.get("created_at"),
+                thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
+            ))
+        return entries
     except Exception as e:
         print(f"[trending] Twitch search for {login!r} failed: {e}", flush=True)
-        return None
+        return entries
 
 
 def search_creator(query: str) -> List[CreatorEntry]:
     """Look up one creator by name on demand -- for finding someone who
     isn't in the configured watchlist, rather than only browsing the fixed
-    trending rows. Tries both platforms and returns whatever matches (often
-    just one, since a name is usually specific to a platform)."""
+    trending rows. Tries both platforms and returns whatever matches: on
+    Twitch, a live entry (if currently streaming) plus several recent VODs;
+    on YouTube, their latest upload."""
     query = query.strip()
     if not query:
         return []
     entries: List[CreatorEntry] = []
-    twitch_hit = _search_twitch_creator(query)
-    if twitch_hit:
-        entries.append(twitch_hit)
+    entries.extend(_search_twitch_creator(query))
     entries.extend(get_youtube_creators([query]))
     return entries
 
