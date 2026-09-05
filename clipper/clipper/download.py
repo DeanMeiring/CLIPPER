@@ -176,6 +176,26 @@ def probe_video(source: str) -> VideoInfo:
     )
 
 
+# A real video segment -- even a few seconds at the lowest quality Twitch/
+# YouTube serve -- is comfortably above this. Below it means the server
+# handed back an error page or empty placeholder instead of video (seen in
+# practice: Twitch rate-limiting a source after many rapid range-requests
+# in a row, degrading to a ~260-byte response that yt-dlp still reports as
+# a "successful" 100% download). Catching that here turns a silently
+# corrupt candidate -- which then fails transcription anyway, having
+# burned the download time for nothing -- into a clean, fast-failing skip.
+_MIN_VIDEO_BYTES = 50_000
+
+
+def _check_not_corrupt(path: Path, label: str) -> None:
+    size = path.stat().st_size
+    if size < _MIN_VIDEO_BYTES:
+        raise RuntimeError(
+            f"{label}: downloaded file is only {size} bytes -- likely an error "
+            "response from the source rather than real video (rate-limited?)"
+        )
+
+
 def download_range(source: str, out_dir: Path, start: float, end: float, out_name: str) -> Path:
     """Download only [start, end] seconds of `source` as a standalone file --
     for pulling a short candidate window out of a long VOD without fetching
@@ -205,7 +225,9 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
     video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
     if not video_candidates:
         raise RuntimeError(f"download_range: no output file found for {out_name}")
-    return video_candidates[0]
+    result = video_candidates[0]
+    _check_not_corrupt(result, f"download_range({out_name})")
+    return result
 
 
 def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResult:
@@ -269,6 +291,8 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         if not video_candidates:
             raise RuntimeError(f"Download finished but no video file found for {video_id}")
         video_path = video_candidates[0]
+
+    _check_not_corrupt(video_path, f"download_video({video_id})")
 
     if duration <= 0:
         duration = _ffprobe_duration(video_path)
