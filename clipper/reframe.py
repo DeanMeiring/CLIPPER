@@ -49,6 +49,11 @@ def _detect_faces(video_path: Path, start: float, end: float, samples: int):
 
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if src_w <= 0 or src_h <= 0:
+        cap.release()
+        raise RuntimeError(
+            f"Could not read video dimensions (got {src_w}x{src_h}): {video_path}"
+        )
 
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"

@@ -68,7 +68,18 @@ def render_clip(
             str(output_path),
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # A hard wall-clock ceiling: this runs on the web app's single sequential
+    # worker thread, and the cancel signal is only checked between pipeline
+    # steps, not inside a blocking subprocess call -- an ffmpeg hang (a
+    # malformed/truncated source, an unusual codec, a filter stall) would
+    # otherwise wedge that thread, and every future queued job, forever.
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after {e.timeout:.0f}s rendering {output_path.name} "
+            "-- source video may be corrupt or an unusual codec"
+        ) from e
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {output_path.name}:\n{result.stderr[-2000:]}")
     return output_path

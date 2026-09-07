@@ -30,6 +30,26 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{s:05.2f}"
 
 
+# Word text is burned in as literal caption text between \k override tags.
+# A literal "{" or "}" from the source transcript would otherwise
+# prematurely close/open an override block -- breaking the \k word-highlight
+# timing for the rest of that line -- and ASS has no escape sequence for a
+# literal brace (or backslash, which can chain into the \N/\n/\h sequences
+# ASS recognizes directly in dialogue text) in the Text field. Swap them for
+# visually similar full-width characters instead of silently dropping them.
+_ASS_UNSAFE_CHARS = {
+    "\\": "＼",  # fullwidth reverse solidus
+    "{": "｛",   # fullwidth left curly bracket
+    "}": "｝",   # fullwidth right curly bracket
+}
+
+
+def _escape_ass_text(text: str) -> str:
+    for bad, safe in _ASS_UNSAFE_CHARS.items():
+        text = text.replace(bad, safe)
+    return text
+
+
 def _group_words(words: List[Word], max_words: int = 4, max_span: float = 2.2) -> List[List[Word]]:
     groups: List[List[Word]] = []
     cur: List[Word] = []
@@ -58,7 +78,7 @@ def build_ass(clip_words: List[Word], clip_start: float, output_path: Path) -> P
         parts = []
         for w in group:
             dur_cs = max(1, int(round((w.end - w.start) * 100)))
-            parts.append(f"{{\\k{dur_cs}}}{w.text.upper()} ")
+            parts.append(f"{{\\k{dur_cs}}}{_escape_ass_text(w.text.upper())} ")
         text = "".join(parts).strip()
         lines.append(
             f"Dialogue: 0,{_fmt_ts(g_start)},{_fmt_ts(g_end)},Caption,,0,0,0,,{text}"

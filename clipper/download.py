@@ -124,27 +124,50 @@ class CorruptDownload(RuntimeError):
     through every remaining candidate for nothing."""
 
 
-def _run_with_timeout(fn: Callable[[], _T], timeout_seconds: float) -> _T:
+def _run_with_timeout(
+    fn: Callable[[], _T],
+    timeout_seconds: float,
+    on_late_completion: Optional[Callable[[], None]] = None,
+) -> _T:
     """Run fn() in a daemon thread with a hard wall-clock ceiling. yt-dlp
     has no built-in way to bound how long a single extract_info call can
     take, and a call that hangs (a stalled connection, a source that keeps
     erroring through every retry) can't be interrupted by anything else in
     the pipeline -- including the emergency-stop signal, since it's one
     blocking call with no checkpoint inside it. This turns an indefinite
-    hang into a clean, timed-out error instead."""
+    hang into a clean, timed-out error instead.
+
+    Python can't force-kill a thread, so on timeout the abandoned thread
+    keeps running in the background and can still finish (and write its
+    output file) well after the caller has moved on -- possibly after the
+    job/candidate it belonged to has been deleted or superseded. Pass
+    on_late_completion to have that stray result cleaned up (e.g. delete
+    whatever file it eventually wrote) instead of left lying around."""
     result: list = []
     error: list = []
+    finished = threading.Event()
 
     def _run() -> None:
         try:
             result.append(fn())
         except Exception as e:  # noqa: BLE001 - re-raised on the caller's thread below
             error.append(e)
+        finally:
+            finished.set()
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     thread.join(timeout=timeout_seconds)
     if thread.is_alive():
+        if on_late_completion is not None:
+            def _cleanup_when_done() -> None:
+                finished.wait()
+                try:
+                    on_late_completion()
+                except Exception:
+                    pass  # best-effort -- the job/dir it belonged to may be long gone
+
+            threading.Thread(target=_cleanup_when_done, daemon=True).start()
         raise DownloadTimeout(
             f"Timed out after {timeout_seconds:.0f}s -- the source may be "
             "unavailable, restricted, or the connection stalled"
@@ -184,20 +207,31 @@ def probe_video(source: str) -> VideoInfo:
     )
 
 
-# A real video segment -- even a few seconds at the lowest quality Twitch/
-# YouTube serve -- is comfortably above this. Below it means the server
-# handed back an error page or empty placeholder instead of video (seen in
-# practice: Twitch rate-limiting a source after many rapid range-requests
-# in a row, degrading to a ~260-byte response that yt-dlp still reports as
-# a "successful" 100% download). Catching that here turns a silently
-# corrupt candidate -- which then fails transcription anyway, having
-# burned the download time for nothing -- into a clean, fast-failing skip.
+# A real candidate window -- even a few seconds at the lowest quality
+# Twitch/YouTube serve -- is comfortably above this. Below it means the
+# server handed back an error page or empty placeholder instead of video
+# (seen in practice: Twitch rate-limiting a source after many rapid
+# range-requests in a row, degrading to a ~260-byte response that yt-dlp
+# still reports as a "successful" 100% download). Catching that here turns
+# a silently corrupt candidate -- which then fails transcription anyway,
+# having burned the download time for nothing -- into a clean, fast-failing
+# skip. Tuned specifically for the range-request candidate-window path
+# (download_range) below, where every window is expected to be a real,
+# multi-second slice -- NOT for a full-source download, where a
+# legitimately tiny source (a several-second Short at low resolution)
+# could plausibly land under this.
 _MIN_VIDEO_BYTES = 50_000
 
+# Used for full-source downloads (download_video): just needs to catch an
+# empty/error-page response (typically well under a couple KB), not
+# enforce a minimum content length -- mp4 muxing overhead alone puts any
+# genuine video file, however short or low-quality, comfortably above this.
+_MIN_FULL_VIDEO_BYTES = 2_000
 
-def _check_not_corrupt(path: Path, label: str) -> None:
+
+def _check_not_corrupt(path: Path, label: str, min_bytes: int = _MIN_VIDEO_BYTES) -> None:
     size = path.stat().st_size
-    if size < _MIN_VIDEO_BYTES:
+    if size < min_bytes:
         raise CorruptDownload(
             f"{label}: downloaded file is only {size} bytes -- likely an error "
             "response from the source rather than real video (rate-limited?)"
@@ -227,7 +261,11 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(source, download=True)
 
-    _run_with_timeout(_extract, timeout_seconds=240.0)
+    def _cleanup_late_files() -> None:
+        for p in out_dir.glob(f"{out_name}.*"):
+            p.unlink(missing_ok=True)
+
+    _run_with_timeout(_extract, timeout_seconds=240.0, on_late_completion=_cleanup_late_files)
 
     candidates = list(out_dir.glob(f"{out_name}.*"))
     video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
@@ -286,7 +324,19 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(source, download=True)
 
-    info = _run_with_timeout(_extract, timeout_seconds=600.0)
+    # The output filename is only known once extract_info returns (it's
+    # derived from the video id), so on a timeout-abandoned download that
+    # completes late, clean up by diffing the directory instead: anything
+    # that shows up after the fact that wasn't here when the download
+    # started is this call's stray output.
+    existing_before = set(out_dir.iterdir()) if out_dir.exists() else set()
+
+    def _cleanup_late_files() -> None:
+        for p in out_dir.iterdir():
+            if p not in existing_before:
+                p.unlink(missing_ok=True)
+
+    info = _run_with_timeout(_extract, timeout_seconds=600.0, on_late_completion=_cleanup_late_files)
     video_id = info["id"]
     title = info.get("title", video_id)
     duration = float(info.get("duration") or 0.0)
@@ -300,7 +350,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
             raise RuntimeError(f"Download finished but no video file found for {video_id}")
         video_path = video_candidates[0]
 
-    _check_not_corrupt(video_path, f"download_video({video_id})")
+    _check_not_corrupt(video_path, f"download_video({video_id})", min_bytes=_MIN_FULL_VIDEO_BYTES)
 
     if duration <= 0:
         duration = _ffprobe_duration(video_path)
@@ -321,6 +371,6 @@ def _ffprobe_duration(video_path: Path) -> float:
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=30,
     )
     return float(result.stdout.strip())

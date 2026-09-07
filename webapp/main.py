@@ -108,7 +108,18 @@ def _persist(job_id: str) -> None:
     out_dir = BASE_DIR / job_id
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / JOB_META_NAME).write_text(json.dumps(data), encoding="utf-8")
+        # _set() is called many times per job from the worker thread, and
+        # can race with a request-handler thread persisting the same job
+        # (cancel, regenerate). Writing straight to job.json (open truncates
+        # then writes) lets two concurrent writers interleave into a
+        # corrupt/partial file. Write to a per-writer temp file and rename
+        # it into place instead -- an OS-level atomic op on POSIX -- so
+        # concurrent writers only ever race on which write "wins" cleanly,
+        # never on producing a half-written file.
+        final_path = out_dir / JOB_META_NAME
+        tmp_path = out_dir / f".{JOB_META_NAME}.tmp-{os.getpid()}-{threading.get_ident()}"
+        tmp_path.write_text(json.dumps(data), encoding="utf-8")
+        tmp_path.replace(final_path)
     except OSError:
         pass  # best-effort -- a disk hiccup here shouldn't take down the job
 
