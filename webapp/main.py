@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -22,12 +23,12 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass
-from clipper.download import download_video, is_url, probe_video
+from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
-from clipper.transcribe import get_transcript
+from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
 
@@ -83,8 +84,15 @@ class JobRequest(BaseModel):
     whisper: bool = True
 
 
+class RegenerateRequest(BaseModel):
+    focus: Optional[str] = None
+    num_clips: int = 3
+    min_len: float = 20.0
+    max_len: float = 90.0
+
+
 def _job_public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k != "request"}
+    return {k: v for k, v in job.items() if k not in ("request", "pending_regenerate")}
 
 
 def _persist(job_id: str) -> None:
@@ -175,6 +183,12 @@ def _estimate_long_vod_seconds(num_candidates: int, num_clips: int) -> float:
 
 
 def _run_job(job_id: str) -> None:
+    with jobs_lock:
+        pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
+    if pending_regenerate is not None:
+        _run_regenerate(job_id, pending_regenerate)
+        return
+
     req: JobRequest = jobs[job_id]["request"]
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
@@ -210,6 +224,8 @@ def _run_job(job_id: str) -> None:
             _set(job_id, state="error", error="No candidate highlight moments found in the chat replay.")
             return
 
+        _cache_candidates(raw_dir, candidates)
+
         # Now that the real candidate count is known, refine the estimate.
         est_seconds = _estimate_long_vod_seconds(len(candidates), req.num_clips)
         _set(job_id, estimate_minutes=round(est_seconds / 60, 1))
@@ -224,6 +240,7 @@ def _run_job(job_id: str) -> None:
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
         render_base = 0.55
+        _set(job_id, pipeline="long_vod", used_window_indices=[pick.window_index for _, pick in mapped])
     else:
         cancel()
         if info:
@@ -243,6 +260,7 @@ def _run_job(job_id: str) -> None:
         if not words:
             _set(job_id, state="error", error="No speech/captions found -- nothing to clip.")
             return
+        _cache_transcript(raw_dir, dl.video_path, dl.duration, words)
 
         cancel()
         _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments...")
@@ -254,21 +272,36 @@ def _run_job(job_id: str) -> None:
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
+        _set(job_id, pipeline="short", used_ranges=[[pick.start, pick.end] for pick in picks])
 
     if not render_items:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
 
-    clips_meta = []
+    clips_meta = _render_all(job_id, out_dir, render_items, render_base, [])
+    _progress(job_id, 1.0)
+    _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
+
+
+def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
+    """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
+    to clips_meta (already containing any earlier clips) and updating job
+    progress/state as it goes. Shared by a fresh run and a regenerate run --
+    they only differ in what render_items contains and whether clips_meta
+    starts empty or with clips from a prior run."""
     render_span = 1.0 - render_base
+    start_index = len(clips_meta)
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
     for i, (video_path, words, pick) in enumerate(render_items, start=1):
         cancel()
-        _set(job_id, state="rendering", message=f'Rendering clip {i}/{len(render_items)}: "{pick.title}"')
+        out_index = start_index + i
+        _set(job_id, state="rendering",
+             message=f'Rendering clip {out_index}/{start_index + len(render_items)}: "{pick.title}"')
         _progress(job_id, render_base + render_span * ((i - 1) / len(render_items)))
         clip_words = [w for w in words if w.start >= pick.start and w.end <= pick.end]
         layout = compute_layout(video_path, pick.start, pick.end, target_w=1080, target_h=1920)
-        out_path = out_dir / f"clip_{i:02d}.mp4"
-        ass_path = out_dir / f"_clip_{i:02d}.ass"
+        out_path = out_dir / f"clip_{out_index:02d}.mp4"
+        ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
         render_clip(video_path, pick.start, pick.end, layout, ass_path, out_path)
         clips_meta.append({
@@ -284,9 +317,182 @@ def _run_job(job_id: str) -> None:
         })
         _set(job_id, clips=list(clips_meta))
         _progress(job_id, render_base + render_span * (i / len(render_items)))
+    return clips_meta
 
+
+def _cache_candidates(raw_dir: Path, candidates: list) -> None:
+    """Persist gathered long-VOD candidate windows (each already a small
+    downloaded file) alongside their transcripts, so a later "generate more
+    clips" pass can re-run selection over them without downloading or
+    transcribing anything again."""
+    try:
+        data = [
+            {
+                "index": c["index"],
+                "video_path": Path(c["video_path"]).name,
+                "duration": c["duration"],
+                "words": [asdict(w) for w in c["words"]],
+                "signal": c["signal"],
+            }
+            for c in candidates
+        ]
+        (raw_dir / "candidates.json").write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass  # best-effort -- worst case a future regenerate falls back to re-transcribing
+
+
+def _cache_transcript(raw_dir: Path, video_path: Path, duration: float, words: list) -> None:
+    """Persist the full-video transcript so a later "generate more clips"
+    pass can re-run selection over the same words without re-downloading or
+    re-transcribing the source."""
+    try:
+        data = {
+            "video_path": video_path.name,
+            "duration": duration,
+            "words": [asdict(w) for w in words],
+        }
+        (raw_dir / "transcript.json").write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _load_candidates_for_regenerate(raw_dir: Path) -> Optional[list]:
+    cache_path = raw_dir / "candidates.json"
+    if cache_path.exists():
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            return [
+                {
+                    "index": c["index"],
+                    "video_path": raw_dir / c["video_path"],
+                    "duration": c["duration"],
+                    "words": [Word(**w) for w in c["words"]],
+                    "signal": c["signal"],
+                }
+                for c in raw
+            ]
+        except (OSError, ValueError, KeyError):
+            pass
+    # A job from before this cache existed: the candidate video files are
+    # still on disk (only a fresh submit downloads or deletes them), so
+    # reconstruct by re-transcribing each one -- skips the network download
+    # (the slow, rate-limit-prone part) even though transcription reruns.
+    cand_files = sorted(raw_dir.glob("cand_*.mp4"))
+    if not cand_files:
+        return None
+    result = []
+    for i, path in enumerate(cand_files):
+        try:
+            words = get_transcript(path, None, prefer_whisper=True)
+            duration = _ffprobe_duration(path)
+        except Exception:
+            continue
+        result.append({
+            "index": i, "video_path": path, "duration": duration,
+            "words": words, "signal": "previously downloaded candidate",
+        })
+    return result or None
+
+
+def _load_transcript_for_regenerate(raw_dir: Path) -> Optional[dict]:
+    cache_path = raw_dir / "transcript.json"
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return {
+                "video_path": raw_dir / data["video_path"],
+                "duration": data["duration"],
+                "words": [Word(**w) for w in data["words"]],
+            }
+        except (OSError, ValueError, KeyError):
+            pass
+    # A job from before this cache existed: fall back to the still-
+    # downloaded video file itself (if unambiguous) and re-transcribe --
+    # skips the download, even though transcription has to rerun.
+    videos = [p for p in raw_dir.glob("*.mp4")]
+    if len(videos) != 1:
+        return None
+    video_path = videos[0]
+    try:
+        words = get_transcript(video_path, None, prefer_whisper=True)
+        duration = _ffprobe_duration(video_path)
+    except Exception:
+        return None
+    return {"video_path": video_path, "duration": duration, "words": words}
+
+
+def _run_regenerate(job_id: str, req: dict) -> None:
+    """Pick and render additional clips reusing a job's already-downloaded
+    source (or already-downloaded candidate windows, for a long VOD)
+    instead of re-downloading anything."""
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_source"
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+
+    num_clips = max(1, int(req.get("num_clips") or 3))
+    focus = req.get("focus") or None
+    min_len = float(req.get("min_len") or 20.0)
+    max_len = float(req.get("max_len") or 90.0)
+
+    with jobs_lock:
+        job = jobs[job_id]
+        pipeline = job.get("pipeline")
+        source_title = job.get("source_title") or ""
+        existing_clips = list(job.get("clips") or [])
+        used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+        used_window_indices = set(job.get("used_window_indices") or [])
+    if not pipeline:
+        pipeline = "long_vod" if list(raw_dir.glob("cand_*.mp4")) else "short"
+
+    _set(job_id, state="selecting", message=f"Asking Claude to pick {num_clips} more moment(s)...")
+    _progress(job_id, 0.1)
+    cancel()
+
+    if pipeline == "long_vod":
+        candidates = _load_candidates_for_regenerate(raw_dir)
+        if not candidates:
+            _set(job_id, state="error", error="The downloaded candidate clips are gone -- resubmit the source URL instead.")
+            return
+        candidates = [c for c in candidates if c["index"] not in used_window_indices]
+        if not candidates:
+            _set(job_id, state="error", error="Every downloaded candidate moment has already been used in a clip.")
+            return
+        cancel()
+        mapped = select_and_map(
+            candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
+            focus=focus, api_key=None, source_title=source_title,
+        )
+        cand_words = {c["index"]: c["words"] for c in candidates}
+        render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
+        used_window_indices |= {pick.window_index for _, pick in mapped}
+        _set(job_id, used_window_indices=list(used_window_indices))
+    else:
+        cached = _load_transcript_for_regenerate(raw_dir)
+        if not cached:
+            _set(job_id, state="error", error="The downloaded source video is gone -- resubmit the source URL instead.")
+            return
+        cancel()
+        picks = select_clips(
+            cached["words"], cached["duration"],
+            n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
+            focus=focus, source_title=source_title,
+        )
+
+        def _overlaps_used(p) -> bool:
+            return any(not (p.end <= u[0] or p.start >= u[1]) for u in used_ranges)
+
+        picks = [p for p in picks if not _overlaps_used(p)][:num_clips]
+        render_items = [(cached["video_path"], cached["words"], pick) for pick in picks]
+        used_ranges = used_ranges + [(pick.start, pick.end) for pick in picks]
+        _set(job_id, used_ranges=[list(r) for r in used_ranges])
+
+    if not render_items:
+        _set(job_id, state="error", error="Claude didn't return any new, non-overlapping moments this time -- try a different focus.")
+        return
+
+    clips_meta = _render_all(job_id, out_dir, render_items, 0.15, existing_clips)
     _progress(job_id, 1.0)
-    _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
+    _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
 
 
 def _keepalive_loop(stop_event: threading.Event) -> None:
@@ -404,6 +610,31 @@ def delete_job(job_id: str) -> dict:
         jobs.pop(job_id, None)
         cancel_events.pop(job_id, None)
     shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+    return {"ok": True}
+
+
+@protected.post("/api/jobs/{job_id}/regenerate")
+def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
+    """Pick and render additional clips from a finished job's already-
+    downloaded source (or already-downloaded candidate windows, for a long
+    VOD) without re-downloading anything -- the raw files a normal run
+    leaves on the volume until the job is deleted."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        raw_dir = BASE_DIR / job_id / "_source"
+        if not raw_dir.exists() or not any(raw_dir.iterdir()):
+            raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+        job["pending_regenerate"] = req.dict()
+        job["state"] = "queued"
+        job["message"] = "Queued -- reusing already-downloaded source"
+        job["progress"] = 0.0
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
     return {"ok": True}
 
 
@@ -612,11 +843,11 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open { display: flex; }
   .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
@@ -624,6 +855,8 @@ INDEX_HTML = """<!doctype html>
   .modal-actions button { margin-top: 0; width: 100%; }
   .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
   .modal-actions button.ghost:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+  .modal label { margin-top: 12px; }
+  .modal label:first-of-type { margin-top: 0; }
   #notify-test-btn { display: block; width: 100%; margin-top: 16px; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
   #notify-test-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); opacity: 1; }
   .mood-btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); text-align: left; }
@@ -774,6 +1007,21 @@ INDEX_HTML = """<!doctype html>
       <button type="button" class="mood-btn" data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;">🤯 Crazy moment</button>
       <button type="button" class="mood-btn" data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh">💀 Dark humor</button>
       <button id="mood-skip-btn" type="button" class="ghost">Skip -- no preference</button>
+    </div>
+  </div>
+</div>
+
+<div id="regen-modal-overlay">
+  <div class="modal">
+    <p>Generate more clips</p>
+    <p class="hint">Reuses the already-downloaded source -- no re-download needed.</p>
+    <label>Focus (optional)</label>
+    <input id="regen-focus" placeholder="e.g. funniest moments">
+    <label>How many more clips?</label>
+    <input id="regen-num-clips" type="number" value="3" min="1" max="10">
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="regen-go-btn" type="button">Generate</button>
+      <button id="regen-cancel-btn" type="button" class="ghost">Cancel</button>
     </div>
   </div>
 </div>
@@ -944,6 +1192,12 @@ async function loadJobsList() {
         row.appendChild(viewBtn);
       }
       if (!running) {
+        const regenBtn = document.createElement('button');
+        regenBtn.type = 'button';
+        regenBtn.textContent = 'Generate more clips';
+        regenBtn.addEventListener('click', () => openRegenModal(job.id));
+        row.appendChild(regenBtn);
+
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'job-delete';
@@ -1038,6 +1292,53 @@ document.querySelectorAll('.mood-btn').forEach(btn => {
 document.getElementById('mood-skip-btn').addEventListener('click', () => {
   moodModal.classList.remove('open');
   submitJob();
+});
+
+const regenModal = document.getElementById('regen-modal-overlay');
+const regenFocusInput = document.getElementById('regen-focus');
+const regenNumClipsInput = document.getElementById('regen-num-clips');
+const regenGoBtn = document.getElementById('regen-go-btn');
+let regenJobId = null;
+
+function openRegenModal(jobId) {
+  regenJobId = jobId;
+  regenFocusInput.value = '';
+  regenNumClipsInput.value = '3';
+  regenModal.classList.add('open');
+}
+
+document.getElementById('regen-cancel-btn').addEventListener('click', () => {
+  regenModal.classList.remove('open');
+  regenJobId = null;
+});
+
+regenGoBtn.addEventListener('click', async () => {
+  if (!regenJobId) return;
+  const jobId = regenJobId;
+  regenGoBtn.disabled = true;
+  regenGoBtn.textContent = 'Starting...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        focus: regenFocusInput.value.trim() || null,
+        num_clips: parseInt(regenNumClipsInput.value, 10) || 3,
+      }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || 'Could not start -- the downloaded source may be gone.');
+      return;
+    }
+    regenModal.classList.remove('open');
+    regenJobId = null;
+    loadJobsList();
+    attachToJob(jobId);
+  } finally {
+    regenGoBtn.disabled = false;
+    regenGoBtn.textContent = 'Generate';
+  }
 });
 
 cancelBtn.addEventListener('click', () => {
