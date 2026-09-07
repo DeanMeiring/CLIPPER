@@ -438,11 +438,25 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         job = jobs[job_id]
         pipeline = job.get("pipeline")
         source_title = job.get("source_title") or ""
+        source_duration = job.get("duration") or 0.0
         existing_clips = list(job.get("clips") or [])
         used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
         used_window_indices = set(job.get("used_window_indices") or [])
     if not pipeline:
         pipeline = "long_vod" if list(raw_dir.glob("cand_*.mp4")) else "short"
+
+    # A regenerate reuses already-downloaded material, so it's much faster
+    # than the original run -- recompute a realistic estimate instead of
+    # leaving the old (much larger, download-inclusive) one on screen, and
+    # restart the elapsed-time clock the UI measures the ETA against.
+    if pipeline == "long_vod":
+        has_cache = (raw_dir / "candidates.json").exists()
+        n_uncached = 0 if has_cache else len(list(raw_dir.glob("cand_*.mp4")))
+        est_seconds = 20.0 + num_clips * 25.0 + n_uncached * 40.0
+    else:
+        has_cache = (raw_dir / "transcript.json").exists()
+        est_seconds = 20.0 + num_clips * 25.0 + (0.0 if has_cache else source_duration * 0.35)
+    _set(job_id, created_at=time.time(), estimate_minutes=round(est_seconds / 60, 1))
 
     _set(job_id, state="selecting", message=f"Asking Claude to pick {num_clips} more moment(s)...")
     _progress(job_id, 0.1)
@@ -632,6 +646,11 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
         job["state"] = "queued"
         job["message"] = "Queued -- reusing already-downloaded source"
         job["progress"] = 0.0
+        # Clear the previous run's (much larger, download-inclusive) ETA
+        # immediately -- _run_regenerate computes the real one once it
+        # starts, but the UI shouldn't show the stale figure even briefly.
+        job["created_at"] = time.time()
+        job["estimate_minutes"] = None
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
     job_queue.put(job_id)
