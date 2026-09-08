@@ -171,3 +171,6 @@ Runs locally too:
 pip install -r requirements.txt
 uvicorn webapp.main:app --reload
 ```
+
+
+Claude is being very useful I just eat through the usage so fast.
