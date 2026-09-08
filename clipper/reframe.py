@@ -145,17 +145,45 @@ def compute_layout(
     face_center_x = med_x + med_w / 2
     face_center_y = med_y + med_h / 2
 
+    # A source that's already portrait/vertical (a phone-held IRL stream,
+    # anything already shot roughly 9:16) is one continuous scene -- not a
+    # landscape gameplay feed with a small facecam window composited on
+    # top of it. The gameplay+facecam split below exists specifically to
+    # catch that overlay pattern, and misfires here: an IRL streamer's
+    # face is naturally small and/or off-center plenty of the time just
+    # from them moving around, and splitting the frame on that would zoom
+    # into a chunk of it as a fake "facecam" while throwing away the rest
+    # of the actual scene. Always give a portrait source a single crop of
+    # the whole frame instead.
+    if src_h >= src_w:
+        return _face_centered_crop(src_w, src_h, face_center_x, target_w, target_h)
+
     is_small = (med_h / src_h) < 0.30
     x_frac, y_frac = face_center_x / src_w, face_center_y / src_h
     is_off_center = x_frac < 0.30 or x_frac > 0.70 or y_frac < 0.30 or y_frac > 0.70
 
-    if not (is_small and is_off_center):
-        # Large and/or roughly centered face -- talking head, interview,
-        # explainer video. Existing single-crop behavior handles this well.
+    # A real composited facecam overlay sits at a fixed screen position
+    # for the whole stream; a real face in one continuous scene (e.g. a
+    # landscape IRL stream where the streamer just happens to be off to
+    # one side) moves around across the sampled frames. Only treat this
+    # as an overlay -- worth splitting out from the rest of the frame --
+    # if the face barely moves across the samples; otherwise this is the
+    # actual scene, not a gameplay+facecam composite.
+    centers_x = [(b[0] + b[2] / 2) / src_w for b in boxes]
+    centers_y = [(b[1] + b[3] / 2) / src_h for b in boxes]
+    position_is_stable = (
+        statistics.pstdev(centers_x) < 0.03 and statistics.pstdev(centers_y) < 0.03
+    )
+
+    if not (is_small and is_off_center and position_is_stable):
+        # Large face, roughly centered, and/or moving around the frame --
+        # talking head, interview, explainer video, or a real scene the
+        # person just isn't dead-center in. Single-crop behavior handles
+        # all of these well.
         return _face_centered_crop(src_w, src_h, face_center_x, target_w, target_h)
 
-    # Small, corner-positioned face -- treat as a facecam overlay on top of
-    # gameplay/screen content and build a stacked split layout.
+    # Small, corner-positioned, stationary face -- a facecam overlay on top
+    # of gameplay/screen content. Build a stacked split layout.
     bottom_out_h = round(target_h * facecam_height_frac)
     top_out_h = target_h - bottom_out_h
 
