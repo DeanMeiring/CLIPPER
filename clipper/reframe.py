@@ -4,9 +4,12 @@ Samples a handful of frames across the clip and runs OpenCV's built-in Haar
 cascade face detector on each (ships with opencv-python, no extra download).
 
 Three outcomes:
-  - No face, or a large/roughly-centered face (talking head, interview,
-    explainer video): a single CropWindow centered on the face (or a plain
-    center crop if no face was found at all).
+  - No face, an unreliable/one-off detection (chaotic handheld footage --
+    fast panning, motion blur, crowds -- where nothing was detected
+    consistently enough to trust), or a large/roughly-centered face
+    (talking head, interview, explainer video): a single CropWindow
+    centered on the face, or a plain center crop if there's no face worth
+    anchoring on.
   - Exactly one small, corner-positioned, recurring face (a streamer's
     webcam overlay sitting on top of gameplay footage): a SplitLayout with
     gameplay on top and a zoomed-in facecam crop on the bottom, stacked to
@@ -191,8 +194,21 @@ def compute_layout(
         return _center_crop(src_w, src_h, target_w, target_h)
 
     clusters = _cluster_faces(boxes, src_w, src_h, samples)
-    largest = max(clusters, key=lambda c: c["box"][2] * c["box"][3])
-    largest_x, _, largest_w, _ = largest["box"]
+
+    # Anchor point for a single-crop layout: whichever detected face
+    # recurred across the most sampled frames (ties broken by size), not
+    # simply the single largest box seen. Chaotic, fast-moving footage --
+    # handheld/IRL streams, motion blur, panning, crowds in the background
+    # -- makes face detection noisy; picking by raw size alone lets one
+    # spurious, oversized false-positive from a single frame hijack the
+    # crop for the *entire* clip (compute_layout runs once per clip and
+    # commits to one static crop window). A detection that only showed up
+    # once out of several samples isn't reliable enough to anchor on --
+    # a plain center crop is the safer default there.
+    most_consistent = max(clusters, key=lambda c: (c["occurrence_frac"], c["box"][2] * c["box"][3]))
+    min_confident_occurrence = 1.0 / 3  # detected in at least ~1/3 of sampled frames
+    has_confident_anchor = most_consistent["occurrence_frac"] >= min_confident_occurrence
+    anchor_x = most_consistent["box"][0] + most_consistent["box"][2] / 2
 
     # A source that's already portrait/vertical (a phone-held IRL stream,
     # anything already shot roughly 9:16) is one continuous scene -- not a
@@ -203,9 +219,12 @@ def compute_layout(
     # around, and splitting the frame on that would zoom into a chunk of
     # it as a fake "facecam" while throwing away the rest of the actual
     # scene. Always give a portrait source a single crop of the whole
-    # frame instead, anchored on whichever detected face is biggest.
+    # frame instead, anchored on the most reliably-detected face -- or
+    # centered, if nothing was detected reliably enough to trust.
     if src_h >= src_w:
-        return _face_centered_crop(src_w, src_h, largest_x + largest_w / 2, target_w, target_h)
+        if has_confident_anchor:
+            return _face_centered_crop(src_w, src_h, anchor_x, target_w, target_h)
+        return _center_crop(src_w, src_h, target_w, target_h)
 
     def is_overlay(c: dict) -> bool:
         med_x, med_y, med_w, med_h = c["box"]
@@ -241,8 +260,11 @@ def compute_layout(
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
     # No stable small/off-center overlay -- a large and/or roughly centered
-    # face (talking head, interview, explainer video), or a face that
-    # moves around the frame (a real scene, not an overlay). Single-crop
-    # behavior, anchored on the biggest detected face, handles all of
-    # these well.
-    return _face_centered_crop(src_w, src_h, largest_x + largest_w / 2, target_w, target_h)
+    # face (talking head, interview, explainer video), a face that moves
+    # around the frame (a real scene, not an overlay), or noisy/unreliable
+    # detections (fast-moving handheld footage). Anchor on the most
+    # consistently-detected face if there's one worth trusting; otherwise
+    # a plain center crop beats guessing from a one-off detection.
+    if has_confident_anchor:
+        return _face_centered_crop(src_w, src_h, anchor_x, target_w, target_h)
+    return _center_crop(src_w, src_h, target_w, target_h)
