@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
+from clipper.loud_moments import find_loud_moments
 from clipper.reframe import compute_layout
 from clipper.render import render_clip
 from clipper.select_moments import select_clips
@@ -274,12 +275,16 @@ def _run_job(job_id: str) -> None:
         _cache_transcript(raw_dir, dl.video_path, dl.duration, words)
 
         cancel()
+        _set(job_id, state="selecting", message="Scanning audio for loud/high-energy moments...")
+        loud_moments = find_loud_moments(dl.video_path, dl.duration)
+
+        cancel()
         _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments...")
         _progress(job_id, 0.55)
         picks = select_clips(
             words, dl.duration,
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
-            focus=req.focus, source_title=dl.title,
+            focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -497,10 +502,12 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             _set(job_id, state="error", error="The downloaded source video is gone -- resubmit the source URL instead.")
             return
         cancel()
+        loud_moments = find_loud_moments(cached["video_path"], cached["duration"])
+        cancel()
         picks = select_clips(
             cached["words"], cached["duration"],
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
-            focus=focus, source_title=source_title,
+            focus=focus, source_title=source_title, loud_moments=loud_moments,
         )
 
         def _overlaps_used(p) -> bool:

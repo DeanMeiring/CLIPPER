@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .loud_moments import LoudMoment
 from .transcribe import Word
 
 # Check https://docs.claude.com/en/docs/about-claude/models for current model
@@ -151,6 +152,25 @@ def _with_shorts_tag(title: str) -> str:
     return f"{title} #Shorts"
 
 
+def _loud_moments_block(loud_moments: Optional[List[LoudMoment]]) -> str:
+    if not loud_moments:
+        return ""
+    listing = "\n".join(
+        f"- {m.start:.0f}s-{m.end:.0f}s (peak {m.peak_db:.0f} dBFS, {m.jump_db:.0f} dB above the surrounding baseline)"
+        for m in loud_moments
+    )
+    return f"""
+Audio analysis also flagged these moments as noticeably louder than the
+surrounding audio -- shouting, a scream, a "crash out", or a similar burst
+of volume. Treat this as a hint, not a verdict: game sound effects, music
+stings, and other loud-but-unremarkable audio trigger it too, and plenty of
+great clips aren't loud at all. Cross-check against what's actually being
+said in the transcript at that timestamp before picking one of these as a
+clip -- only pick it if the content itself earns it.
+{listing}
+"""
+
+
 def select_clips(
     words: List[Word],
     video_duration: float,
@@ -161,11 +181,13 @@ def select_clips(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
+    loud_moments: Optional[List[LoudMoment]] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
+    loud_line = _loud_moments_block(loud_moments)
 
     prompt = f"""You are picking highlight clips from a video transcript for short-form
 content (YouTube Shorts / TikTok / Reels). The transcript below has [mm:ss]
@@ -173,7 +195,7 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}
+{source_line}{focus_line}{loud_line}
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
 - work as a standalone moment (a hook, a punchline, a strong claim, a story
