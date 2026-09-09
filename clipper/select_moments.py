@@ -171,6 +171,20 @@ clip -- only pick it if the content itself earns it.
 """
 
 
+def _strategy_notes_block(strategy_notes: Optional[str]) -> str:
+    if not strategy_notes:
+        return ""
+    return f"""
+A previous analysis of this channel's own upload performance (real view
+counts, retention, and traffic data) found the following. Use it as
+guidance on what tends to work for THIS channel's audience -- title/hook
+style, topic, format -- but still judge each moment on its own merits
+from the transcript below; don't force a pick just because it superficially
+matches this analysis.
+{strategy_notes}
+"""
+
+
 def select_clips(
     words: List[Word],
     video_duration: float,
@@ -182,12 +196,14 @@ def select_clips(
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
     loud_moments: Optional[List[LoudMoment]] = None,
+    strategy_notes: Optional[str] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
     loud_line = _loud_moments_block(loud_moments)
+    strategy_line = _strategy_notes_block(strategy_notes)
 
     prompt = f"""You are picking highlight clips from a video transcript for short-form
 content (YouTube Shorts / TikTok / Reels). The transcript below has [mm:ss]
@@ -195,7 +211,7 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}{loud_line}
+{source_line}{focus_line}{loud_line}{strategy_line}
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
 - work as a standalone moment (a hook, a punchline, a strong claim, a story
@@ -264,6 +280,7 @@ def select_from_candidate_windows(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
+    strategy_notes: Optional[str] = None,
 ) -> List[WindowPick]:
     """Pick the best clips from a set of pre-filtered candidate windows
     (long-VOD pipeline) instead of one continuous transcript.
@@ -278,6 +295,7 @@ def select_from_candidate_windows(
 
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource VOD title: {source_title}\n" if source_title else ""
+    strategy_line = _strategy_notes_block(strategy_notes)
 
     blocks = []
     for w in windows:
@@ -294,7 +312,7 @@ that were already pre-filtered out of a much longer livestream VOD (chat
 activity spikes and/or moments viewers already clipped). Each candidate
 window below is its own short segment with its own transcript, timestamped
 LOCALLY from 0 at the start of that window -- not the VOD's absolute time.
-{source_line}{focus_line}
+{source_line}{focus_line}{strategy_line}
 Not every candidate window is actually a good clip -- some chat spikes are
 noise, reactions to something off-screen, or don't read well out of context.
 Pick only the ones that would genuinely work as a standalone short-form clip.

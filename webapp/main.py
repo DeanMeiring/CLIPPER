@@ -33,6 +33,7 @@ from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot
+from clipper import channel_strategy
 from clipper.channel_strategy import get_ai_overview
 from clipper import youtube_analytics
 from clipper import youtube_oauth
@@ -46,6 +47,17 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 # Persists on the same volume job data lives on, so the connected YouTube
 # account survives restarts/redeploys -- see clipper/youtube_oauth.py.
 _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
+_channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
+
+
+def _load_strategy_notes() -> Optional[str]:
+    """The most recently saved AI channel-analysis overview, if any, for
+    clip selection to use as guidance. None (not an error) if nothing's
+    been saved yet -- callers should treat this exactly like the other
+    optional signals (focus, loud moments): a hint when present, no
+    behavior change when absent."""
+    entry = channel_strategy.load_latest_overview(_channel_strategy_path)
+    return entry["overview"] if entry else None
 # CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
 # in-memory is fine -- a login round-trip through Google takes seconds, not
 # something that needs to survive a restart.
@@ -260,6 +272,7 @@ def _run_job(job_id: str) -> None:
         mapped = select_and_map(
             candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, api_key=None, source_title=source_title,
+            strategy_notes=_load_strategy_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -297,6 +310,7 @@ def _run_job(job_id: str) -> None:
             words, dl.duration,
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
+            strategy_notes=_load_strategy_notes(),
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -503,6 +517,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         mapped = select_and_map(
             candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
             focus=focus, api_key=None, source_title=source_title,
+            strategy_notes=_load_strategy_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -520,6 +535,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             cached["words"], cached["duration"],
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
             focus=focus, source_title=source_title, loud_moments=loud_moments,
+            strategy_notes=_load_strategy_notes(),
         )
 
         def _overlaps_used(p) -> bool:
@@ -873,6 +889,28 @@ def _gather_channel_insights_data() -> dict:
         except Exception as e:
             result["analytics_error"] = str(e)
 
+        # Per-video retention, merged onto each video in the heuristic
+        # snapshot by id -- tells apart "nobody clicked it" (low views,
+        # retention doesn't matter yet) from "people clicked but didn't
+        # stick around" (decent views, weak retention), which raw view
+        # counts alone can't distinguish.
+        recent_videos = (result.get("heuristic") or {}).get("recent_videos")
+        if recent_videos:
+            try:
+                retention_by_id = youtube_analytics.get_video_retention(access_token, channel_id)
+            except Exception as e:
+                result["retention_error"] = str(e)
+                retention_by_id = {}
+            for v in recent_videos:
+                r = retention_by_id.get(v.get("id"))
+                if r:
+                    v["average_view_duration_seconds"] = r["average_view_duration_seconds"]
+                    v["average_view_percentage"] = r["average_view_percentage"]
+
+    saved = channel_strategy.load_latest_overview(_channel_strategy_path)
+    if saved:
+        result["saved_strategy_notes_at"] = saved["timestamp"]
+
     return result
 
 
@@ -914,6 +952,7 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
         overview = get_ai_overview(snapshot, data.get("analytics"), focus=req.focus)
     except Exception as e:
         raise HTTPException(502, f"Could not generate an overview: {e}") from e
+    channel_strategy.save_overview(_channel_strategy_path, overview, channel_title=snapshot.get("channel_title"))
     return {"overview": overview}
 
 
@@ -1771,6 +1810,14 @@ async function loadChannelInsights() {
 
   if (data.setup_needed) {
     body.appendChild(el('div', { className: 'hint', text: data.setup_needed }));
+  }
+
+  if (data.saved_strategy_notes_at) {
+    const when = new Date(data.saved_strategy_notes_at * 1000).toLocaleDateString();
+    body.appendChild(el('div', {
+      className: 'hint',
+      text: `🧠 Using saved strategy notes from ${when} to help pick clips -- generate a fresh overview below to update them.`,
+    }));
   }
 
   if (data.oauth_configured) {

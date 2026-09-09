@@ -37,6 +37,37 @@ def get_own_channel(access_token: str) -> Optional[dict]:
     return {"id": items[0]["id"], "title": items[0]["snippet"]["title"]}
 
 
+def get_video_retention(access_token: str, channel_id: str, lookback_days: int = 90, max_videos: int = 50) -> dict:
+    """Per-video views/retention over the last `lookback_days`, keyed by
+    video id. This is what tells apart two different problems that both
+    just look like "few views": nobody clicked it (a reach/hook problem --
+    low views, retention doesn't matter yet) vs. people clicked but didn't
+    stick around (a content/pacing problem -- decent views, weak
+    retention). A video with strong retention but weak view count is a
+    reach problem, not a quality one -- exactly the gap a creator's own
+    gut sense of "this one was good" often can't see from view count
+    alone."""
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=lookback_days)
+    data = _get(ANALYTICS_URL, access_token, {
+        "ids": f"channel=={channel_id}",
+        "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "metrics": "views,averageViewDuration,averageViewPercentage",
+        "dimensions": "video",
+        "sort": "-views",
+        "maxResults": max_videos,
+    })
+    result: dict = {}
+    for row in data.get("rows") or []:
+        video_id, views, avg_duration, avg_pct = row[0], row[1], row[2], row[3]
+        result[video_id] = {
+            "views": views,
+            "average_view_duration_seconds": avg_duration,
+            "average_view_percentage": avg_pct,
+        }
+    return result
+
+
 def get_insights(access_token: str, channel_id: str, lookback_days: int = 90) -> dict:
     """Best day-of-week (by views), retention, and top traffic sources over
     the last `lookback_days`, from the channel's real Analytics data."""

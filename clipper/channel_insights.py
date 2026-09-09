@@ -65,6 +65,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
             age_days = max(1.0, (now - published_dt).total_seconds() / 86400)
             views = int(v.get("statistics", {}).get("viewCount", 0))
             videos.append({
+                "id": v["id"],
                 "title": v["snippet"]["title"],
                 "published_at": published_at,
                 "views": views,
