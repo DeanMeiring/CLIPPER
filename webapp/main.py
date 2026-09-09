@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
@@ -32,12 +32,23 @@ from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
+from clipper.channel_insights import get_channel_snapshot
+from clipper import youtube_analytics
+from clipper import youtube_oauth
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 JOB_META_NAME = "job.json"
 TERMINAL_STATES = ("done", "error", "cancelled")
+
+# Persists on the same volume job data lives on, so the connected YouTube
+# account survives restarts/redeploys -- see clipper/youtube_oauth.py.
+_youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
+# CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
+# in-memory is fine -- a login round-trip through Google takes seconds, not
+# something that needs to survive a restart.
+_youtube_oauth_states: dict[str, float] = {}
 
 
 class JobCancelled(Exception):
@@ -759,6 +770,105 @@ def search_creator_endpoint(q: str) -> dict:
     return {"results": [vars(e) for e in results]}
 
 
+def _youtube_redirect_uri() -> str:
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        raise HTTPException(400, "RAILWAY_PUBLIC_DOMAIN isn't set -- can't build an OAuth redirect URI")
+    return f"https://{domain}/auth/youtube/callback"
+
+
+@protected.get("/auth/youtube/login")
+def youtube_login() -> RedirectResponse:
+    """Kick off the OAuth flow for the channel owner's own YouTube account
+    (see clipper/youtube_oauth.py) -- reads real Analytics data instead of
+    just the public Data API's view counts."""
+    if not youtube_oauth.is_configured():
+        raise HTTPException(
+            400,
+            "YOUTUBE_OAUTH_CLIENT_ID / YOUTUBE_OAUTH_CLIENT_SECRET aren't set -- "
+            "see the README for how to create them in Google Cloud Console.",
+        )
+    redirect_uri = _youtube_redirect_uri()
+    state = secrets.token_urlsafe(24)
+    _youtube_oauth_states[state] = time.time()
+    # Prune old, abandoned login attempts instead of growing forever --
+    # this dict only ever holds a handful of entries for a single-tenant
+    # app, so a plain sweep on every login is plenty.
+    cutoff = time.time() - 600
+    for s, issued_at in list(_youtube_oauth_states.items()):
+        if issued_at < cutoff:
+            _youtube_oauth_states.pop(s, None)
+    return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state))
+
+
+@protected.get("/auth/youtube/callback")
+def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
+    if error:
+        return RedirectResponse(f"/?youtube_error={error}")
+    issued_at = _youtube_oauth_states.pop(state, None)
+    if issued_at is None or time.time() - issued_at > 600:
+        raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
+    token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
+    _youtube_token_store.save(token)
+    return RedirectResponse("/?youtube_connected=1")
+
+
+@protected.post("/api/youtube/disconnect")
+def youtube_disconnect() -> dict:
+    _youtube_token_store.clear()
+    return {"ok": True}
+
+
+@protected.get("/api/channel-insights")
+def channel_insights() -> dict:
+    """Best-day-to-post and channel-performance signals for the channel
+    you're uploading clips to -- combines two independent sources:
+
+    - `analytics`: real YouTube Analytics data (day-of-week views,
+      retention, traffic sources) for the connected account, if OAuth is
+      set up and connected. Most accurate, needs setup.
+    - `heuristic`: a rough best-day guess from public view counts on
+      recent uploads (normalized by video age), for whichever channel is
+      configured -- works immediately with no OAuth, but noisier.
+    """
+    result: dict = {"oauth_configured": youtube_oauth.is_configured(), "oauth_connected": False}
+
+    access_token = None
+    channel_id = os.environ.get("YOUTUBE_OWN_CHANNEL") or None
+    if youtube_oauth.is_configured():
+        access_token = _youtube_token_store.get_valid_access_token()
+        result["oauth_connected"] = access_token is not None
+        if access_token:
+            try:
+                own = youtube_analytics.get_own_channel(access_token)
+            except Exception as e:
+                result["analytics_error"] = f"Could not read the connected channel: {e}"
+                own = None
+            if own:
+                channel_id = own["id"]
+                result["channel_title"] = own["title"]
+
+    if channel_id:
+        try:
+            result["heuristic"] = get_channel_snapshot(channel_id)
+        except Exception as e:
+            result["heuristic_error"] = str(e)
+    else:
+        result["setup_needed"] = (
+            "Set YOUTUBE_OWN_CHANNEL (your channel ID, @handle, or username) to see "
+            "a heuristic snapshot without connecting an account, or connect your "
+            "YouTube account below for real Analytics data."
+        )
+
+    if access_token and channel_id and result["oauth_connected"]:
+        try:
+            result["analytics"] = youtube_analytics.get_insights(access_token, channel_id)
+        except Exception as e:
+            result["analytics_error"] = str(e)
+
+    return result
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -1024,6 +1134,11 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
+
+<div id="insights-panel">
+  <label style="margin-top:0">📈 Channel insights — best day to post</label>
+  <div id="insights-body"><div class="hint">Loading...</div></div>
+</div>
 
 </div>
 </div>
@@ -1538,6 +1653,107 @@ deleteBtn.addEventListener('click', async () => {
   }
   deleteBtn.disabled = false;
 });
+
+function formatSeconds(s) {
+  s = Math.round(s || 0);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, '0')}`;
+}
+
+function el(tag, opts) {
+  const node = document.createElement(tag);
+  if (opts) {
+    if (opts.text) node.textContent = opts.text;
+    if (opts.className) node.className = opts.className;
+    if (opts.href) node.href = opts.href;
+  }
+  return node;
+}
+
+async function loadChannelInsights() {
+  const body = document.getElementById('insights-body');
+  body.innerHTML = '';
+  let data;
+  try {
+    const resp = await fetch('/api/channel-insights');
+    data = await resp.json();
+  } catch (e) {
+    body.appendChild(el('div', { className: 'hint', text: 'Could not load channel insights.' }));
+    return;
+  }
+
+  if (data.channel_title) {
+    body.appendChild(el('div', { text: `Channel: ${data.channel_title}` }));
+  }
+
+  if (data.analytics) {
+    const a = data.analytics;
+    body.appendChild(el('div', {
+      text: a.best_day
+        ? `📅 Best day to post (last ${a.lookback_days}d, real Analytics data): ${a.best_day}`
+        : `Not enough Analytics data yet over the last ${a.lookback_days} days.`,
+    }));
+    body.appendChild(el('div', { className: 'hint', text: `Views by day: ${Object.entries(a.views_by_day).map(([d, v]) => `${d} ${v}`).join(' · ')}` }));
+    body.appendChild(el('div', { className: 'hint', text: `Avg view duration: ${formatSeconds(a.average_view_duration_seconds)} (${(a.average_view_percentage || 0).toFixed(0)}% of video) · Subs gained: ${a.subscribers_gained} · lost: ${a.subscribers_lost}` }));
+    if (a.traffic_sources && a.traffic_sources.length) {
+      body.appendChild(el('div', { className: 'hint', text: `Top traffic sources: ${a.traffic_sources.map(t => `${t.source} (${t.views})`).join(', ')}` }));
+    }
+  } else if (data.analytics_error) {
+    body.appendChild(el('div', { className: 'hint', text: `Analytics: ${data.analytics_error}` }));
+  }
+
+  if (data.heuristic) {
+    const h = data.heuristic;
+    if (!data.analytics) {
+      body.appendChild(el('div', {
+        text: h.best_day_heuristic
+          ? `📅 Best day to post (heuristic, from public view counts): ${h.best_day_heuristic}`
+          : 'Not enough recent uploads yet to guess a best day.',
+      }));
+    }
+    const subs = h.subscriber_count === null ? 'hidden' : h.subscriber_count;
+    body.appendChild(el('div', { className: 'hint', text: `${h.video_count} videos · ${subs} subscribers · sampled ${h.recent_videos_sampled} recent upload(s)` }));
+    body.appendChild(el('div', { className: 'hint', text: h.note }));
+  } else if (data.heuristic_error) {
+    body.appendChild(el('div', { className: 'hint', text: `Heuristic: ${data.heuristic_error}` }));
+  }
+
+  if (data.setup_needed) {
+    body.appendChild(el('div', { className: 'hint', text: data.setup_needed }));
+  }
+
+  if (data.oauth_configured) {
+    const btn = el('button', { text: data.oauth_connected ? '🔌 Disconnect YouTube account' : '🔗 Connect YouTube account for real Analytics' });
+    btn.type = 'button';
+    if (data.oauth_connected) {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        await fetch('/api/youtube/disconnect', { method: 'POST' });
+        loadChannelInsights();
+      });
+    } else {
+      btn.addEventListener('click', () => { window.location.href = '/auth/youtube/login'; });
+    }
+    body.appendChild(btn);
+  } else {
+    body.appendChild(el('div', { className: 'hint', text: 'YouTube OAuth isn\\'t configured on this deployment -- see the README for setup steps to enable real Analytics data.' }));
+  }
+}
+loadChannelInsights();
+
+(function handleYoutubeOAuthRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('youtube_connected') || params.has('youtube_error')) {
+    if (params.has('youtube_error')) {
+      alert('YouTube connection failed: ' + params.get('youtube_error'));
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete('youtube_connected');
+    url.searchParams.delete('youtube_error');
+    window.history.replaceState({}, '', url.toString());
+  }
+})();
 
 const notifyTestBtn = document.getElementById('notify-test-btn');
 notifyTestBtn.addEventListener('click', async () => {
