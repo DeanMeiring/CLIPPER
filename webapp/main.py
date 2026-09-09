@@ -1807,12 +1807,23 @@ aiOverviewBtn.addEventListener('click', async () => {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       aiOverviewBody.appendChild(el('div', { className: 'hint', text: data.detail || 'Could not generate an overview.' }));
+    } else if (!data.overview || !data.overview.trim()) {
+      // The API call succeeded but came back with nothing usable -- show
+      // that explicitly instead of silently appending an empty, invisible
+      // box that looks indistinguishable from the button doing nothing.
+      aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Got an empty response -- try again.' }));
     } else {
       const pre = el('div', { text: data.overview });
       pre.style.whiteSpace = 'pre-wrap';
-      pre.style.marginTop = '8px';
+      pre.style.marginTop = '10px';
+      pre.style.padding = '12px';
+      pre.style.border = '1px solid var(--border)';
+      pre.style.borderRadius = '8px';
       aiOverviewBody.appendChild(pre);
     }
+    // The Claude call takes 10-15s -- scroll the result into view once it
+    // lands so it isn't missed below the fold after the wait.
+    aiOverviewBody.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Could not generate an overview.' }));
   } finally {
