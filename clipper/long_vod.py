@@ -36,9 +36,56 @@ LONG_VOD_THRESHOLD_SECONDS = 90 * 60  # 90 minutes
 # per candidate for a guaranteed failure, so stop early instead.
 MAX_CONSECUTIVE_CORRUPT_DOWNLOADS = 4
 
+# How many times the upfront accessibility probe retries before concluding
+# the source is genuinely inaccessible rather than just unlucky once.
+_PROBE_ATTEMPTS = 2
+
 
 def is_long_vod(info: VideoInfo) -> bool:
     return info.duration >= LONG_VOD_THRESHOLD_SECONDS and "twitch" in info.extractor
+
+
+def _probe_source_accessible(source: str, duration: float, raw_dir: Path) -> None:
+    """Cheap upfront sanity check: pull one short window from partway
+    through the VOD before committing to downloading/transcribing up to
+    20 full candidate windows. A VOD that's subscriber-only, deleted-but-
+    still-listed, or otherwise inaccessible returns the same tiny
+    placeholder response for every range request (real content elsewhere
+    in the VOD makes no difference -- confirmed in practice: 4 candidates
+    spread across a whole VOD all failed identically). Catching that here
+    on one quick probe fails fast with a clear, specific reason instead of
+    only surfacing it after several wasted candidate downloads deep into
+    the real list, each of which can take up to a minute.
+
+    Retries a couple of times before concluding real inaccessibility, so
+    one flaky/rate-limited request doesn't wrongly abort an otherwise-
+    fine VOD -- a non-corrupt failure (timeout, network hiccup) isn't
+    conclusive either way and is left for the real candidate loop to
+    sort out."""
+    probe_start = max(0.0, duration * 0.5 - 5.0)
+    probe_end = probe_start + 8.0
+    last_error: Optional[CorruptDownload] = None
+    for attempt in range(_PROBE_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(3)
+        try:
+            download_range(source, raw_dir, probe_start, probe_end, out_name="_probe")
+            return  # got real video back -- source is accessible
+        except CorruptDownload as e:
+            last_error = e
+        except Exception:
+            return  # inconclusive (timeout, network hiccup) -- let the real loop judge it
+        finally:
+            for p in raw_dir.glob("_probe.*"):
+                p.unlink(missing_ok=True)
+
+    raise RuntimeError(
+        "This VOD's video content isn't accessible right now -- most likely "
+        "subscriber-only, restricted, or currently blocked by the source "
+        f"(a probe near the middle of the VOD came back empty {_PROBE_ATTEMPTS} times in "
+        "a row). Try a different VOD, or set YTDLP_COOKIES to an account with "
+        "access to this one."
+    ) from last_error
 
 
 def gather_candidates(
@@ -61,6 +108,12 @@ def gather_candidates(
         if on_progress:
             on_progress(msg)
         print(f"[long_vod] {msg}", flush=True)
+
+    if should_cancel:
+        should_cancel()
+
+    report("Checking that the source video is actually accessible...")
+    _probe_source_accessible(source, info.duration, raw_dir)
 
     if should_cancel:
         should_cancel()
