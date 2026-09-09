@@ -54,7 +54,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
     if video_ids:
         v_resp = requests.get(
             "https://www.googleapis.com/youtube/v3/videos",
-            params={"part": "statistics,snippet", "id": ",".join(video_ids), "key": api_key},
+            params={"part": "statistics,snippet,status,contentDetails", "id": ",".join(video_ids), "key": api_key},
             timeout=15,
         )
         v_resp.raise_for_status()
@@ -71,6 +71,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
                 "views": views,
                 "views_per_day": round(views / age_days, 1),
                 "weekday": published_dt.weekday(),
+                "restriction": _restriction_note(v),
             })
 
     best_day, views_per_day_by_weekday = _best_day_heuristic(videos)
@@ -90,6 +91,42 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
                 "noisy, especially with few videos. Connect your YouTube account "
                 "for real Analytics-based day-of-week performance and retention.",
     }
+
+
+def _restriction_note(video: dict) -> Optional[str]:
+    """A video stuck at near-zero views sometimes isn't a content or
+    packaging problem at all -- it's actually unavailable to most viewers,
+    which looks identical to "nobody wanted to watch it" from view count
+    alone. Surfacing this from the Data API's own public status/
+    contentDetails fields (no extra quota cost -- already fetching this
+    video by id) lets the AI overview name the real cause instead of
+    inventing a content explanation for a platform-level block."""
+    status = video.get("status") or {}
+    content_details = video.get("contentDetails") or {}
+    notes = []
+
+    privacy = status.get("privacyStatus")
+    if privacy and privacy != "public":
+        notes.append(f"not public ({privacy})")
+
+    upload_status = status.get("uploadStatus")
+    if upload_status and upload_status not in ("processed", "uploaded"):
+        notes.append(f"upload status: {upload_status}")
+
+    region = content_details.get("regionRestriction") or {}
+    blocked = region.get("blocked")
+    allowed = region.get("allowed")
+    if blocked:
+        sample = ", ".join(blocked[:5])
+        notes.append(f"blocked in {len(blocked)} countries ({sample}{'...' if len(blocked) > 5 else ''})")
+    elif allowed:
+        notes.append(f"only viewable in {len(allowed)} countries")
+
+    rating = content_details.get("contentRating") or {}
+    if rating.get("ytRating") == "ytAgeRestricted":
+        notes.append("age-restricted (18+, signed-out/limited reach)")
+
+    return "; ".join(notes) if notes else None
 
 
 def _best_day_heuristic(videos: List[dict]):

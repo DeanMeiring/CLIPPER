@@ -63,6 +63,17 @@ def load_latest_overview(path: Path) -> Optional[dict]:
     return entries[-1] if entries else None
 
 
+def clear_history(path: Path) -> None:
+    """Wipe all saved analyses, so a stale or noisy history (e.g. from
+    early testing, or the channel's content strategy having genuinely
+    changed) stops influencing new clip selection -- the next overview
+    generated starts a fresh history rather than building on old notes."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str]) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
@@ -90,6 +101,14 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
             pct = v.get("average_view_percentage")
             if duration is not None and pct is not None:
                 line += f", retention: {pct:.0f}% watched ({duration:.0f}s avg)"
+            # A video stuck at near-zero views because it's literally not
+            # public/available to most viewers is a THIRD explanation, on
+            # top of reach and content -- and the one Claude can't guess at
+            # from view count alone, so it's flagged explicitly here rather
+            # than left for the model to invent a content-quality reason.
+            restriction = v.get("restriction")
+            if restriction:
+                line += f" -- ⚠ PLATFORM RESTRICTED: {restriction}"
             return line
 
         if len(ranked) >= 2:
@@ -126,19 +145,31 @@ that isn't backed by this data.
 
 A common frustration this creator has: a clip they personally thought was
 weak takes off, while one they were proud of gets almost nothing. There
-are two DIFFERENT problems that both just look like "few views," and
-per-video retention (if given above) is what tells them apart:
-- Low views + no retention data or nobody watched long = a REACH problem:
+are THREE different problems that can all just look like "few views" --
+check them in this order:
+- PLATFORM RESTRICTED (flagged explicitly above on a video's line, if
+  present): the video is age-restricted, region-blocked, unlisted/private,
+  or otherwise not actually available to most viewers. This is NOT a
+  content or packaging problem -- do not invent a creative explanation for
+  it. Name the restriction plainly and say what to fix (privacy setting,
+  appeal/re-upload, avoid whatever triggered an age restriction).
+- REACH problem: low views + no retention data, or nobody watched long =
   the clip is fine, but the title/hook/thumbnail-adjacent framing didn't
-  earn the click, or it wasn't discoverable (see traffic sources).
-- Views came in but retention is weak (people bailed early) = a CONTENT
-  problem: the hook, pacing, or payoff itself isn't landing once someone's
+  earn the click, or it wasn't discoverable (see traffic sources). Low
+  views but retention is STRONG is also a reach problem, and the clearest
+  kind: the content is good, it's just not getting shown/clicked enough --
+  point this out explicitly if you see it, it's the single most actionable
+  insight this creator can get, since it means fix the title/packaging,
+  not the clip.
+- CONTENT problem: views came in but retention is weak (people bailed
+  early) -- the hook, pacing, or payoff itself isn't landing once someone's
   actually watching.
-- Low views but retention is strong = also a REACH problem, and the
-  clearest kind: the content is good, it's just not getting shown/clicked
-  enough. Point this out explicitly if you see it -- it's the single most
-  actionable insight this creator can get, since it means fix the title/
-  packaging, not the clip.
+
+Do not give generic, boilerplate advice ("post more consistently",
+"engage with your audience", "use eye-catching thumbnails") unless you can
+tie it to a specific number or title in the data above -- if a claim
+doesn't cite something concrete from this data, cut it instead of padding
+the answer with it.
 
 Based on this data, answer in exactly 4 short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-2 sentences --
@@ -148,9 +179,11 @@ BEST TIME TO POST: which day(s) actually look strongest, and how
 confident that is given how much data there is.
 
 WHY SOME CLIPS WIN: name one specific higher-performing and one specific
-lower-performing video, and diagnose the gap as a reach problem or a
-content problem per the framework above (or say which if you can't tell
-without retention data).
+lower-performing video (prefer a lower performer flagged PLATFORM
+RESTRICTED above, if any -- that's the clearest, most useful answer this
+creator can get), and diagnose the gap as platform-restricted, a reach
+problem, or a content problem per the framework above (or say which if you
+can't tell without retention data).
 
 CONTENT THAT WORKS: what type of clip and title/hook should they make
 more of, and what should they stop clipping?

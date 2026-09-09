@@ -956,6 +956,15 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
     return {"overview": overview}
 
 
+@protected.delete("/api/channel-insights/overview")
+def channel_insights_clear_overview() -> dict:
+    """Wipe the saved AI-overview history, so a stale or noisy analysis
+    stops influencing clip selection -- the next overview generated starts
+    fresh instead of piling onto whatever's already saved."""
+    channel_strategy.clear_history(_channel_strategy_path)
+    return {"ok": True}
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -1226,6 +1235,7 @@ INDEX_HTML = """<!doctype html>
   <label style="margin-top:0">📈 Channel insights — best day to post</label>
   <div id="insights-body"><div class="hint">Loading...</div></div>
   <button id="ai-overview-btn" type="button" style="margin-top:10px">🤖 Get AI strategy overview</button>
+  <button id="ai-overview-clear-btn" type="button" style="margin-top:10px;margin-left:8px">🗑 Clear saved analysis</button>
   <div id="ai-overview-body"></div>
 </div>
 
@@ -1876,6 +1886,19 @@ aiOverviewBtn.addEventListener('click', async () => {
   } finally {
     aiOverviewBtn.disabled = false;
     aiOverviewBtn.textContent = '🤖 Get AI strategy overview';
+  }
+});
+
+const aiOverviewClearBtn = document.getElementById('ai-overview-clear-btn');
+aiOverviewClearBtn.addEventListener('click', async () => {
+  if (!confirm('Clear the saved AI analysis? Future clip picks will stop using it until you generate a new one.')) return;
+  aiOverviewClearBtn.disabled = true;
+  try {
+    await fetch('/api/channel-insights/overview', { method: 'DELETE' });
+    aiOverviewBody.innerHTML = '';
+    loadChannelInsights();
+  } finally {
+    aiOverviewClearBtn.disabled = false;
   }
 });
 
