@@ -81,6 +81,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
         "video_count": int(stats.get("videoCount", 0)),
         "total_view_count": int(stats.get("viewCount", 0)),
         "recent_videos_sampled": len(videos),
+        "recent_videos": videos,
         "avg_views_per_day_recent": round(sum(v["views_per_day"] for v in videos) / len(videos), 1) if videos else None,
         "best_day_heuristic": best_day,
         "views_per_day_by_weekday": views_per_day_by_weekday,

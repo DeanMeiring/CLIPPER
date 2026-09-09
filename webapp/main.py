@@ -33,6 +33,7 @@ from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot
+from clipper.channel_strategy import get_ai_overview
 from clipper import youtube_analytics
 from clipper import youtube_oauth
 
@@ -819,18 +820,10 @@ def youtube_disconnect() -> dict:
     return {"ok": True}
 
 
-@protected.get("/api/channel-insights")
-def channel_insights() -> dict:
-    """Best-day-to-post and channel-performance signals for the channel
-    you're uploading clips to -- combines two independent sources:
-
-    - `analytics`: real YouTube Analytics data (day-of-week views,
-      retention, traffic sources) for the connected account, if OAuth is
-      set up and connected. Most accurate, needs setup.
-    - `heuristic`: a rough best-day guess from public view counts on
-      recent uploads (normalized by video age), for whichever channel is
-      configured -- works immediately with no OAuth, but noisier.
-    """
+def _gather_channel_insights_data() -> dict:
+    """Shared by /api/channel-insights and /api/channel-insights/overview
+    so the AI overview reasons over exactly the same numbers the panel
+    shows, not a second, possibly-inconsistent fetch."""
     result: dict = {"oauth_configured": youtube_oauth.is_configured(), "oauth_connected": False}
 
     access_token = None
@@ -881,6 +874,47 @@ def channel_insights() -> dict:
             result["analytics_error"] = str(e)
 
     return result
+
+
+@protected.get("/api/channel-insights")
+def channel_insights() -> dict:
+    """Best-day-to-post and channel-performance signals for the channel
+    you're uploading clips to -- combines two independent sources:
+
+    - `analytics`: real YouTube Analytics data (day-of-week views,
+      retention, traffic sources) for the connected account, if OAuth is
+      set up and connected. Most accurate, needs setup.
+    - `heuristic`: a rough best-day guess from public view counts on
+      recent uploads (normalized by video age), for whichever channel is
+      configured -- works immediately with no OAuth, but noisier.
+    """
+    return _gather_channel_insights_data()
+
+
+class OverviewRequest(BaseModel):
+    focus: Optional[str] = None
+
+
+@protected.post("/api/channel-insights/overview")
+def channel_insights_overview(req: OverviewRequest) -> dict:
+    """A plain-language strategy read from Claude over the same channel
+    data the insights panel shows -- best day, what content is working,
+    format notes. Costs a Claude API call, so this is its own on-demand
+    endpoint (a button) rather than something the panel auto-loads."""
+    data = _gather_channel_insights_data()
+    snapshot = data.get("heuristic")
+    if not snapshot:
+        raise HTTPException(
+            400,
+            data.get("heuristic_error")
+            or data.get("setup_needed")
+            or "No channel data available yet -- set YOUTUBE_OWN_CHANNEL or connect your YouTube account first.",
+        )
+    try:
+        overview = get_ai_overview(snapshot, data.get("analytics"), focus=req.focus)
+    except Exception as e:
+        raise HTTPException(502, f"Could not generate an overview: {e}") from e
+    return {"overview": overview}
 
 
 @app.get("/healthz")
@@ -1152,6 +1186,8 @@ INDEX_HTML = """<!doctype html>
 <div id="insights-panel">
   <label style="margin-top:0">📈 Channel insights — best day to post</label>
   <div id="insights-body"><div class="hint">Loading...</div></div>
+  <button id="ai-overview-btn" type="button" style="margin-top:10px">🤖 Get AI strategy overview</button>
+  <div id="ai-overview-body"></div>
 </div>
 
 </div>
@@ -1755,6 +1791,35 @@ async function loadChannelInsights() {
   }
 }
 loadChannelInsights();
+
+const aiOverviewBtn = document.getElementById('ai-overview-btn');
+const aiOverviewBody = document.getElementById('ai-overview-body');
+aiOverviewBtn.addEventListener('click', async () => {
+  aiOverviewBtn.disabled = true;
+  aiOverviewBtn.textContent = 'Thinking...';
+  aiOverviewBody.innerHTML = '';
+  try {
+    const resp = await fetch('/api/channel-insights/overview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      aiOverviewBody.appendChild(el('div', { className: 'hint', text: data.detail || 'Could not generate an overview.' }));
+    } else {
+      const pre = el('div', { text: data.overview });
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.marginTop = '8px';
+      aiOverviewBody.appendChild(pre);
+    }
+  } catch (e) {
+    aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Could not generate an overview.' }));
+  } finally {
+    aiOverviewBtn.disabled = false;
+    aiOverviewBtn.textContent = '🤖 Get AI strategy overview';
+  }
+});
 
 (function handleYoutubeOAuthRedirect() {
   const params = new URLSearchParams(window.location.search);
