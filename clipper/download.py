@@ -232,9 +232,22 @@ _MIN_FULL_VIDEO_BYTES = 2_000
 def _check_not_corrupt(path: Path, label: str, min_bytes: int = _MIN_VIDEO_BYTES) -> None:
     size = path.stat().st_size
     if size < min_bytes:
+        # The corrupt response is small enough to just show it -- rather
+        # than guessing "rate-limited?" every time, surface what the
+        # source actually said (a JSON error blob, an HTML "subscribers
+        # only" or "video unavailable" page, a rate-limit message, etc.)
+        # so a failure like this is self-diagnosing in the logs instead
+        # of needing to be reproduced and inspected by hand.
+        snippet = ""
+        try:
+            text = path.read_bytes()[:500].decode("utf-8", errors="replace").strip()
+            if text:
+                snippet = f" -- content: {text[:300]!r}"
+        except OSError:
+            pass
         raise CorruptDownload(
             f"{label}: downloaded file is only {size} bytes -- likely an error "
-            "response from the source rather than real video (rate-limited?)"
+            f"response from the source rather than real video{snippet}"
         )
 
 
