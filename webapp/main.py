@@ -850,9 +850,23 @@ def channel_insights() -> dict:
 
     if channel_id:
         try:
-            result["heuristic"] = get_channel_snapshot(channel_id)
+            snapshot = get_channel_snapshot(channel_id)
         except Exception as e:
+            snapshot = None
             result["heuristic_error"] = str(e)
+        if snapshot:
+            result["heuristic"] = snapshot
+        elif "heuristic_error" not in result:
+            # A None return (as opposed to a raised exception) means the
+            # lookup itself succeeded but found no matching channel -- most
+            # often YOUTUBE_OWN_CHANNEL missing the "@" prefix on a handle
+            # (falls through to the legacy "username" lookup, which most
+            # channels don't have) or a plain typo. Surface that instead of
+            # silently showing nothing.
+            result["heuristic_error"] = (
+                f"No YouTube channel found for {channel_id!r}. If this is a handle, "
+                "make sure it starts with \"@\" (e.g. @YourChannel), not just the name."
+            )
     else:
         result["setup_needed"] = (
             "Set YOUTUBE_OWN_CHANNEL (your channel ID, @handle, or username) to see "
