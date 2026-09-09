@@ -175,11 +175,22 @@ def _strategy_notes_block(strategy_notes: Optional[str]) -> str:
     if not strategy_notes:
         return ""
     return f"""
-A previous analysis of this channel's own upload performance (real view
-counts, retention, and traffic data) found the following. Use it as
-guidance on what tends to work for THIS channel's audience -- title/hook
-style, topic, format -- but still judge each moment on its own merits
-from the transcript below; don't force a pick just because it superficially
+A previous analysis of THIS channel's own real upload performance (actual
+view counts, retention, and traffic data -- not a generic best-practices
+list) found the following. Treat this as a genuine third factor in your
+decision, on equal footing with how strong a moment reads in the
+transcript and any audio/chat signal below -- not just a tiebreaker:
+- SELECTION: when candidates are close, prefer the one whose topic, pacing,
+  or hook most resembles what this data shows actually working for this
+  specific audience (or actively avoid a pattern it shows failing).
+- TITLE/DESCRIPTION: write upload_title and description to match the hook
+  style, phrasing, and topic angle this data shows earning clicks for THIS
+  channel specifically -- not a generic clip-title style. If it names a
+  reach problem (good content, weak title) on past clips, that's a direct
+  instruction to make the title stronger and more specific this time, not
+  just descriptive.
+Still judge each moment on its own merits from the transcript -- don't force
+a pick that doesn't actually work as a clip just because it superficially
 matches this analysis.
 {strategy_notes}
 """
@@ -227,9 +238,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "end": 58.0,
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
     "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip"
+    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
 
@@ -333,9 +344,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "end": 52.0,
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
     "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip"
+    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
 
