@@ -68,6 +68,20 @@ that isn't backed by this data.
 {focus_line}
 {data_block}
 
+A common frustration this creator has: a clip they personally thought was
+weak takes off, while one they were proud of gets almost nothing. Your job
+in the WHY section below is specifically to explain that gap using
+audience-facing signals -- the things that decide whether a clip gets
+shown/clicked/watched at all, which usually have nothing to do with how
+good the moment actually is: title/hook wording (does it work as a
+stand-alone hook out of context, or does it need setup the title doesn't
+give?), how discoverable it is (Shorts feed vs. search vs. suggested --
+see traffic sources if given), whether the topic/subject is something
+people search for or recognize, and how it performs in the first few
+seconds (retention, if given). A "good" moment with a flat or vague title
+can lose to a "worse" moment with a punchy one, because most viewers never
+get past the first second either way.
+
 Based on this data, answer in exactly 4 short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-3 sentences):
 
@@ -77,23 +91,22 @@ too thin to trust yet rather than overstating it.
 
 WHY SOME CLIPS WIN: directly contrast the higher-performing uploads
 against the lower-performing ones above -- name at least one specific
-video from each group. What actually differs between them: topic,
-title wording/hook style, subject matter, length implied by the
-content, day posted? Be concrete about what separates a winner from a
-flop here, not a generic "funny moments do well" observation that
-could apply to any channel.
+video from each group and explain the gap using the audience-facing
+signals described above, not a vague "funny moments do well" observation
+that could apply to any channel.
 
-CONTENT THAT WORKS: given that contrast, what specific type of clip
-should they make more of, and what should they stop clipping or
-deprioritize?
+CONTENT THAT WORKS: given that contrast, what specific type of clip (and
+specifically what kind of title/hook) should they make more of, and what
+should they stop clipping or deprioritize?
 
 FORMAT NOTES: from retention/traffic-source signals if available (or
 general best practice for this kind of short-form channel if not), what
 format or editing change would most likely help -- hook strength,
 pacing, length, captions, etc.
 
-Keep the whole response under 260 words total. Be direct and specific,
-not hedging analyst-speak."""
+Keep the whole response under 280 words total. Be direct and specific,
+not hedging analyst-speak. Finish every section you start -- do not cut
+a sentence off partway."""
 
 
 def get_ai_overview(
@@ -113,7 +126,15 @@ def get_ai_overview(
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,
-        max_tokens=800,
+        # A ~280-word target is comfortably under 800 tokens in the normal
+        # case, but Claude doesn't always hit a word target exactly --
+        # this got visibly cut off mid-sentence in practice at 800. Give
+        # it real headroom rather than trimming the prompt's ambition to
+        # fit a tight budget.
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
-    return "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
+    text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
+    if resp.stop_reason == "max_tokens":
+        print(f"[channel_strategy] response hit max_tokens -- likely truncated ({len(text)} chars)", flush=True)
+    return text
