@@ -669,6 +669,12 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
         # starts, but the UI shouldn't show the stale figure even briefly.
         job["created_at"] = time.time()
         job["estimate_minutes"] = None
+        # Clear any error left over from an earlier failed attempt on this
+        # same job -- the frontend appends job.error to the status line
+        # whenever it's set, with no regard for the current state, so a
+        # stale error here would show up glued onto this run's status even
+        # after it finishes cleanly.
+        job["error"] = None
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
     job_queue.put(job_id)
