@@ -25,10 +25,26 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
 
     videos = snapshot.get("recent_videos") or []
     if videos:
-        lines.append("\nRecent uploads (title -- views, views/day since posted, weekday posted):")
-        for v in videos:
+        # Sorted and split into two explicitly labeled groups instead of
+        # one flat list -- doing the comparison ourselves means Claude
+        # answers "why do winners win" by actually contrasting two
+        # concrete groups, not by eyeballing a table and hoping a pattern
+        # jumps out.
+        ranked = sorted(videos, key=lambda v: v["views_per_day"], reverse=True)
+
+        def _fmt(v: dict) -> str:
             weekday_name = _WEEKDAY_NAMES[v["weekday"]]
-            lines.append(f'- "{v["title"]}" -- {v["views"]} views, {v["views_per_day"]}/day, posted {weekday_name}')
+            return f'- "{v["title"]}" -- {v["views"]} views, {v["views_per_day"]}/day, posted {weekday_name}'
+
+        if len(ranked) >= 2:
+            half = max(1, len(ranked) // 2)
+            lines.append("\nHigher-performing uploads (top half by views/day since posted):")
+            lines.extend(_fmt(v) for v in ranked[:half])
+            lines.append("\nLower-performing uploads (bottom half by views/day since posted):")
+            lines.extend(_fmt(v) for v in ranked[half:])
+        else:
+            lines.append("\nRecent uploads (title -- views, views/day since posted, weekday posted):")
+            lines.extend(_fmt(v) for v in ranked)
 
     if analytics:
         lines.append(f"\nReal YouTube Analytics (last {analytics['lookback_days']} days, the channel's own authenticated data):")
@@ -52,23 +68,31 @@ that isn't backed by this data.
 {focus_line}
 {data_block}
 
-Based on this data, answer in exactly 3 short sections (plain text, no
+Based on this data, answer in exactly 4 short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-3 sentences):
 
 BEST TIME TO POST: which day(s) actually look strongest here, and how
 confident that read is given how much data there is -- be honest if it's
 too thin to trust yet rather than overstating it.
 
-CONTENT THAT WORKS: looking at which video titles/topics got
-disproportionately more views than the others, what pattern do the
-winners share? What should they make more of?
+WHY SOME CLIPS WIN: directly contrast the higher-performing uploads
+against the lower-performing ones above -- name at least one specific
+video from each group. What actually differs between them: topic,
+title wording/hook style, subject matter, length implied by the
+content, day posted? Be concrete about what separates a winner from a
+flop here, not a generic "funny moments do well" observation that
+could apply to any channel.
+
+CONTENT THAT WORKS: given that contrast, what specific type of clip
+should they make more of, and what should they stop clipping or
+deprioritize?
 
 FORMAT NOTES: from retention/traffic-source signals if available (or
 general best practice for this kind of short-form channel if not), what
 format or editing change would most likely help -- hook strength,
 pacing, length, captions, etc.
 
-Keep the whole response under 200 words total. Be direct and specific,
+Keep the whole response under 260 words total. Be direct and specific,
 not hedging analyst-speak."""
 
 
@@ -89,7 +113,7 @@ def get_ai_overview(
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,
-        max_tokens=600,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}],
     )
     return "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
