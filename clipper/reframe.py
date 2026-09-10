@@ -273,6 +273,7 @@ def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: floa
 def _build_overlay_layout(
     boxes: List[Tuple[int, int, int, int]],
     src_w: int, src_h: int, target_w: int, target_h: int, facecam_height_frac: float,
+    pad: float = 1.7,
 ) -> Optional[Layout]:
     """Build a SplitLayout/MultiCamSplitLayout from a list of pixel-space
     facecam boxes already decided to be the real overlays and already
@@ -280,7 +281,17 @@ def _build_overlay_layout(
     (vision or the Haar heuristic). Sorts left-to-right for on-screen
     reading order. None (meaning: no overlay here) if boxes is empty --
     the caller should fall through to the no-overlay case (anchor or
-    center crop)."""
+    center crop).
+
+    `pad` should match what kind of box this is: the Haar heuristic only
+    ever detects a face, tightly, so it needs generous padding (the
+    default, 1.7x) to reach the edges of the actual webcam window around
+    it. A vision-detected box is already asked to cover the *whole*
+    visible facecam window, not just the face -- padding that again by
+    1.7x overshoots well past the window into the surrounding gameplay,
+    which is exactly what "it's grabbing facecam and gameplay in the same
+    crop, not a clean facecam" turned out to be. Callers with
+    vision-sourced boxes should pass a much tighter pad instead."""
     if not boxes:
         return None
     boxes = sorted(boxes, key=lambda b: b[0])
@@ -288,10 +299,10 @@ def _build_overlay_layout(
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
-        bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h)
+        bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h, pad=pad)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
     tile_widths = _tile_widths(target_w, len(boxes))
-    bottom_cams = [_facecam_crop(src_w, src_h, b, w, bottom_out_h) for b, w in zip(boxes, tile_widths)]
+    bottom_cams = [_facecam_crop(src_w, src_h, b, w, bottom_out_h, pad=pad) for b, w in zip(boxes, tile_widths)]
     return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
 
@@ -379,8 +390,16 @@ def compute_layout(
         vision_boxes = None
 
     if vision_boxes is not None:
+        # A small pad here (not the 1.7x the Haar path below needs) --
+        # vision was asked for the whole facecam window already, not just
+        # a face, so padding it again by 1.7x was overshooting well past
+        # the window into the surrounding gameplay ("taking a snippet of
+        # their facecam AND gameplay" instead of a clean facecam crop).
+        # Just enough margin to avoid a razor-tight crop cutting into the
+        # window's own edge/border.
         layout = _build_overlay_layout(
-            vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac
+            vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac,
+            pad=1.08,
         )
         if layout is not None:
             n = len(vision_boxes[:MAX_COCAM_TILES])
