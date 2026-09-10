@@ -265,9 +265,23 @@ def _face_centered_crop(src_w: int, src_h: int, center_x: float, target_w_ratio:
     return CropWindow(x=x, y=base.y, w=base.w, h=base.h)
 
 
-def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: float = 1.7) -> CropWindow:
+def _facecam_crop(
+    src_w: int, src_h: int, box, out_w: int, out_h: int, pad: float = 1.7, max_expand: float = 1.35,
+) -> CropWindow:
     """Crop around a padded face box at the exact aspect ratio needed to
-    scale cleanly to (out_w, out_h) with no distortion."""
+    scale cleanly to (out_w, out_h) with no distortion.
+
+    A single full-width facecam tile (out_w=1080) has an aspect close
+    enough to a real webcam window's that this "exact fit" barely needs
+    to stretch the crop past the padded box. A multi-cam tile is much
+    narrower (out_w split 2-3 ways) against the same band height, so its
+    aspect is far more portrait than any real facecam -- hitting it
+    exactly would balloon crop_h well past the box itself (measured: a
+    3-way tile needs ~2.6x the padded box height), pulling in a slab of
+    surrounding gameplay rather than the person's own camera feed. Cap
+    the expansion instead -- a mildly non-uniform stretch on a small
+    tile reads far better than gameplay bleeding into what's supposed to
+    be a clean facecam."""
     fx, fy, fw, fh = box
     cx, cy = fx + fw / 2, fy + fh / 2
 
@@ -279,6 +293,9 @@ def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: floa
     else:
         crop_h = pad_h
         crop_w = crop_h * target_aspect
+
+    crop_w = min(crop_w, pad_w * max_expand)
+    crop_h = min(crop_h, pad_h * max_expand)
 
     crop_w = min(crop_w, src_w)
     crop_h = min(crop_h, src_h)
