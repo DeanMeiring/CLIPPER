@@ -114,6 +114,7 @@ class RegenerateRequest(BaseModel):
     num_clips: int = 3
     min_len: float = 20.0
     max_len: float = 90.0
+    reset_used: bool = False
 
 
 def _job_public(job: dict) -> dict:
@@ -481,6 +482,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     focus = req.get("focus") or None
     min_len = float(req.get("min_len") or 20.0)
     max_len = float(req.get("max_len") or 90.0)
+    reset_used = bool(req.get("reset_used"))
 
     with jobs_lock:
         job = jobs[job_id]
@@ -488,8 +490,21 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         source_title = job.get("source_title") or ""
         source_duration = job.get("duration") or 0.0
         existing_clips = list(job.get("clips") or [])
-        used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
-        used_window_indices = set(job.get("used_window_indices") or [])
+        # reset_used ("start fresh") deliberately ignores which windows/
+        # ranges earlier clips came from when SELECTING this batch, so it
+        # can freely re-pick from the whole candidate pool -- the tradeoff
+        # a tester explicitly asked for over the normal anti-duplicate
+        # behavior, useful once a small candidate pool (long-VOD
+        # chat-highlight windows especially) is mostly exhausted from
+        # repeated regenerates. It only relaxes *selection*, though: the
+        # original set is kept (original_used_*) and still merged into
+        # what gets persisted below, so a still-kept older clip's window
+        # isn't forgotten for the *next* (non-reset) regenerate just
+        # because this one ignored it.
+        original_used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+        original_used_window_indices = set(job.get("used_window_indices") or [])
+        used_ranges = [] if reset_used else list(original_used_ranges)
+        used_window_indices = set() if reset_used else set(original_used_window_indices)
     if not pipeline:
         pipeline = "long_vod" if list(raw_dir.glob("cand_*.mp4")) else "short"
 
@@ -527,8 +542,8 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
-        used_window_indices |= {pick.window_index for _, pick in mapped}
-        _set(job_id, used_window_indices=list(used_window_indices))
+        persisted_used_window_indices = original_used_window_indices | {pick.window_index for _, pick in mapped}
+        _set(job_id, used_window_indices=list(persisted_used_window_indices))
     else:
         cached = _load_transcript_for_regenerate(raw_dir)
         if not cached:
@@ -549,8 +564,8 @@ def _run_regenerate(job_id: str, req: dict) -> None:
 
         picks = [p for p in picks if not _overlaps_used(p)][:num_clips]
         render_items = [(cached["video_path"], cached["words"], pick) for pick in picks]
-        used_ranges = used_ranges + [(pick.start, pick.end) for pick in picks]
-        _set(job_id, used_ranges=[list(r) for r in used_ranges])
+        persisted_used_ranges = original_used_ranges + [(pick.start, pick.end) for pick in picks]
+        _set(job_id, used_ranges=[list(r) for r in persisted_used_ranges])
 
     if not render_items:
         _set(job_id, state="error", error="Claude didn't return any new, non-overlapping moments this time -- try a different focus.")
@@ -1334,6 +1349,13 @@ INDEX_HTML = """<!doctype html>
     <input id="regen-focus" placeholder="e.g. funniest moments">
     <label>How many more clips?</label>
     <input id="regen-num-clips" type="number" value="3" min="1" max="10">
+    <label style="margin-top:12px;display:flex;align-items:center;gap:8px;font-weight:normal">
+      <input id="regen-reset-used" type="checkbox" style="width:auto">
+      🔁 Start fresh (ignore previously-picked moments -- may repeat earlier clips)
+    </label>
+    <p class="hint">Off (default): only ever picks NEW moments, same as before. On: forgets what's already been
+      picked so Claude can freely re-pick from everything again -- useful once repeated "generate more" calls
+      have used up most of the available moments and it's only returning 1-2 clips.</p>
     <div class="modal-actions" style="margin-top:16px">
       <button id="regen-go-btn" type="button">Generate</button>
       <button id="regen-cancel-btn" type="button" class="ghost">Cancel</button>
@@ -1612,6 +1634,7 @@ document.getElementById('mood-skip-btn').addEventListener('click', () => {
 const regenModal = document.getElementById('regen-modal-overlay');
 const regenFocusInput = document.getElementById('regen-focus');
 const regenNumClipsInput = document.getElementById('regen-num-clips');
+const regenResetUsedInput = document.getElementById('regen-reset-used');
 const regenGoBtn = document.getElementById('regen-go-btn');
 let regenJobId = null;
 
@@ -1619,6 +1642,7 @@ function openRegenModal(jobId) {
   regenJobId = jobId;
   regenFocusInput.value = '';
   regenNumClipsInput.value = '3';
+  regenResetUsedInput.checked = false;
   regenModal.classList.add('open');
 }
 
@@ -1645,6 +1669,7 @@ regenGoBtn.addEventListener('click', async () => {
       body: JSON.stringify({
         focus: regenFocusInput.value.trim() || null,
         num_clips: parseInt(regenNumClipsInput.value, 10) || 3,
+        reset_used: regenResetUsedInput.checked,
       }),
     });
     if (!resp.ok) {
