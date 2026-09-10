@@ -70,6 +70,12 @@ positioned where a facecam might be. If a candidate box's content is a static
 graphic or texture rather than a real person, or it doesn't appear
 consistently across the frames, leave it out entirely.
 
+Each real person should appear as exactly ONE box, even if their camera feed
+is highlighted, spotlighted, or duplicated elsewhere on screen (e.g. an
+"active speaker" indicator showing the same person again) -- pick whichever
+single box best represents their main camera window and skip the rest. Never
+return two overlapping or near-identical boxes for the same person.
+
 Respond with ONLY a JSON array (no other text), one entry per distinct
 facecam overlay found, in this exact shape:
 [{"x": 0.0, "y": 0.62, "w": 0.18, "h": 0.20}]
@@ -77,6 +83,33 @@ facecam overlay found, in this exact shape:
 x/y/w/h are fractions of the frame's width/height (0 to 1), covering the
 visible facecam window as tightly as reasonable. Return an empty array []
 if there's no real facecam overlay visible in these frames at all."""
+
+
+def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _dedupe_boxes(boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.3) -> List[Tuple[int, int, int, int]]:
+    """Drop boxes that substantially overlap an already-kept one, keeping
+    the larger of the two. A safety net for when the model returns two
+    boxes for what's really the same person's camera feed (seen in
+    practice on a source where multiple closely-packed webcam tiles made
+    the boundary between them ambiguous) -- despite the prompt asking for
+    exactly one box per person, this doesn't rely on the model getting
+    that right every time."""
+    kept: List[Tuple[int, int, int, int]] = []
+    for box in sorted(boxes, key=lambda b: b[2] * b[3], reverse=True):
+        if not any(_iou(box, k) >= iou_threshold for k in kept):
+            kept.append(box)
+    return kept
 
 
 def detect_facecams(
@@ -147,4 +180,4 @@ def detect_facecams(
         h = min(h, src_h - y)
         boxes.append((int(x), int(y), int(w), int(h)))
 
-    return boxes
+    return _dedupe_boxes(boxes)
