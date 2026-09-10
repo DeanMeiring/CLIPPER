@@ -185,7 +185,13 @@ def detect_facecams(
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=model,
-            max_tokens=500,
+            # A 4-5 person co-stream needs a box + "what" description per
+            # person -- enough JSON that 500 tokens could clip it mid-
+            # response (seen in logs as a bare JSON parse failure), which
+            # discards every detected box and falls back to the much less
+            # reliable Haar heuristic for the whole clip. More headroom
+            # only costs anything if it's actually used.
+            max_tokens=1024,
             messages=[{"role": "user", "content": content}],
         )
         raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
@@ -303,21 +309,33 @@ real people? Answer NO if you see any of:
 Respond with ONLY one word: YES or NO."""
 
 
+# One frame is too easy to catch at a bad instant -- a caption transition,
+# a motion blur frame, a brief occlusion -- and a single unlucky NO used to
+# be enough to discard an entire correctly-detected facecam. Sample a few
+# points across the clip and go with the majority instead, so one noisy
+# frame can't overrule the rest.
+_VERIFY_FRACS = (0.25, 0.5, 0.75)
+
+
 def verify_rendered_facecam(
     output_path: Path, api_key: Optional[str] = None, model: str = DEFAULT_MODEL,
 ) -> Optional[bool]:
     """True if the ALREADY-RENDERED clip's facecam band looks clean, False
-    if it looks visibly wrong, or None if this check wasn't usable (no API
-    key, extraction failed, the call errored, or gave an unclear answer) --
-    callers should treat None as "can't tell, don't block on it," not as
-    either true or false.
+    if it looks visibly wrong, or None if this check wasn't usable at all
+    (no API key, no frame could be extracted/answered) -- callers should
+    treat None as "can't tell, don't block on it," not as either true or
+    false.
 
     This is a final catch-all after pre-render detection: it looks at what
     actually got burned into the output, not just what compute_layout
     predicted from the source frames, so it can catch any failure mode
     (a wrong box, a duplicated face, a misidentified graphic, padding that
     grabbed surrounding gameplay) in one check instead of needing a
-    bespoke fix for each new way this can go wrong."""
+    bespoke fix for each new way this can go wrong. Samples multiple
+    frames and requires a clear majority of NOs before rejecting -- ties
+    (e.g. only one frame gave a usable answer) favor keeping the render,
+    since discarding a real facecam is a worse outcome than occasionally
+    keeping one with a minor blemish."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
@@ -327,26 +345,37 @@ def verify_rendered_facecam(
     except ImportError:
         return None
 
-    frame_b64 = _extract_frame_b64(output_path)
-    if not frame_b64:
+    client = anthropic.Anthropic(api_key=api_key)
+    votes: List[bool] = []
+    for t_frac in _VERIFY_FRACS:
+        frame_b64 = _extract_frame_b64(output_path, t_frac=t_frac)
+        if not frame_b64:
+            continue
+        content: List[dict] = [
+            {"type": "text", "text": _VERIFY_PROMPT},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}},
+        ]
+        try:
+            resp = client.messages.create(model=model, max_tokens=10, messages=[{"role": "user", "content": content}])
+            raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip().upper()
+        except Exception as e:
+            print(f"[facecam_vision] post-render verification call failed, skipping frame: {e}", flush=True)
+            continue
+        if raw.startswith("Y"):
+            votes.append(True)
+        elif raw.startswith("N"):
+            votes.append(False)
+        else:
+            print(f"[facecam_vision] post-render verification gave an unclear answer ({raw!r}), skipping frame", flush=True)
+
+    if len(votes) < 2:
+        # A single usable frame is exactly the failure mode this function
+        # exists to avoid trusting -- not enough to call it either way.
+        print(f"[facecam_vision] post-render verification only got {len(votes)} usable frame(s), skipping", flush=True)
         return None
 
-    content: List[dict] = [
-        {"type": "text", "text": _VERIFY_PROMPT},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}},
-    ]
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        resp = client.messages.create(model=model, max_tokens=10, messages=[{"role": "user", "content": content}])
-        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip().upper()
-    except Exception as e:
-        print(f"[facecam_vision] post-render verification failed, skipping: {e}", flush=True)
-        return None
-
-    if raw.startswith("Y"):
-        return True
-    if raw.startswith("N"):
-        return False
-    print(f"[facecam_vision] post-render verification gave an unclear answer ({raw!r}), skipping", flush=True)
-    return None
+    no_votes = votes.count(False)
+    yes_votes = len(votes) - no_votes
+    result = no_votes <= yes_votes
+    print(f"[facecam_vision] post-render verification votes: {yes_votes} YES / {no_votes} NO -> {'keep' if result else 'reject'}", flush=True)
+    return result
