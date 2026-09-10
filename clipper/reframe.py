@@ -240,7 +240,17 @@ def compute_layout(
     end: float,
     target_w: int = 1080,
     target_h: int = 1920,
-    samples: int = 9,
+    # Bumped from 9: with per-frame detection tuned down to avoid noise
+    # (see _detect_faces), a marginal-but-real facecam clears the ~1/3
+    # occurrence bar less reliably on any single run of samples -- more
+    # temporal trials narrows that gap without loosening detection itself.
+    # This differentially helps: a facecam that's genuinely on screen the
+    # whole clip recurs at roughly the same rate no matter how many times
+    # it's sampled, so more samples mostly just reduces the odds bad luck
+    # (a brief occlusion, a bad angle) pushes it under the bar; one-off
+    # detector noise, by contrast, doesn't gain nearly as much of a boost
+    # from being sampled more since it isn't actually recurring.
+    samples: int = 15,
     facecam_height_frac: float = 0.40,
 ) -> Layout:
     boxes, src_w, src_h = _detect_faces(video_path, start, end, samples)
