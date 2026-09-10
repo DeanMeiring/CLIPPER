@@ -70,22 +70,7 @@ def _salvage_json_array(raw: str) -> Optional[list]:
     return items or None
 
 
-def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 4096) -> list:
-    try:
-        import anthropic
-    except ImportError as e:
-        raise RuntimeError(
-            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
-        ) from e
-
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
-            "or pass --api-key."
-        )
-
-    client = anthropic.Anthropic(api_key=api_key)
+def _ask_claude_for_json_once(client, prompt: str, model: str, max_tokens: int) -> list:
     resp = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -109,6 +94,35 @@ def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_to
             )
             return salvaged
         raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
+
+
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 4096) -> list:
+    try:
+        import anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
+        ) from e
+
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
+            "or pass --api-key."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
+    except RuntimeError as e:
+        # A response with no usable JSON and nothing for the salvage pass
+        # to recover from is rare but confirmed to happen (seen in
+        # practice: the model's output cut off right after the opening
+        # ```json fence, before a single field). Rather than failing the
+        # whole job over what's likely a one-off bad generation, retry
+        # once with a fresh sample before giving up for real.
+        print(f"[select_moments] first attempt failed ({e}), retrying once", flush=True)
+        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
 
 
 def _chunk_transcript(words: List[Word], mark_every: float = 10.0) -> str:

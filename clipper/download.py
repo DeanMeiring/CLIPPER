@@ -298,6 +298,14 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if not source or not source.strip():
+        # Path("").resolve() silently resolves to the current working
+        # directory (a real, existing directory), which then sails past
+        # the local-file-path branch's existence check below and fails
+        # much later with a confusing ffprobe error on a directory path
+        # instead of a clear "you didn't give me anything" message.
+        raise ValueError("No source URL or file path given")
+
     if not is_url(source):
         path = Path(source).expanduser().resolve()
         if not path.exists():

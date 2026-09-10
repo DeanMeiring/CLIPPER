@@ -672,6 +672,13 @@ threading.Thread(target=_worker, daemon=True).start()
 
 @protected.post("/api/jobs")
 def create_job(req: JobRequest) -> dict:
+    if not req.source or not req.source.strip():
+        # Without this, an empty source silently resolves to the
+        # container's own working directory in download_video() and
+        # fails much later, mid-job, with a confusing ffprobe error --
+        # reject it immediately instead with a message that actually
+        # explains what's wrong.
+        raise HTTPException(400, "Enter a video URL or file path first.")
     job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
         jobs[job_id] = {
