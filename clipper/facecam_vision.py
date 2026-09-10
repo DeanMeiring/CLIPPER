@@ -377,6 +377,11 @@ def verify_rendered_facecam(
         else:
             print(f"[facecam_vision] post-render verification gave an unclear answer ({raw!r}), skipping frame", flush=True)
 
+        # Once two frames agree, a third can't change the majority --
+        # stop early rather than spend another API call per clip on it.
+        if votes.count(True) >= 2 or votes.count(False) >= 2:
+            break
+
     if len(votes) < 2:
         # A single usable frame is exactly the failure mode this function
         # exists to avoid trusting -- not enough to call it either way.

@@ -333,7 +333,12 @@ def _build_overlay_layout(
     # comes out fully filled by construction, whatever the mix of
     # aspects, because the widths are derived FROM those aspects rather
     # than assumed equal.
-    min_bottom_h = round(target_h * 0.12)  # floor: never so short a face is hard to see
+    # Floor low enough that an ordinary 3-way collab still fits exactly:
+    # three 16:9 cams want a ~202px band, and a floor above that forces
+    # letterboxing on the single most common multi-cam setup there is.
+    # At 1080 wide that still leaves each of three tiles ~360x200, which
+    # is a perfectly legible face thumbnail.
+    min_bottom_h = round(target_h * 0.10)
     max_bottom_h = round(target_h * facecam_height_frac)
     natural_bottom_h = target_w / sum(aspects)
     bottom_out_h = int(round(min(max(natural_bottom_h, min_bottom_h), max_bottom_h)))
@@ -343,8 +348,19 @@ def _build_overlay_layout(
         bottom = _facecam_crop(src_w, src_h, boxes[0], pad=pad)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
     bottom_cams = [_facecam_crop(src_w, src_h, b, pad=pad) for b in boxes]
-    raw_widths = [bottom_out_h * a for a in aspects]
-    tile_out_widths = [int(round(w)) for w in raw_widths[:-1]]
+    # Split target_w in proportion to the aspect ratios, rather than as
+    # bottom_out_h * aspect. The two are identical whenever bottom_out_h
+    # is its natural (unclamped) value, but deriving from target_w keeps
+    # the widths summing to it even when the height hit a clamp: three
+    # 16:9 cams -- an entirely ordinary 3-way collab -- push the natural
+    # height under the floor, and the old form then left the last tile
+    # absorbing a badly wrong remainder (36% off its aspect, and outright
+    # NEGATIVE for ultrawide cams, which would fail the ffmpeg render and
+    # error the whole job). This form is proportional and always
+    # positive; a clamped height just means each tile letterboxes a
+    # little, which render_clip already handles.
+    raw_widths = [target_w * a / sum(aspects) for a in aspects]
+    tile_out_widths = [max(1, int(round(w))) for w in raw_widths[:-1]]
     tile_out_widths.append(target_w - sum(tile_out_widths))  # remainder absorbed by the last tile
     return MultiCamSplitLayout(
         top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h,
