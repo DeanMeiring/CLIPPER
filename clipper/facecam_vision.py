@@ -149,27 +149,33 @@ def _dedupe_boxes(boxes: List[Tuple[int, int, int, int]], iou_threshold: float =
     return kept
 
 
-_CROP_CHECK_PROMPT = """Each image below is a crop cut out of a livestream frame, at a spot that
-was guessed to be the streamer's facecam/webcam window. The guess is
-often wrong, so check each one.
+_CROP_REFINE_PROMPT = """Each image is a region cut out of a livestream frame, taken from around a
+spot where a streamer's facecam/webcam window was detected. The detected
+bounds are frequently the wrong SIZE -- too large or too small, or offset
+-- so in any given image the webcam window may not fill the frame. It
+might sit off to one side, or be surrounded by gameplay, room decor, a
+wall poster, a monitor, or a neighbouring streamer's separate webcam.
 
-For each image IN ORDER, decide whether it actually shows a real human
-being filmed live by a camera -- a streamer's own webcam view.
+For each image IN ORDER, locate the streamer's own webcam window -- the
+rectangular live camera feed of a real person -- and give its TIGHT
+bounds as fractions (0-1) of THAT IMAGE's own width and height.
 
-Answer false for an image showing:
-- game footage, a game character, or any drawn/rendered/animated figure
-- game UI of any kind: banners, logos, score or stat panels, buttons,
-  timers, text, menus
-- a monitor, webpage, video player, thumbnail, or other screen content
-- mostly background, empty space, or something unrecognizable
-- a real face that belongs to something being watched on screen rather
-  than to a camera pointed at the streamer
+Fit the box to the webcam window itself: include the whole of that
+person's camera frame, and exclude gameplay, UI, wall/room background
+outside the window, and any separate webcam belonging to someone else.
 
-Answer true only when it plainly shows a real, live human.
+Return a JSON array in the same order as the images, each entry either:
+  {"x":0.10,"y":0.22,"w":0.55,"h":0.63}   the window's bounds in that image
+  null                                    no real person's camera feed here
 
-Respond with ONLY a JSON array of booleans, one per image, in the same
-order as the images given -- for example [true, false, true]. Nothing
-else."""
+Respond with ONLY the JSON array. Nothing else."""
+
+# How much context to include around a detected box when asking for a
+# refinement. The detected bounds are unreliable in size, so the crop has
+# to be roomy enough that a too-small box still contains the whole window,
+# while staying tight enough that the window is large in frame -- which is
+# the entire reason this second pass localizes better than the first.
+_REFINE_PAD = 1.9
 
 
 def _extract_frame_bgr(video_path: Path, t: float):
@@ -184,25 +190,41 @@ def _extract_frame_bgr(video_path: Path, t: float):
     return frame if ok else None
 
 
-def _verify_box_crops(
+def _padded_region(box, src_w: int, src_h: int) -> Tuple[int, int, int, int]:
+    """The region to show the model when refining `box` -- the box grown
+    about its own centre by _REFINE_PAD, clipped to the frame."""
+    x, y, w, h = box
+    cx, cy = x + w / 2, y + h / 2
+    rw, rh = min(w * _REFINE_PAD, src_w), min(h * _REFINE_PAD, src_h)
+    rx = int(round(max(0, min(cx - rw / 2, src_w - rw))))
+    ry = int(round(max(0, min(cy - rh / 2, src_h - rh))))
+    return rx, ry, int(round(rw)), int(round(rh))
+
+
+def _refine_box_crops(
     video_path: Path, start: float, end: float,
     boxes: List[Tuple[int, int, int, int]], client, model: str,
 ) -> List[Tuple[int, int, int, int]]:
-    """Keep only the boxes whose actual pixels show a real person.
+    """Re-locate each detected facecam window by looking at it up close.
 
-    Asking a vision model for precise bounding-box coordinates is the
-    weakest thing we ask of it, and it shows: a run that reported "man
-    wearing headphones, main streamer facecam", "person with curly hair,
-    camera feed" and "shirtless man with headset" rendered a game banner,
-    some screen content, and one real person -- confident, plausible
-    descriptions attached to two regions that contained no face at all.
-    Judging an image that has already been cropped is a far easier task
-    than localizing it, so this crops each candidate and asks a plain
-    yes/no about what's actually inside, in one call for all of them.
+    Whole-frame localization is the weakest thing asked of the model, and
+    the failure is one of SIZE rather than position: a three-way collab
+    came back with all three windows found in roughly the right places but
+    bounded wrongly, so the crops landed on a wall poster and a monitor
+    beside two of the streamers instead of on the streamers. All three
+    were real people; only one was framed correctly.
 
-    Fails open: any error, or an unusable answer, keeps the boxes as they
-    were, since dropping every candidate on a failed check would silently
-    turn off facecams altogether."""
+    Rejecting the odd-looking ones would throw away two real facecams, so
+    this corrects them instead. Each candidate is re-shown as a roomy crop
+    around itself, where the window occupies much more of the image and is
+    correspondingly easier to bound, and the model returns tight bounds
+    within that crop, which are mapped back to source coordinates. A null
+    verdict (genuinely nothing there) still drops the box, which is what
+    catches a face that belongs to on-screen content rather than a camera.
+
+    Fails open at every step: an error, an unusable answer, a mismatched
+    count, or an implausible refinement all keep the original box, so a
+    bad pass can never silently turn facecams off."""
     if not boxes:
         return boxes
 
@@ -213,13 +235,12 @@ def _verify_box_crops(
     import cv2
 
     src_h, src_w = frame.shape[:2]
-    content: List[dict] = [{"type": "text", "text": _CROP_CHECK_PROMPT}]
-    for (x, y, w, h) in boxes:
-        x0, y0 = max(0, x), max(0, y)
-        x1, y1 = min(src_w, x + w), min(src_h, y + h)
-        crop = frame[y0:y1, x0:x1]
+    regions = [_padded_region(b, src_w, src_h) for b in boxes]
+    content: List[dict] = [{"type": "text", "text": _CROP_REFINE_PROMPT}]
+    for (rx, ry, rw, rh) in regions:
+        crop = frame[ry:ry + rh, rx:rx + rw]
         if crop.size == 0:
-            return boxes  # can't judge them all -- don't judge any
+            return boxes
         ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             return boxes
@@ -231,32 +252,56 @@ def _verify_box_crops(
 
     try:
         resp = client.messages.create(
-            model=model, max_tokens=200, messages=[{"role": "user", "content": content}],
+            model=model, max_tokens=600, messages=[{"role": "user", "content": content}],
         )
         raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
         raw = raw.strip("`")
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
-        verdicts = json.loads(raw)
+        answers = json.loads(raw)
     except Exception as e:
-        print(f"[facecam_vision] crop check failed, keeping boxes as detected: {e}", flush=True)
+        print(f"[facecam_vision] box refinement failed, keeping boxes as detected: {e}", flush=True)
         return boxes
 
-    if not isinstance(verdicts, list) or len(verdicts) != len(boxes):
+    if not isinstance(answers, list) or len(answers) != len(boxes):
+        got = len(answers) if isinstance(answers, list) else "?"
         print(
-            f"[facecam_vision] crop check returned {len(verdicts) if isinstance(verdicts, list) else '?'} "
-            f"verdict(s) for {len(boxes)} box(es), keeping boxes as detected", flush=True,
+            f"[facecam_vision] box refinement returned {got} answer(s) for {len(boxes)} box(es), "
+            "keeping boxes as detected", flush=True,
         )
         return boxes
 
-    kept = []
-    for box, ok_verdict in zip(boxes, verdicts):
-        if ok_verdict is True:
-            kept.append(box)
-        else:
-            print(f"[facecam_vision] crop check rejected box {box} -- not a real person's camera feed", flush=True)
-    print(f"[facecam_vision] crop check kept {len(kept)}/{len(boxes)} box(es)", flush=True)
-    return kept
+    refined: List[Tuple[int, int, int, int]] = []
+    for box, region, answer in zip(boxes, regions, answers):
+        if answer is None:
+            print(f"[facecam_vision] refinement found no camera feed around {box} -- dropping it", flush=True)
+            continue
+        rx, ry, rw, rh = region
+        try:
+            nx = rx + float(answer["x"]) * rw
+            ny = ry + float(answer["y"]) * rh
+            nw = float(answer["w"]) * rw
+            nh = float(answer["h"]) * rh
+        except (KeyError, TypeError, ValueError):
+            print(f"[facecam_vision] refinement gave an unusable box for {box}, keeping it as detected", flush=True)
+            refined.append(box)
+            continue
+        # A refinement should tighten a box, not invent a new one somewhere
+        # else -- anything degenerate or larger than the region it came
+        # from means the model lost track of the frame it was given.
+        if nw < 8 or nh < 8 or nw > rw or nh > rh:
+            print(f"[facecam_vision] refinement for {box} was implausible ({int(nw)}x{int(nh)}), keeping it as detected", flush=True)
+            refined.append(box)
+            continue
+        nx = max(0.0, min(nx, src_w - 1))
+        ny = max(0.0, min(ny, src_h - 1))
+        nw, nh = min(nw, src_w - nx), min(nh, src_h - ny)
+        new_box = (int(nx), int(ny), int(nw), int(nh))
+        print(f"[facecam_vision] refined box {box} -> {new_box}", flush=True)
+        refined.append(new_box)
+
+    print(f"[facecam_vision] refinement kept {len(refined)}/{len(boxes)} box(es)", flush=True)
+    return refined
 
 
 def detect_facecams(
@@ -360,8 +405,10 @@ def detect_facecams(
         boxes.append((int(x), int(y), int(w), int(h)))
         print(f"[facecam_vision] kept box ({int(x)},{int(y)},{int(w)},{int(h)}): {what!r}", flush=True)
 
-    # Dedupe first so the crop check only pays for distinct candidates.
-    return _verify_box_crops(video_path, start, end, _dedupe_boxes(boxes), client, model)
+    # Dedupe first so refinement only pays for distinct candidates, and
+    # again afterwards in case two loose boxes tighten onto the same window.
+    refined = _refine_box_crops(video_path, start, end, _dedupe_boxes(boxes), client, model)
+    return _dedupe_boxes(refined)
 
 
 def _extract_frame_b64(video_path: Path, t_frac: float = 0.5) -> Optional[str]:
