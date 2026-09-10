@@ -210,3 +210,95 @@ def detect_facecams(
         print(f"[facecam_vision] kept box ({int(x)},{int(y)},{int(w)},{int(h)}): {what!r}", flush=True)
 
     return _dedupe_boxes(boxes)
+
+
+def _extract_frame_b64(video_path: Path, t_frac: float = 0.5) -> Optional[str]:
+    """One frame from partway through an already-rendered (short) clip."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    duration_ms = (frame_count / fps) * 1000 if fps > 0 else 0
+    cap.set(cv2.CAP_PROP_POS_MSEC, duration_ms * t_frac)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        return None
+    h, w = frame.shape[:2]
+    if w > _MAX_FRAME_WIDTH:
+        scale = _MAX_FRAME_WIDTH / w
+        frame = cv2.resize(frame, (_MAX_FRAME_WIDTH, int(h * scale)))
+    ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok2:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+_VERIFY_PROMPT = """This is a frame from an already-rendered vertical short-form clip. The
+bottom portion of the frame is supposed to show one or more clean webcam/
+facecam windows of real people -- their actual camera feed, filling that
+part of the frame.
+
+Look specifically at the bottom portion and answer: does it show clean,
+correctly-cropped facecam(s) of real people? Answer NO if you see any of:
+- part of the surrounding gameplay/game footage bleeding into the facecam
+  area (not just the person's own camera feed)
+- a game UI element, score card, stats/results screen, or other graphic
+  instead of (or alongside) a real person
+- the same person's face duplicated/repeated in more than one spot
+- no facecam at all where one should be, or something clearly wrong or
+  broken-looking about the crop
+
+Respond with ONLY one word: YES or NO."""
+
+
+def verify_rendered_facecam(
+    output_path: Path, api_key: Optional[str] = None, model: str = DEFAULT_MODEL,
+) -> Optional[bool]:
+    """True if the ALREADY-RENDERED clip's facecam band looks clean, False
+    if it looks visibly wrong, or None if this check wasn't usable (no API
+    key, extraction failed, the call errored, or gave an unclear answer) --
+    callers should treat None as "can't tell, don't block on it," not as
+    either true or false.
+
+    This is a final catch-all after pre-render detection: it looks at what
+    actually got burned into the output, not just what compute_layout
+    predicted from the source frames, so it can catch any failure mode
+    (a wrong box, a duplicated face, a misidentified graphic, padding that
+    grabbed surrounding gameplay) in one check instead of needing a
+    bespoke fix for each new way this can go wrong."""
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    frame_b64 = _extract_frame_b64(output_path)
+    if not frame_b64:
+        return None
+
+    content: List[dict] = [
+        {"type": "text", "text": _VERIFY_PROMPT},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}},
+    ]
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(model=model, max_tokens=10, messages=[{"role": "user", "content": content}])
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip().upper()
+    except Exception as e:
+        print(f"[facecam_vision] post-render verification failed, skipping: {e}", flush=True)
+        return None
+
+    if raw.startswith("Y"):
+        return True
+    if raw.startswith("N"):
+        return False
+    print(f"[facecam_vision] post-render verification gave an unclear answer ({raw!r}), skipping", flush=True)
+    return None

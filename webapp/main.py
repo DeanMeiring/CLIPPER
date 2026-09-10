@@ -27,8 +27,9 @@ from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.loud_moments import find_loud_moments
-from clipper.reframe import compute_layout
+from clipper.reframe import MultiCamSplitLayout, SplitLayout, center_crop_layout, compute_layout
 from clipper.render import render_clip
+from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
@@ -348,6 +349,24 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
         render_clip(video_path, pick.start, pick.end, layout, ass_path, out_path)
+
+        if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
+            # A final catch-all after compute_layout's own pre-render
+            # detection: look at what actually got burned into the
+            # output, not just what was predicted from the source frames
+            # beforehand. False (not None -- that means the check itself
+            # wasn't usable) means vision confidently saw something wrong
+            # with the rendered facecam band; re-render as a plain crop
+            # rather than ship a clip with a broken-looking facecam.
+            verified = facecam_vision.verify_rendered_facecam(out_path)
+            if verified is False:
+                print(f"[render] clip {out_index} failed post-render facecam check -- re-rendering as a plain crop", flush=True)
+                try:
+                    fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
+                    render_clip(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
+                except Exception as e:
+                    print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
+
         clips_meta.append({
             "file": out_path.name,
             "start": pick.start,

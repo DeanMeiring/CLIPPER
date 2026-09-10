@@ -193,6 +193,26 @@ def _cluster_faces(
     return results
 
 
+def center_crop_layout(video_path: Path, target_w: int = 1080, target_h: int = 1920) -> CropWindow:
+    """A plain center crop of the whole frame -- no face or facecam
+    detection at all. Used as a safe fallback re-render when a facecam
+    layout fails post-render verification: a plain crop can't have any of
+    the specific failure modes (wrong box, a duplicated face, a game
+    graphic mistaken for a person) a facecam split can, so it's always a
+    safe thing to fall back to."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if src_w <= 0 or src_h <= 0:
+        raise RuntimeError(f"Could not read video dimensions (got {src_w}x{src_h}): {video_path}")
+    return _center_crop(src_w, src_h, target_w, target_h)
+
+
 def _center_crop(src_w: int, src_h: int, target_w_ratio: int, target_h_ratio: int) -> CropWindow:
     if src_w / src_h > target_w_ratio / target_h_ratio:
         crop_h = src_h
