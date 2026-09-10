@@ -405,10 +405,16 @@ def detect_facecams(
         boxes.append((int(x), int(y), int(w), int(h)))
         print(f"[facecam_vision] kept box ({int(x)},{int(y)},{int(w)},{int(h)}): {what!r}", flush=True)
 
-    # Dedupe first so refinement only pays for distinct candidates, and
-    # again afterwards in case two loose boxes tighten onto the same window.
-    refined = _refine_box_crops(video_path, start, end, _dedupe_boxes(boxes), client, model)
-    return _dedupe_boxes(refined)
+    # _refine_box_crops is deliberately NOT called. Re-localizing each box
+    # in a zoomed crop was supposed to fix its size; in production it moved
+    # boxes around instead -- a cam at y=172 refined down to y=340 while the
+    # one at y=302 refined up to y=251, the two crossing straight past each
+    # other, and one came back as a 577x137 strip that no webcam has ever
+    # been shaped like. The raw detections, by contrast, land on the same
+    # three positions clip after clip (bottom-left ~(0,650,580,430) and two
+    # right-edge cams at y~170 and y~302), so they are the more trustworthy
+    # signal and are used as-is.
+    return _dedupe_boxes(boxes)
 
 
 def _extract_frame_b64(video_path: Path, t_frac: float = 0.5) -> Optional[str]:
