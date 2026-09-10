@@ -397,10 +397,8 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             # This briefly ran on single-cam only, on the theory that a check
             # rejecting 100% of multi-cam renders couldn't be measuring
             # anything real. Turning it off proved the opposite: the renders
-            # that then shipped had a game banner and a patch of screen
-            # content in two of three tiles, with only the third an actual
-            # person. The check was right every time -- the detection feeding
-            # it was wrong, which _verify_box_crops now addresses upstream.
+            # that then shipped had two tiles of gameplay and overlay border
+            # around the people. The check has been right every time.
             # False (not None -- that means the check itself wasn't usable)
             # means vision confidently saw something wrong with the rendered
             # facecam band; re-render as a plain crop rather than ship a clip
@@ -408,6 +406,19 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             verified = facecam_vision.verify_rendered_facecam(out_path)
             if verified is False:
                 print(f"[render] clip {out_index} failed post-render facecam check -- re-rendering as a plain crop", flush=True)
+                # Keep what was rejected. Overwriting it in place meant a
+                # rejected facecam render could never be looked at, so every
+                # round of "still no facecam" came down to guessing at pixels
+                # from box coordinates in a log. This costs one file per
+                # rejection and makes the rejected version openable at
+                # /api/jobs/{id}/clips/<name>, which settles in seconds what
+                # otherwise takes a deploy and a regenerate to find out.
+                try:
+                    rejected_path = out_path.with_name(f"{out_path.stem}_rejected_facecam{out_path.suffix}")
+                    shutil.copy2(out_path, rejected_path)
+                    print(f"[render] kept the rejected facecam render as {rejected_path.name} for inspection", flush=True)
+                except OSError as e:
+                    print(f"[render] could not keep the rejected render: {e}", flush=True)
                 try:
                     fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
                     _render_atomic(video_path, pick, fallback_layout, ass_path, out_path)

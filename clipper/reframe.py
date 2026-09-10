@@ -63,11 +63,9 @@ class MultiCamSplitLayout:
     """Like SplitLayout, but for a duo/trio co-stream: 2-3 facecam overlays
     tiled side-by-side across the bottom band instead of picking (or
     guessing at) just one. bottom_cams is left-to-right in on-screen
-    reading order. bottom_cam_out_widths gives each tile's own output
-    width (a "justified row" split sized from each cam's own aspect
-    ratio -- see _build_overlay_layout -- not an equal split), and
-    render_clip tiles them across out_w in that order using those
-    widths."""
+    reading order. bottom_cam_out_widths gives each tile's output width --
+    an equal split, kept as explicit values so render_clip tiles them
+    across out_w in that order without recomputing the division."""
     top: CropWindow
     bottom_cams: List[CropWindow]
     top_out_h: int
@@ -274,38 +272,46 @@ def _face_centered_crop(src_w: int, src_h: int, center_x: float, target_w_ratio:
     return CropWindow(x=x, y=base.y, w=base.w, h=base.h)
 
 
-def _facecam_crop(src_w: int, src_h: int, box, pad: float = 1.7) -> CropWindow:
-    """Crop around a padded face box at its OWN natural aspect ratio --
-    not forced to match the output tile's aspect.
+def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: float = 1.7) -> CropWindow:
+    """Crop around a padded facecam box, expanded about its centre to
+    exactly the output tile's aspect ratio so it scales in with no
+    distortion and no black bars.
 
-    This used to expand the crop to exactly match the tile's aspect
-    ratio so ffmpeg's scale wouldn't distort it. That works fine for a
-    single full-width tile (its aspect is already close to a real
-    webcam window's), but a 2-3 way tile is much narrower against the
-    same band height -- forcing a real (typically landscape-ish)
-    facecam box to that portrait tile aspect meant either ballooning
-    the crop far past the box into surrounding gameplay, or (once that
-    expansion was capped) squashing the image with a severe non-uniform
-    stretch -- measured on a real rejected render: crop 248x204 scaled
-    to a 360x768 tile stretched height 2.6x more than width, visibly
-    warped. Neither is fixable by tuning this crop alone.
-
-    render_clip now scales this crop to fit *within* its output tile
-    (preserving aspect) and pads any leftover space with black bars
-    instead of stretching to fill it exactly -- so this just needs to
-    return a clean, undistorted crop around the actual facecam window,
-    and letterboxing handles the rest."""
+    This only stays close to the box itself while the tile is shaped
+    roughly like the box. It is _build_overlay_layout's job to keep it
+    that way by sizing the band to the cams -- give this a tall tile and
+    a wide window and it will reach far outside the window to fill it,
+    which is where the gameplay-bleeding renders came from."""
     fx, fy, fw, fh = box
     cx, cy = fx + fw / 2, fy + fh / 2
 
-    crop_w = min(fw * pad, src_w)
-    crop_h = min(fh * pad, src_h)
+    pad_w, pad_h = fw * pad, fh * pad
+    target_aspect = out_w / out_h
+    if pad_w / pad_h > target_aspect:
+        crop_w = pad_w
+        crop_h = crop_w / target_aspect
+    else:
+        crop_h = pad_h
+        crop_w = crop_h * target_aspect
+
+    crop_w = min(crop_w, src_w)
+    crop_h = min(crop_h, src_h)
 
     x = int(round(cx - crop_w / 2))
     y = int(round(cy - crop_h / 2))
     x = max(0, min(x, src_w - int(crop_w)))
     y = max(0, min(y, src_h - int(crop_h)))
     return CropWindow(x=x, y=y, w=int(crop_w), h=int(crop_h))
+
+
+
+def _even_tile_widths(total_w: int, n: int) -> List[int]:
+    """Split total_w into n even widths summing exactly to total_w --
+    even because libx264 rejects odd dimensions on a yuv420p encode."""
+    base = _even(total_w / n)
+    widths = [base] * n
+    widths[-1] = total_w - base * (n - 1)
+    return widths
 
 
 def _build_overlay_layout(
@@ -321,65 +327,44 @@ def _build_overlay_layout(
     the caller should fall through to the no-overlay case (anchor or
     center crop).
 
-    `pad` should match what kind of box this is: the Haar heuristic only
-    ever detects a face, tightly, so it needs generous padding (the
-    default, 1.7x) to reach the edges of the actual webcam window around
-    it. A vision-detected box is already asked to cover the *whole*
-    visible facecam window, not just the face -- padding that again by
-    1.7x overshoots well past the window into the surrounding gameplay,
-    which is exactly what "it's grabbing facecam and gameplay in the same
-    crop, not a clean facecam" turned out to be. Callers with
-    vision-sourced boxes should pass a much tighter pad instead."""
+    `pad` should match the box shape: Haar returns a tight face and needs
+    generous padding to reach the webcam window around it, while a
+    vision-detected box already covers the whole window and needs very
+    little."""
     if not boxes:
         return None
     boxes = sorted(boxes, key=lambda b: b[0])
-    aspects = [bw / bh for (_, _, bw, bh) in boxes]
 
-    # "Justified row" layout -- the same technique photo grids (Google
-    # Photos, Flickr) use to tile images of different aspect ratios into
-    # one row with no cropping and no padding: pick the one row height at
-    # which each image's own aspect ratio, laid out at full width for
-    # that height, sums to exactly target_w. Different people's facecam
-    # windows almost never share an aspect ratio, and forcing them into
-    # equal-width tiles at a shared height (the previous approach, no
-    # matter how that height was chosen) always left at least one tile
-    # with a mismatched aspect -- fixed via letterboxing/cropping/
-    # stretching, all of which failed post-render checks in practice.
-    # This solves it exactly instead of approximating it: every tile
-    # comes out fully filled by construction, whatever the mix of
-    # aspects, because the widths are derived FROM those aspects rather
-    # than assumed equal.
-    # Floor low enough that an ordinary 3-way collab still fits exactly:
-    # three 16:9 cams want a ~202px band, and a floor above that forces
-    # letterboxing on the single most common multi-cam setup there is.
-    # At 1080 wide that still leaves each of three tiles ~360x200, which
-    # is a perfectly legible face thumbnail.
-    min_bottom_h = round(target_h * 0.10)
-    max_bottom_h = round(target_h * facecam_height_frac)
-    natural_bottom_h = target_w / sum(aspects)
-    bottom_out_h = _even(min(max(natural_bottom_h, min_bottom_h), max_bottom_h))
+    # Tiles are EQUAL width. They were briefly sized per-cam from each
+    # window's own aspect, which fills each one perfectly but makes a row
+    # of visibly mismatched tiles -- and uneven tiles are what read as
+    # wrong on the first multi-cam render that actually shipped, not the
+    # content, which was three real people throughout.
+    #
+    # The band height is then set so that an equal tile matches the shape
+    # these cams actually are: at 3 across, 280x180 windows want a ~230px
+    # band, not the fixed 768 a flat 40%-of-frame gives. Getting that
+    # wrong is what every earlier attempt was really fighting -- too tall
+    # a band left tiles mostly black, and cropping wider to fill them
+    # dragged in gameplay and the neighbouring cam. Sizing it to the cams
+    # means each tile is filled by the person, tiles stay uniform, and
+    # whatever variation remains between cams is a thin letterbox that
+    # render_clip already handles.
+    tile_out_widths = _even_tile_widths(target_w, len(boxes))
+    aspects = sorted(bw / bh for (_, _, bw, bh) in boxes)
+    median_aspect = aspects[len(aspects) // 2]
+    natural_h = min(tile_out_widths) / median_aspect
+    bottom_out_h = _even(min(max(natural_h, target_h * 0.10), target_h * facecam_height_frac))
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
-        bottom = _facecam_crop(src_w, src_h, boxes[0], pad=pad)
+        bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h, pad=pad)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
-    bottom_cams = [_facecam_crop(src_w, src_h, b, pad=pad) for b in boxes]
+    bottom_cams = [
+        _facecam_crop(src_w, src_h, b, tw, bottom_out_h, pad=pad)
+        for b, tw in zip(boxes, tile_out_widths)
+    ]
     # Split target_w in proportion to the aspect ratios, rather than as
-    # bottom_out_h * aspect. The two are identical whenever bottom_out_h
-    # is its natural (unclamped) value, but deriving from target_w keeps
-    # the widths summing to it even when the height hit a clamp: three
-    # 16:9 cams -- an entirely ordinary 3-way collab -- push the natural
-    # height under the floor, and the old form then left the last tile
-    # absorbing a badly wrong remainder (36% off its aspect, and outright
-    # NEGATIVE for ultrawide cams, which would fail the ffmpeg render and
-    # error the whole job). This form is proportional and always
-    # positive; a clamped height just means each tile letterboxes a
-    # little, which render_clip already handles.
-    raw_widths = [target_w * a / sum(aspects) for a in aspects]
-    tile_out_widths = [max(2, _even(w)) for w in raw_widths[:-1]]
-    # Remainder to the last tile, and even like the rest: target_w and
-    # every preceding width are even, so this lands even too.
-    tile_out_widths.append(max(2, target_w - sum(tile_out_widths)))
     return MultiCamSplitLayout(
         top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h,
         bottom_cam_out_widths=tile_out_widths,
@@ -471,12 +456,10 @@ def compute_layout(
 
     if vision_boxes is not None:
         # A small pad here (not the 1.7x the Haar path below needs) --
-        # vision was asked for the whole facecam window already, not just
-        # a face, so padding it again by 1.7x was overshooting well past
-        # the window into the surrounding gameplay ("taking a snippet of
-        # their facecam AND gameplay" instead of a clean facecam crop).
-        # Just enough margin to avoid a razor-tight crop cutting into the
-        # window's own edge/border.
+        # vision is asked for the whole facecam window already, not just a
+        # face, so padding it again by 1.7x overshoots past the window
+        # into surrounding gameplay. Just enough margin to keep a
+        # razor-tight crop off the window's own edge.
         layout = _build_overlay_layout(
             vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac,
             pad=1.08,
