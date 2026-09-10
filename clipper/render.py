@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .reframe import CropWindow, Layout, SplitLayout
+from .reframe import CropWindow, Layout, MultiCamSplitLayout, SplitLayout, _tile_widths
 
 
 def _escape_for_filter(path: Path) -> str:
@@ -29,7 +29,32 @@ def render_clip(
     duration = max(0.1, end - start)
     ass = _escape_for_filter(ass_path)
 
-    if isinstance(layout, SplitLayout):
+    if isinstance(layout, MultiCamSplitLayout):
+        top = layout.top
+        tile_widths = _tile_widths(out_w, len(layout.bottom_cams))
+        parts = [f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"]
+        tile_labels = []
+        for i, (cam, tw) in enumerate(zip(layout.bottom_cams, tile_widths)):
+            label = f"cam{i}"
+            parts.append(f"[0:v]crop={cam.w}:{cam.h}:{cam.x}:{cam.y},scale={tw}:{layout.bottom_out_h}[{label}];")
+            tile_labels.append(f"[{label}]")
+        parts.append(f"{''.join(tile_labels)}hstack=inputs={len(tile_labels)}[bottom];")
+        parts.append("[top][bottom]vstack=inputs=2[stacked];")
+        parts.append(f"[stacked]ass='{ass}'[outv]")
+        filter_complex = "".join(parts)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}",
+            "-i", str(source_video),
+            "-t", f"{duration:.3f}",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    elif isinstance(layout, SplitLayout):
         top, bottom = layout.top, layout.bottom
         filter_complex = (
             f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"

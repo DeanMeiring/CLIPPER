@@ -17,9 +17,10 @@ Three outcomes:
     instead of zooming into just the tiny facecam box and losing all the
     game context.
   - Two or more such overlays (a duo/co-stream layout with multiple
-    facecams over the same gameplay): there's no principled way to pick
-    which one matters or to split more than one out cleanly, so this falls
-    back to a plain crop of the whole frame rather than guessing.
+    facecams over the same gameplay): a MultiCamSplitLayout with gameplay
+    on top and all the facecams (up to MAX_COCAM_TILES) tiled side-by-side
+    across the bottom, instead of picking just one or falling back to a
+    plain crop that shows none of them.
 """
 from __future__ import annotations
 
@@ -45,7 +46,38 @@ class SplitLayout:
     bottom_out_h: int     # output pixel height the bottom region scales to
 
 
-Layout = Union[CropWindow, SplitLayout]
+@dataclass
+class MultiCamSplitLayout:
+    """Like SplitLayout, but for a duo/trio co-stream: 2-3 facecam overlays
+    tiled side-by-side across the bottom band instead of picking (or
+    guessing at) just one. bottom_cams is left-to-right in on-screen
+    reading order; render_clip tiles them across out_w in that order using
+    the same width split (see _tile_widths)."""
+    top: CropWindow
+    bottom_cams: List[CropWindow]
+    top_out_h: int
+    bottom_out_h: int
+
+
+Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout]
+
+# Detected overlay clusters beyond this are almost always detector noise
+# (Haar false-positives), not a real 4+-way co-stream -- and even a genuine
+# one would make each tile too small to be worth showing. Cap at 3 and,
+# when there are more candidates than that, keep the ones detected most
+# consistently (see compute_layout).
+MAX_COCAM_TILES = 3
+
+
+def _tile_widths(total_w: int, n: int) -> List[int]:
+    """Split total_w into n integer widths that sum exactly to total_w --
+    used to size both the source-side facecam crops (so each one scales
+    cleanly to its output tile with no distortion) and the output-side
+    scale/hstack in render_clip, which must agree on the same split."""
+    base = total_w // n
+    widths = [base] * n
+    widths[-1] = total_w - base * (n - 1)  # remainder absorbed by the last tile
+    return widths
 
 
 def _detect_faces(video_path: Path, start: float, end: float, samples: int):
@@ -242,12 +274,27 @@ def compute_layout(
 
     if len(overlay_clusters) >= 2:
         # Two or more genuine facecam overlays -- a duo/co-stream layout.
-        # There's no principled way to pick which one "matters", and
-        # centering on the average of two unrelated on-screen positions
-        # (what treating every detection as one face used to do) produces
-        # a nonsensical crop centered on nothing real. Show the whole
-        # frame instead of guessing.
-        return _center_crop(src_w, src_h, target_w, target_h)
+        # There's no principled way to pick which one "matters" (and no
+        # per-speaker audio to infer who's actually talking from), so show
+        # all of them, tiled left-to-right across the bottom band, instead
+        # of guessing at one or giving up and showing none.
+        cams = overlay_clusters
+        if len(cams) > MAX_COCAM_TILES:
+            # More than this is almost always detector noise rather than a
+            # real 4+-way co-stream -- keep whichever recurred most
+            # consistently across the sampled frames.
+            cams = sorted(cams, key=lambda c: c["occurrence_frac"], reverse=True)[:MAX_COCAM_TILES]
+        cams.sort(key=lambda c: c["box"][0])  # left-to-right on-screen order
+
+        bottom_out_h = round(target_h * facecam_height_frac)
+        top_out_h = target_h - bottom_out_h
+        tile_widths = _tile_widths(target_w, len(cams))
+        bottom_cams = [
+            _facecam_crop(src_w, src_h, c["box"], w, bottom_out_h)
+            for c, w in zip(cams, tile_widths)
+        ]
+        top = _center_crop(src_w, src_h, target_w, top_out_h)
+        return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
     if len(overlay_clusters) == 1:
         # Exactly one small, corner-positioned, stationary face -- a
