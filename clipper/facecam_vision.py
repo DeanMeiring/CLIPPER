@@ -34,9 +34,14 @@ _MAX_FRAME_WIDTH = 960
 
 # Whole-word only (\b...\b) -- a plain substring check on these would
 # false-positive on real descriptions ("stat" inside "stationary", "ui"
-# inside "quiet", "text" inside "textured/context").
+# inside "quiet", "text" inside "textured/context"). youtube/webpage/
+# thumbnail/browser catch the "face inside a video being watched" failure
+# mode (a paused YouTube video with a real face in it, mistaken for a
+# facecam) -- low collision risk, since none of these would plausibly
+# appear in a genuine "person's own camera feed" description.
 _RED_FLAG_RE = re.compile(
-    r"\b(card|graphic|icon|logo|score|stat|stats|report|level|ui|text|screenshot|screen shot)\b"
+    r"\b(card|graphic|icon|logo|score|stat|stats|report|level|ui|text|screenshot|screen shot"
+    r"|youtube|webpage|website|browser|thumbnail)\b"
 )
 
 
@@ -71,18 +76,33 @@ Identify every distinct FACECAM/WEBCAM overlay window showing a real person's
 live video feed, composited on top of gameplay or other screen content -- the
 kind of small window a streamer's camera feed appears in.
 
+A real facecam overlay is small relative to the whole frame -- roughly a
+third of the frame's width/height at most, usually less, and positioned in a
+corner or along one edge. If a face or video takes up most or all of the
+frame, it is NOT a facecam overlay, no matter how real the person in it
+looks -- it's either the main content itself, or a video/webpage/photo the
+streamer is watching or browsing (e.g. a YouTube video, a movie clip, a
+paused video with playback controls visible, a thumbnail, someone's profile
+picture). A real person's face appearing INSIDE content being watched or
+displayed on screen is not the streamer's own camera feed -- leave it out
+even though it's a real face.
+
 Do NOT include, even if it's roughly face-shaped, face-colored, or positioned
 where a facecam might be:
 - game UI elements, icons, logos, question marks, spinners, player-name
   bubbles
 - score cards, stat trackers, results/report screens ("LEVEL 12", "TIME
   3:36", grade letters, etc.), leaderboards, level-complete screens
+- a face or video that's part of content being watched/browsed on screen
+  (a YouTube/video player, a website, a photo, a video thumbnail) rather
+  than a small overlay window composited on top of everything else
 - any other static graphic or texture that isn't an actual live camera feed
   of a person
 
 If you're not confident a candidate box is a real person's live camera feed
-specifically, leave it out -- a missed facecam is a much smaller problem than
-a game-UI graphic rendered as if it were someone's face.
+specifically -- a small, corner-positioned overlay window, not the main
+content on screen -- leave it out. A missed facecam is a much smaller
+problem than treating the wrong thing as someone's face.
 
 Each real person should appear as exactly ONE box, even if their camera feed
 is highlighted, spotlighted, or duplicated elsewhere on screen (e.g. an
@@ -191,6 +211,21 @@ def detect_facecams(
             continue
         if w <= 1 or h <= 1:
             continue
+        # Hard geometric backstop, independent of anything the model says:
+        # a real facecam overlay is a small window in a corner, never
+        # close to the whole frame. Confirmed in practice: a paused
+        # YouTube video filling almost the entire frame (playback
+        # controls, like/share buttons visible) got flagged as a
+        # "facecam" because there was a real human face in the video's
+        # own thumbnail/content -- the model correctly saw a real face,
+        # just not correctly reasoning that it belonged to something
+        # being watched, not the streamer's own camera. No legitimate
+        # corner overlay is anywhere near this large, so reject by
+        # geometry rather than depending on the model's own judgment call
+        # every time.
+        if h > 0.4 * src_h or w > 0.6 * src_w:
+            print(f"[facecam_vision] rejected box ({int(w)}x{int(h)} of {src_w}x{src_h}) -- too large to be a corner overlay", flush=True)
+            continue
         what = str(item.get("what", "")).strip()
         # Defensive backstop, not the primary defense (that's the prompt
         # itself and the model's own "what" reasoning) -- catches the
@@ -248,6 +283,10 @@ correctly-cropped facecam(s) of real people? Answer NO if you see any of:
   area (not just the person's own camera feed)
 - a game UI element, score card, stats/results screen, or other graphic
   instead of (or alongside) a real person
+- a video player, webpage, browser, or other on-screen content the
+  streamer is watching/browsing -- even one with a real person's face
+  visible in it (e.g. a YouTube video) -- since that's content being
+  viewed, not the streamer's own camera feed
 - the same person's face duplicated/repeated in more than one spot
 - no facecam at all where one should be, or something clearly wrong or
   broken-looking about the crop
