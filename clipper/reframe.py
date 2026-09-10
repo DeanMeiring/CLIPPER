@@ -324,7 +324,28 @@ def _build_overlay_layout(
     if not boxes:
         return None
     boxes = sorted(boxes, key=lambda b: b[0])
-    bottom_out_h = round(target_h * facecam_height_frac)
+    tile_widths = _tile_widths(target_w, len(boxes))
+
+    # Size the band to this clip's own detected facecam aspect ratio,
+    # capped at facecam_height_frac, instead of always using that fixed
+    # fraction. A single full-width tile is naturally close to a real
+    # facecam's aspect, so this barely changes anything there -- but a
+    # fixed 40%-of-frame band split into 2-3 narrow tiles is far taller
+    # than any real (landscape-ish) facecam window needs: under
+    # letterboxing that meant most of each tile came back as plain black
+    # bars around a small strip of actual video (measured: a 3-way tile
+    # only had ~28% of its height as real content), which reasonably
+    # read as "no facecam" to both the verifier and an actual viewer.
+    # Matching the band height to what these specific boxes need keeps
+    # it filled with real content and gives the rest back to gameplay.
+    aspects = sorted(bw / bh for (_, _, bw, bh) in boxes)
+    median_aspect = aspects[len(aspects) // 2]
+    narrowest_tile_w = min(tile_widths)
+    natural_bottom_h = narrowest_tile_w / median_aspect
+    bottom_out_h = int(max(
+        round(target_h * 0.12),  # floor: never so short a face is hard to see
+        min(natural_bottom_h, round(target_h * facecam_height_frac)),
+    ))
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
