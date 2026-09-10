@@ -277,8 +277,17 @@ bottom portion of the frame is supposed to show one or more clean webcam/
 facecam windows of real people -- their actual camera feed, filling that
 part of the frame.
 
-Look specifically at the bottom portion and answer: does it show clean,
-correctly-cropped facecam(s) of real people? Answer NO if you see any of:
+IMPORTANT: this clip has burned-in captions, and the caption text (white
+text, usually with a colored highlight word, near the bottom of the frame)
+is drawn OVER the video on every clip -- that is expected and correct on
+every single frame, whether or not the caption box happens to overlap the
+facecam band underneath it. Do NOT count caption text, its outline, or its
+drop shadow as a defect. Judge only the actual video content showing
+through/around the caption.
+
+Look specifically at the bottom portion and answer: does the video content
+there (ignoring caption text) show clean, correctly-cropped facecam(s) of
+real people? Answer NO if you see any of:
 - part of the surrounding gameplay/game footage bleeding into the facecam
   area (not just the person's own camera feed)
 - a game UI element, score card, stats/results screen, or other graphic
@@ -289,7 +298,7 @@ correctly-cropped facecam(s) of real people? Answer NO if you see any of:
   viewed, not the streamer's own camera feed
 - the same person's face duplicated/repeated in more than one spot
 - no facecam at all where one should be, or something clearly wrong or
-  broken-looking about the crop
+  broken-looking about the video crop itself (not the caption overlay)
 
 Respond with ONLY one word: YES or NO."""
 
