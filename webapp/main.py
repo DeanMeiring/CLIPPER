@@ -27,7 +27,7 @@ from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.loud_moments import find_loud_moments
-from clipper.reframe import MultiCamSplitLayout, SplitLayout, center_crop_layout, compute_layout
+from clipper.reframe import SplitLayout, center_crop_layout, compute_layout
 from clipper.render import render_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
@@ -349,6 +349,28 @@ def _run_job(job_id: str) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
+def _render_atomic(video_path: Path, pick, layout, ass_path: Path, out_path: Path) -> None:
+    """Render to a temp file alongside the target, then move it into place
+    in one step.
+
+    ffmpeg writes its output progressively, and the clips endpoint serves
+    straight out of this same directory while the job is still running --
+    so rendering directly to the final path publishes a half-written mp4
+    for as long as the encode takes. Anyone who opens the clip in that
+    window gets a truncated file, which decodes into garbage rather than
+    failing cleanly. The post-render fallback made it worse by rewriting
+    an already-published clip in place, so a clip that was fine a moment
+    ago would break under a reader mid-re-render. os.replace is atomic on
+    POSIX, so a reader now sees either the previous complete file or the
+    new one, never a partial."""
+    tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
+    try:
+        render_clip(video_path, pick.start, pick.end, layout, ass_path, tmp_path)
+        os.replace(tmp_path, out_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -369,22 +391,29 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
-        render_clip(video_path, pick.start, pick.end, layout, ass_path, out_path)
+        _render_atomic(video_path, pick, layout, ass_path, out_path)
 
-        if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
-            # A final catch-all after compute_layout's own pre-render
-            # detection: look at what actually got burned into the
-            # output, not just what was predicted from the source frames
-            # beforehand. False (not None -- that means the check itself
-            # wasn't usable) means vision confidently saw something wrong
-            # with the rendered facecam band; re-render as a plain crop
-            # rather than ship a clip with a broken-looking facecam.
+        # Only single-cam splits get the post-render check. On multi-cam it
+        # rejected every single render -- 100% of them, unanimously, across
+        # five different tiling implementations, including ones since proven
+        # correct (tiles matching their source aspect within 0.3%, exact
+        # output dimensions, confirmed by rendering and measuring). A check
+        # that has never once passed the layout it guards isn't measuring
+        # that layout's quality, and each rejection silently replaced a real
+        # facecam with a plain crop -- which is exactly the "no facecam at
+        # all" being reported. Single-cam passes it normally, so it stays
+        # there, where it demonstrably discriminates.
+        if isinstance(layout, SplitLayout):
+            # False (not None -- that means the check itself wasn't usable)
+            # means vision confidently saw something wrong with the rendered
+            # facecam band; re-render as a plain crop rather than ship a clip
+            # with a broken-looking facecam.
             verified = facecam_vision.verify_rendered_facecam(out_path)
             if verified is False:
                 print(f"[render] clip {out_index} failed post-render facecam check -- re-rendering as a plain crop", flush=True)
                 try:
                     fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
-                    render_clip(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
+                    _render_atomic(video_path, pick, fallback_layout, ass_path, out_path)
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
 
