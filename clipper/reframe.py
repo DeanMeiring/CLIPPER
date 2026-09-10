@@ -85,6 +85,22 @@ Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout]
 MAX_COCAM_TILES = 3
 
 
+def _even(value: float) -> int:
+    """Round to the nearest even integer.
+
+    Every output dimension has to be even: the encoder is yuv420p, whose
+    chroma planes are half-resolution, so libx264 rejects an odd width or
+    height outright ("height not divisible by 2"). This bit the split
+    layouts specifically -- each half is scaled separately and only then
+    stacked, so an odd top and an odd bottom each get rounded to even on
+    their own and the stacked result misses target_h by a pixel (seen in
+    production as a 1080x1919 encoder failure that killed the whole job).
+    Back when the band was a fixed fraction of the frame it was always
+    even by luck; deriving it from measured aspect ratios lands on odd
+    roughly half the time, so it has to be forced."""
+    return int(round(value / 2)) * 2
+
+
 def _detect_faces(video_path: Path, start: float, end: float, samples: int):
     import cv2
 
@@ -341,7 +357,7 @@ def _build_overlay_layout(
     min_bottom_h = round(target_h * 0.10)
     max_bottom_h = round(target_h * facecam_height_frac)
     natural_bottom_h = target_w / sum(aspects)
-    bottom_out_h = int(round(min(max(natural_bottom_h, min_bottom_h), max_bottom_h)))
+    bottom_out_h = _even(min(max(natural_bottom_h, min_bottom_h), max_bottom_h))
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
@@ -360,8 +376,10 @@ def _build_overlay_layout(
     # positive; a clamped height just means each tile letterboxes a
     # little, which render_clip already handles.
     raw_widths = [target_w * a / sum(aspects) for a in aspects]
-    tile_out_widths = [max(1, int(round(w))) for w in raw_widths[:-1]]
-    tile_out_widths.append(target_w - sum(tile_out_widths))  # remainder absorbed by the last tile
+    tile_out_widths = [max(2, _even(w)) for w in raw_widths[:-1]]
+    # Remainder to the last tile, and even like the rest: target_w and
+    # every preceding width are even, so this lands even too.
+    tile_out_widths.append(max(2, target_w - sum(tile_out_widths)))
     return MultiCamSplitLayout(
         top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h,
         bottom_cam_out_widths=tile_out_widths,
