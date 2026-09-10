@@ -149,6 +149,116 @@ def _dedupe_boxes(boxes: List[Tuple[int, int, int, int]], iou_threshold: float =
     return kept
 
 
+_CROP_CHECK_PROMPT = """Each image below is a crop cut out of a livestream frame, at a spot that
+was guessed to be the streamer's facecam/webcam window. The guess is
+often wrong, so check each one.
+
+For each image IN ORDER, decide whether it actually shows a real human
+being filmed live by a camera -- a streamer's own webcam view.
+
+Answer false for an image showing:
+- game footage, a game character, or any drawn/rendered/animated figure
+- game UI of any kind: banners, logos, score or stat panels, buttons,
+  timers, text, menus
+- a monitor, webpage, video player, thumbnail, or other screen content
+- mostly background, empty space, or something unrecognizable
+- a real face that belongs to something being watched on screen rather
+  than to a camera pointed at the streamer
+
+Answer true only when it plainly shows a real, live human.
+
+Respond with ONLY a JSON array of booleans, one per image, in the same
+order as the images given -- for example [true, false, true]. Nothing
+else."""
+
+
+def _extract_frame_bgr(video_path: Path, t: float):
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    ok, frame = cap.read()
+    cap.release()
+    return frame if ok else None
+
+
+def _verify_box_crops(
+    video_path: Path, start: float, end: float,
+    boxes: List[Tuple[int, int, int, int]], client, model: str,
+) -> List[Tuple[int, int, int, int]]:
+    """Keep only the boxes whose actual pixels show a real person.
+
+    Asking a vision model for precise bounding-box coordinates is the
+    weakest thing we ask of it, and it shows: a run that reported "man
+    wearing headphones, main streamer facecam", "person with curly hair,
+    camera feed" and "shirtless man with headset" rendered a game banner,
+    some screen content, and one real person -- confident, plausible
+    descriptions attached to two regions that contained no face at all.
+    Judging an image that has already been cropped is a far easier task
+    than localizing it, so this crops each candidate and asks a plain
+    yes/no about what's actually inside, in one call for all of them.
+
+    Fails open: any error, or an unusable answer, keeps the boxes as they
+    were, since dropping every candidate on a failed check would silently
+    turn off facecams altogether."""
+    if not boxes:
+        return boxes
+
+    frame = _extract_frame_bgr(video_path, start + max(end - start, 0.1) / 2)
+    if frame is None:
+        return boxes
+
+    import cv2
+
+    src_h, src_w = frame.shape[:2]
+    content: List[dict] = [{"type": "text", "text": _CROP_CHECK_PROMPT}]
+    for (x, y, w, h) in boxes:
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(src_w, x + w), min(src_h, y + h)
+        crop = frame[y0:y1, x0:x1]
+        if crop.size == 0:
+            return boxes  # can't judge them all -- don't judge any
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return boxes
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg",
+                       "data": base64.b64encode(buf.tobytes()).decode("ascii")},
+        })
+
+    try:
+        resp = client.messages.create(
+            model=model, max_tokens=200, messages=[{"role": "user", "content": content}],
+        )
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+        verdicts = json.loads(raw)
+    except Exception as e:
+        print(f"[facecam_vision] crop check failed, keeping boxes as detected: {e}", flush=True)
+        return boxes
+
+    if not isinstance(verdicts, list) or len(verdicts) != len(boxes):
+        print(
+            f"[facecam_vision] crop check returned {len(verdicts) if isinstance(verdicts, list) else '?'} "
+            f"verdict(s) for {len(boxes)} box(es), keeping boxes as detected", flush=True,
+        )
+        return boxes
+
+    kept = []
+    for box, ok_verdict in zip(boxes, verdicts):
+        if ok_verdict is True:
+            kept.append(box)
+        else:
+            print(f"[facecam_vision] crop check rejected box {box} -- not a real person's camera feed", flush=True)
+    print(f"[facecam_vision] crop check kept {len(kept)}/{len(boxes)} box(es)", flush=True)
+    return kept
+
+
 def detect_facecams(
     video_path: Path,
     start: float,
@@ -250,7 +360,8 @@ def detect_facecams(
         boxes.append((int(x), int(y), int(w), int(h)))
         print(f"[facecam_vision] kept box ({int(x)},{int(y)},{int(w)},{int(h)}): {what!r}", flush=True)
 
-    return _dedupe_boxes(boxes)
+    # Dedupe first so the crop check only pays for distinct candidates.
+    return _verify_box_crops(video_path, start, end, _dedupe_boxes(boxes), client, model)
 
 
 def _extract_frame_b64(video_path: Path, t_frac: float = 0.5) -> Optional[str]:

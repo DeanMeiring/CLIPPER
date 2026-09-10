@@ -27,7 +27,7 @@ from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.loud_moments import find_loud_moments
-from clipper.reframe import SplitLayout, center_crop_layout, compute_layout
+from clipper.reframe import MultiCamSplitLayout, SplitLayout, center_crop_layout, compute_layout
 from clipper.render import render_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
@@ -393,17 +393,14 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         build_ass(clip_words, pick.start, ass_path)
         _render_atomic(video_path, pick, layout, ass_path, out_path)
 
-        # Only single-cam splits get the post-render check. On multi-cam it
-        # rejected every single render -- 100% of them, unanimously, across
-        # five different tiling implementations, including ones since proven
-        # correct (tiles matching their source aspect within 0.3%, exact
-        # output dimensions, confirmed by rendering and measuring). A check
-        # that has never once passed the layout it guards isn't measuring
-        # that layout's quality, and each rejection silently replaced a real
-        # facecam with a plain crop -- which is exactly the "no facecam at
-        # all" being reported. Single-cam passes it normally, so it stays
-        # there, where it demonstrably discriminates.
-        if isinstance(layout, SplitLayout):
+        if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
+            # This briefly ran on single-cam only, on the theory that a check
+            # rejecting 100% of multi-cam renders couldn't be measuring
+            # anything real. Turning it off proved the opposite: the renders
+            # that then shipped had a game banner and a patch of screen
+            # content in two of three tiles, with only the third an actual
+            # person. The check was right every time -- the detection feeding
+            # it was wrong, which _verify_box_crops now addresses upstream.
             # False (not None -- that means the check itself wasn't usable)
             # means vision confidently saw something wrong with the rendered
             # facecam band; re-render as a plain crop rather than ship a clip
