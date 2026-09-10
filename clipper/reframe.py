@@ -63,12 +63,16 @@ class MultiCamSplitLayout:
     """Like SplitLayout, but for a duo/trio co-stream: 2-3 facecam overlays
     tiled side-by-side across the bottom band instead of picking (or
     guessing at) just one. bottom_cams is left-to-right in on-screen
-    reading order; render_clip tiles them across out_w in that order using
-    the same width split (see _tile_widths)."""
+    reading order. bottom_cam_out_widths gives each tile's own output
+    width (a "justified row" split sized from each cam's own aspect
+    ratio -- see _build_overlay_layout -- not an equal split), and
+    render_clip tiles them across out_w in that order using those
+    widths."""
     top: CropWindow
     bottom_cams: List[CropWindow]
     top_out_h: int
     bottom_out_h: int
+    bottom_cam_out_widths: List[int]
 
 
 Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout]
@@ -79,17 +83,6 @@ Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout]
 # when there are more candidates than that, keep the ones detected most
 # consistently (see compute_layout).
 MAX_COCAM_TILES = 3
-
-
-def _tile_widths(total_w: int, n: int) -> List[int]:
-    """Split total_w into n integer widths that sum exactly to total_w --
-    used to size both the source-side facecam crops (so each one scales
-    cleanly to its output tile with no distortion) and the output-side
-    scale/hstack in render_clip, which must agree on the same split."""
-    base = total_w // n
-    widths = [base] * n
-    widths[-1] = total_w - base * (n - 1)  # remainder absorbed by the last tile
-    return widths
 
 
 def _detect_faces(video_path: Path, start: float, end: float, samples: int):
@@ -324,35 +317,39 @@ def _build_overlay_layout(
     if not boxes:
         return None
     boxes = sorted(boxes, key=lambda b: b[0])
-    tile_widths = _tile_widths(target_w, len(boxes))
+    aspects = [bw / bh for (_, _, bw, bh) in boxes]
 
-    # Size the band to this clip's own detected facecam aspect ratio,
-    # capped at facecam_height_frac, instead of always using that fixed
-    # fraction. A single full-width tile is naturally close to a real
-    # facecam's aspect, so this barely changes anything there -- but a
-    # fixed 40%-of-frame band split into 2-3 narrow tiles is far taller
-    # than any real (landscape-ish) facecam window needs: under
-    # letterboxing that meant most of each tile came back as plain black
-    # bars around a small strip of actual video (measured: a 3-way tile
-    # only had ~28% of its height as real content), which reasonably
-    # read as "no facecam" to both the verifier and an actual viewer.
-    # Matching the band height to what these specific boxes need keeps
-    # it filled with real content and gives the rest back to gameplay.
-    aspects = sorted(bw / bh for (_, _, bw, bh) in boxes)
-    median_aspect = aspects[len(aspects) // 2]
-    narrowest_tile_w = min(tile_widths)
-    natural_bottom_h = narrowest_tile_w / median_aspect
-    bottom_out_h = int(max(
-        round(target_h * 0.12),  # floor: never so short a face is hard to see
-        min(natural_bottom_h, round(target_h * facecam_height_frac)),
-    ))
+    # "Justified row" layout -- the same technique photo grids (Google
+    # Photos, Flickr) use to tile images of different aspect ratios into
+    # one row with no cropping and no padding: pick the one row height at
+    # which each image's own aspect ratio, laid out at full width for
+    # that height, sums to exactly target_w. Different people's facecam
+    # windows almost never share an aspect ratio, and forcing them into
+    # equal-width tiles at a shared height (the previous approach, no
+    # matter how that height was chosen) always left at least one tile
+    # with a mismatched aspect -- fixed via letterboxing/cropping/
+    # stretching, all of which failed post-render checks in practice.
+    # This solves it exactly instead of approximating it: every tile
+    # comes out fully filled by construction, whatever the mix of
+    # aspects, because the widths are derived FROM those aspects rather
+    # than assumed equal.
+    min_bottom_h = round(target_h * 0.12)  # floor: never so short a face is hard to see
+    max_bottom_h = round(target_h * facecam_height_frac)
+    natural_bottom_h = target_w / sum(aspects)
+    bottom_out_h = int(round(min(max(natural_bottom_h, min_bottom_h), max_bottom_h)))
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
         bottom = _facecam_crop(src_w, src_h, boxes[0], pad=pad)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
     bottom_cams = [_facecam_crop(src_w, src_h, b, pad=pad) for b in boxes]
-    return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
+    raw_widths = [bottom_out_h * a for a in aspects]
+    tile_out_widths = [int(round(w)) for w in raw_widths[:-1]]
+    tile_out_widths.append(target_w - sum(tile_out_widths))  # remainder absorbed by the last tile
+    return MultiCamSplitLayout(
+        top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h,
+        bottom_cam_out_widths=tile_out_widths,
+    )
 
 
 def _log_layout(start: float, end: float, clusters: List[dict], outcome: str) -> None:

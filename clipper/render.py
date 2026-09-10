@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .reframe import CropWindow, Layout, MultiCamSplitLayout, SplitLayout, _tile_widths
+from .reframe import CropWindow, Layout, MultiCamSplitLayout, SplitLayout
 
 
 def _escape_for_filter(path: Path) -> str:
@@ -46,10 +46,9 @@ def render_clip(
 
     if isinstance(layout, MultiCamSplitLayout):
         top = layout.top
-        tile_widths = _tile_widths(out_w, len(layout.bottom_cams))
         parts = [f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"]
         tile_labels = []
-        for i, (cam, tw) in enumerate(zip(layout.bottom_cams, tile_widths)):
+        for i, (cam, tw) in enumerate(zip(layout.bottom_cams, layout.bottom_cam_out_widths)):
             label = f"cam{i}"
             parts.append(
                 f"[0:v]crop={cam.w}:{cam.h}:{cam.x}:{cam.y},"
