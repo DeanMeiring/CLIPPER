@@ -12,6 +12,7 @@ import secrets
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -630,6 +631,14 @@ def _worker() -> None:
         except JobCancelled:
             _set(job_id, state="cancelled", message="Cancelled by user.")
         except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
+            # The UI only ever shows str(e) -- previously that was also
+            # the *only* place a failure's detail existed at all, since
+            # nothing here reached the server logs. Print the full
+            # traceback too, so a job-runner exception can be diagnosed
+            # from Railway logs instead of only from a screenshot of the
+            # (much shorter) UI error message.
+            print(f"[worker] job {job_id} failed:", flush=True)
+            traceback.print_exc()
             _set(job_id, state="error", error=str(e))
         finally:
             stop_keepalive.set()
