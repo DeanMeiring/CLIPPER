@@ -747,6 +747,31 @@ def get_clip(job_id: str, filename: str) -> FileResponse:
     return FileResponse(path, media_type="video/mp4", filename=filename)
 
 
+@protected.delete("/api/jobs/{job_id}/clips/{filename}")
+def delete_clip(job_id: str, filename: str) -> dict:
+    """Drop a single clip from a finished job's results -- keep the rest.
+    Only removes a filename that's actually in the job's own clips list
+    (never an arbitrary path), and refuses while the job is still running
+    so a click doesn't yank a file out from under an active render."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clips = list(job.get("clips") or [])
+        remaining = [c for c in clips if c.get("file") != filename]
+        if len(remaining) == len(clips):
+            raise HTTPException(404, "clip not found")
+        job["clips"] = remaining
+    _persist(job_id)
+
+    out_dir = BASE_DIR / job_id
+    (out_dir / filename).unlink(missing_ok=True)
+    (out_dir / f"_{Path(filename).stem}.ass").unlink(missing_ok=True)
+    return {"ok": True, "clips": remaining}
+
+
 _trending_cache: dict = {"at": 0.0, "sections": {}}
 _TRENDING_CACHE_SECONDS = 180.0
 
@@ -1714,6 +1739,34 @@ async function poll(jobId) {
     link.setAttribute('download', '');
     link.textContent = `Download ${c.file}`;
     div.appendChild(link);
+
+    if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+      const delClipBtn = document.createElement('button');
+      delClipBtn.type = 'button';
+      delClipBtn.textContent = '🗑 Delete this clip';
+      delClipBtn.style.marginLeft = '8px';
+      delClipBtn.addEventListener('click', async () => {
+        if (!confirm(`Delete ${c.file}? This can't be undone.`)) return;
+        delClipBtn.disabled = true;
+        delClipBtn.textContent = 'Deleting...';
+        try {
+          const r = await fetch(`/api/jobs/${jobId}/clips/${c.file}`, { method: 'DELETE' });
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            alert(data.detail || 'Could not delete this clip.');
+            delClipBtn.disabled = false;
+            delClipBtn.textContent = '🗑 Delete this clip';
+            return;
+          }
+          poll(jobId);
+        } catch (e) {
+          alert('Could not delete this clip.');
+          delClipBtn.disabled = false;
+          delClipBtn.textContent = '🗑 Delete this clip';
+        }
+      });
+      div.appendChild(delClipBtn);
+    }
 
     clipsEl.appendChild(div);
   });
