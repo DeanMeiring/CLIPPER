@@ -115,7 +115,19 @@ def _detect_faces(video_path: Path, start: float, end: float, samples: int):
         if not ok:
             continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(60, 60))
+        # Loosened from the original scaleFactor=1.15/minNeighbors=5/
+        # minSize=(60,60): confirmed in practice that a facecam genuinely
+        # on screen the whole clip was still only detected in 1-2 of 9
+        # samples with those settings -- likely a smaller/angled/lower-
+        # contrast facecam (a co-stream tile is often smaller than a
+        # single streamer's main cam, and people often aren't looking
+        # square at their webcam). Finer scale steps and a smaller minSize
+        # catch more of those; the recurrence-based occurrence_frac check
+        # downstream (not raw per-frame detection) is what actually guards
+        # against one-off false positives hijacking a crop, so loosening
+        # the per-frame detector doesn't reopen that -- it just gives the
+        # recurrence check more real detections to work with.
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=4, minSize=(35, 35))
         for f in faces:
             all_faces.append(tuple(int(v) for v in f))
 
