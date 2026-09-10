@@ -841,6 +841,40 @@ def delete_clip(job_id: str, filename: str) -> dict:
     return {"ok": True, "clips": remaining}
 
 
+@protected.delete("/api/jobs/{job_id}/clips")
+def delete_all_clips(job_id: str) -> dict:
+    """Drop every clip from a finished job at once -- keeps the job (and
+    its already-downloaded source/candidates) around so "generate more"
+    can immediately pick fresh ones without re-downloading anything.
+
+    Also resets used_ranges/used_window_indices to empty, same reasoning
+    as the single-clip delete above but for all of them at once: a
+    creator who just wiped every clip clearly wants a genuinely fresh
+    batch, not one still constrained by what an earlier, now-deleted
+    round already picked -- including candidate windows (like a collab
+    moment) that got used early and then never came up again."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clips = list(job.get("clips") or [])
+        job["clips"] = []
+        job["used_ranges"] = []
+        job["used_window_indices"] = []
+    _persist(job_id)
+
+    out_dir = BASE_DIR / job_id
+    for clip in clips:
+        filename = clip.get("file")
+        if not filename:
+            continue
+        (out_dir / filename).unlink(missing_ok=True)
+        (out_dir / f"_{Path(filename).stem}.ass").unlink(missing_ok=True)
+    return {"ok": True, "clips": []}
+
+
 _trending_cache: dict = {"at": 0.0, "sections": {}}
 _TRENDING_CACHE_SECONDS = 180.0
 
@@ -1562,6 +1596,29 @@ async function loadJobsList() {
         regenBtn.textContent = 'Generate more clips';
         regenBtn.addEventListener('click', () => openRegenModal(job.id));
         row.appendChild(regenBtn);
+
+        if (hasClips) {
+          const clearBtn = document.createElement('button');
+          clearBtn.type = 'button';
+          clearBtn.textContent = '🗑 Clear clips & regenerate';
+          clearBtn.addEventListener('click', async () => {
+            if (!confirm('Delete all clips from this job? The downloaded source stays, so regenerating is still fast.')) return;
+            clearBtn.disabled = true;
+            try {
+              const r = await fetch(`/api/jobs/${job.id}/clips`, { method: 'DELETE' });
+              if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                alert(data.detail || 'Could not clear clips.');
+                return;
+              }
+              await loadJobsList();
+              openRegenModal(job.id);
+            } finally {
+              clearBtn.disabled = false;
+            }
+          });
+          row.appendChild(clearBtn);
+        }
 
         const delBtn = document.createElement('button');
         delBtn.type = 'button';

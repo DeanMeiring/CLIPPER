@@ -171,6 +171,19 @@ clip -- only pick it if the content itself earns it.
 """
 
 
+_GROUP_BANTER_NOTE = """
+A transcript that reads messily -- overlapping speech, interruptions, cut-off
+sentences, unclear who's talking -- is often just what it looks like in text
+when MULTIPLE PEOPLE are reacting/bantering together, not a sign the moment
+itself is weak. Group banter between multiple streamers (a collab/co-op
+moment, everyone reacting to the same thing at once) is frequently the
+funniest, highest-energy content on a stream precisely because of that
+back-and-forth chaos. Don't undervalue or skip a candidate just because its
+transcript is harder to read than a single person talking cleanly -- judge
+it by whether the energy and content would land as a clip, not by how
+cleanly it transcribes."""
+
+
 def _strategy_notes_block(strategy_notes: Optional[str]) -> str:
     if not strategy_notes:
         return ""
@@ -222,7 +235,8 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}{loud_line}{strategy_line}
+{source_line}{focus_line}{loud_line}{strategy_line}{_GROUP_BANTER_NOTE}
+
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
 - work as a standalone moment (a hook, a punchline, a strong claim, a story
@@ -325,8 +339,10 @@ window below is its own short segment with its own transcript, timestamped
 LOCALLY from 0 at the start of that window -- not the VOD's absolute time.
 {source_line}{focus_line}{strategy_line}
 Not every candidate window is actually a good clip -- some chat spikes are
-noise, reactions to something off-screen, or don't read well out of context.
-Pick only the ones that would genuinely work as a standalone short-form clip.
+noise, or a reaction to something off-screen that doesn't work without
+context. Pick only the ones that would genuinely work as a standalone
+short-form clip.
+{_GROUP_BANTER_NOTE}
 
 Pick up to {n_clips} windows. For each one you pick, give a start/end IN
 SECONDS LOCAL TO THAT WINDOW (0 to its duration) -- use the whole window or
