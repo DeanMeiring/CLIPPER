@@ -21,13 +21,25 @@ Three outcomes:
     on top and all the facecams (up to MAX_COCAM_TILES) tiled side-by-side
     across the bottom, instead of picking just one or falling back to a
     plain crop that shows none of them.
+
+Before falling back to this Haar-based heuristic, compute_layout first
+tries asking Claude (vision) to identify the real facecam overlays
+directly from a few sample frames -- see facecam_vision.py. A classical
+cascade can't reliably tell a real person's camera feed from a game
+texture that just happens to look vaguely face-like, or catch a small/
+angled facecam a human would obviously recognize; a vision model can
+just look at the picture. The Haar path below only runs when vision is
+unavailable (no API key) or a call fails, so it stays as a real fallback,
+not dead code.
 """
 from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
+
+from . import facecam_vision
 
 
 @dataclass
@@ -225,6 +237,31 @@ def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: floa
     return CropWindow(x=x, y=y, w=int(crop_w), h=int(crop_h))
 
 
+def _build_overlay_layout(
+    boxes: List[Tuple[int, int, int, int]],
+    src_w: int, src_h: int, target_w: int, target_h: int, facecam_height_frac: float,
+) -> Optional[Layout]:
+    """Build a SplitLayout/MultiCamSplitLayout from a list of pixel-space
+    facecam boxes already decided to be the real overlays and already
+    capped to at most MAX_COCAM_TILES -- however that decision was made
+    (vision or the Haar heuristic). Sorts left-to-right for on-screen
+    reading order. None (meaning: no overlay here) if boxes is empty --
+    the caller should fall through to the no-overlay case (anchor or
+    center crop)."""
+    if not boxes:
+        return None
+    boxes = sorted(boxes, key=lambda b: b[0])
+    bottom_out_h = round(target_h * facecam_height_frac)
+    top_out_h = target_h - bottom_out_h
+    top = _center_crop(src_w, src_h, target_w, top_out_h)
+    if len(boxes) == 1:
+        bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h)
+        return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
+    tile_widths = _tile_widths(target_w, len(boxes))
+    bottom_cams = [_facecam_crop(src_w, src_h, b, w, bottom_out_h) for b, w in zip(boxes, tile_widths)]
+    return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
+
+
 def _log_layout(start: float, end: float, clusters: List[dict], outcome: str) -> None:
     """One line per clip on which layout it got and why -- there's no
     other way to tell, after the fact, whether a clip that came out with
@@ -294,64 +331,68 @@ def compute_layout(
         _log_layout(start, end, clusters, "portrait source: center crop (no confident anchor)")
         return _center_crop(src_w, src_h, target_w, target_h)
 
-    def is_overlay(c: dict) -> bool:
-        med_x, med_y, med_w, med_h = c["box"]
-        is_small = (med_h / src_h) < 0.30
-        cx, cy = (med_x + med_w / 2) / src_w, (med_y + med_h / 2) / src_h
-        is_off_center = cx < 0.30 or cx > 0.70 or cy < 0.30 or cy > 0.70
-        # A real composited overlay is on screen essentially the whole
-        # time, but "on screen" and "face detected" aren't the same thing
-        # -- a streamer looking down, turning to their other monitor, or
-        # just being poorly lit drops out of individual detections even
-        # though their camera box never moves. Requiring *most* samples
-        # to hit (the old 0.5 bar) meant a co-stream with 2-3 overlays
-        # only classified correctly when every single one of them
-        # happened to be well-detected in the same clip -- in practice,
-        # one weak detector out of three was enough to silently drop that
-        # person's tile and change the whole layout for that clip. Use
-        # the same "at least ~1/3 of samples" bar as the single-face
-        # anchor above instead: still well above one-off noise, but not
-        # so strict that ordinary looking-away moments defeat it.
-        is_recurring = c["occurrence_frac"] >= min_confident_occurrence
-        return is_small and is_off_center and is_recurring
+    # Ask Claude to identify the real facecam overlay(s) directly from a
+    # few sample frames -- far more reliable than the Haar heuristic below
+    # at telling an actual person's camera feed apart from a game texture
+    # that just happens to look vaguely face-like, and at catching a
+    # small/angled facecam a human would obviously recognize. None means
+    # vision wasn't usable this call (no API key, a transient error) --
+    # fall through to the Haar-based heuristic unchanged in that case. An
+    # empty list means vision actually ran and found no overlay here.
+    try:
+        vision_boxes = facecam_vision.detect_facecams(video_path, start, end, src_w, src_h)
+    except Exception as e:
+        print(f"[reframe] vision facecam detection errored, falling back to heuristic: {e}", flush=True)
+        vision_boxes = None
 
-    overlay_clusters = [c for c in clusters if is_overlay(c)]
+    if vision_boxes is not None:
+        layout = _build_overlay_layout(
+            vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac
+        )
+        if layout is not None:
+            n = len(vision_boxes[:MAX_COCAM_TILES])
+            _log_layout(start, end, clusters, f"{n}-cam split (vision)")
+            return layout
+        # Vision confidently found no facecam overlay -- fall through to
+        # the anchor/center-crop case below (vision only rules out an
+        # *overlay* pattern here, not a talking-head-style crop, so the
+        # Haar-based anchor logic still gets a say).
+    else:
+        def is_overlay(c: dict) -> bool:
+            med_x, med_y, med_w, med_h = c["box"]
+            is_small = (med_h / src_h) < 0.30
+            cx, cy = (med_x + med_w / 2) / src_w, (med_y + med_h / 2) / src_h
+            is_off_center = cx < 0.30 or cx > 0.70 or cy < 0.30 or cy > 0.70
+            # A real composited overlay is on screen essentially the whole
+            # time, but "on screen" and "face detected" aren't the same
+            # thing -- a streamer looking down, turning to their other
+            # monitor, or just being poorly lit drops out of individual
+            # detections even though their camera box never moves.
+            # Requiring *most* samples to hit (the old 0.5 bar) meant a
+            # co-stream with 2-3 overlays only classified correctly when
+            # every single one of them happened to be well-detected in the
+            # same clip -- in practice, one weak detector out of three was
+            # enough to silently drop that person's tile and change the
+            # whole layout for that clip. Use the same "at least ~1/3 of
+            # samples" bar as the single-face anchor above instead: still
+            # well above one-off noise, but not so strict that ordinary
+            # looking-away moments defeat it.
+            is_recurring = c["occurrence_frac"] >= min_confident_occurrence
+            return is_small and is_off_center and is_recurring
 
-    if len(overlay_clusters) >= 2:
-        # Two or more genuine facecam overlays -- a duo/co-stream layout.
-        # There's no principled way to pick which one "matters" (and no
-        # per-speaker audio to infer who's actually talking from), so show
-        # all of them, tiled left-to-right across the bottom band, instead
-        # of guessing at one or giving up and showing none.
+        overlay_clusters = [c for c in clusters if is_overlay(c)]
         cams = overlay_clusters
         if len(cams) > MAX_COCAM_TILES:
             # More than this is almost always detector noise rather than a
             # real 4+-way co-stream -- keep whichever recurred most
             # consistently across the sampled frames.
             cams = sorted(cams, key=lambda c: c["occurrence_frac"], reverse=True)[:MAX_COCAM_TILES]
-        cams.sort(key=lambda c: c["box"][0])  # left-to-right on-screen order
-
-        bottom_out_h = round(target_h * facecam_height_frac)
-        top_out_h = target_h - bottom_out_h
-        tile_widths = _tile_widths(target_w, len(cams))
-        bottom_cams = [
-            _facecam_crop(src_w, src_h, c["box"], w, bottom_out_h)
-            for c, w in zip(cams, tile_widths)
-        ]
-        top = _center_crop(src_w, src_h, target_w, top_out_h)
-        _log_layout(start, end, clusters, f"{len(cams)}-cam co-stream split")
-        return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
-
-    if len(overlay_clusters) == 1:
-        # Exactly one small, corner-positioned, stationary face -- a
-        # facecam overlay on top of gameplay/screen content. Build a
-        # stacked split layout.
-        bottom_out_h = round(target_h * facecam_height_frac)
-        top_out_h = target_h - bottom_out_h
-        bottom = _facecam_crop(src_w, src_h, overlay_clusters[0]["box"], target_w, bottom_out_h)
-        top = _center_crop(src_w, src_h, target_w, top_out_h)
-        _log_layout(start, end, clusters, "1-cam facecam split")
-        return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
+        layout = _build_overlay_layout(
+            [c["box"] for c in cams], src_w, src_h, target_w, target_h, facecam_height_frac
+        )
+        if layout is not None:
+            _log_layout(start, end, clusters, f"{len(cams)}-cam split (heuristic)")
+            return layout
 
     # No stable small/off-center overlay -- a large and/or roughly centered
     # face (talking head, interview, explainer video), a face that moves
