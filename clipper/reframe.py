@@ -211,18 +211,28 @@ def _facecam_crop(src_w: int, src_h: int, box, out_w: int, out_h: int, pad: floa
     return CropWindow(x=x, y=y, w=int(crop_w), h=int(crop_h))
 
 
+def _log_layout(start: float, end: float, clusters: List[dict], outcome: str) -> None:
+    """One line per clip on which layout it got and why -- there's no
+    other way to tell, after the fact, whether a clip that came out with
+    no facecam was a deliberate "nothing reliable enough" call or a
+    detection near-miss, short of re-running compute_layout by hand."""
+    occs = ", ".join(f"{c['occurrence_frac']:.2f}" for c in clusters)
+    print(f"[reframe] clip {start:.1f}-{end:.1f}s: {len(clusters)} cluster(s) [{occs}] -> {outcome}", flush=True)
+
+
 def compute_layout(
     video_path: Path,
     start: float,
     end: float,
     target_w: int = 1080,
     target_h: int = 1920,
-    samples: int = 6,
+    samples: int = 9,
     facecam_height_frac: float = 0.40,
 ) -> Layout:
     boxes, src_w, src_h = _detect_faces(video_path, start, end, samples)
 
     if not boxes:
+        _log_layout(start, end, [], "center crop (no faces detected)")
         return _center_crop(src_w, src_h, target_w, target_h)
 
     clusters = _cluster_faces(boxes, src_w, src_h, samples)
@@ -255,7 +265,9 @@ def compute_layout(
     # centered, if nothing was detected reliably enough to trust.
     if src_h >= src_w:
         if has_confident_anchor:
+            _log_layout(start, end, clusters, "portrait source: face-anchored crop")
             return _face_centered_crop(src_w, src_h, anchor_x, target_w, target_h)
+        _log_layout(start, end, clusters, "portrait source: center crop (no confident anchor)")
         return _center_crop(src_w, src_h, target_w, target_h)
 
     def is_overlay(c: dict) -> bool:
@@ -264,10 +276,19 @@ def compute_layout(
         cx, cy = (med_x + med_w / 2) / src_w, (med_y + med_h / 2) / src_h
         is_off_center = cx < 0.30 or cx > 0.70 or cy < 0.30 or cy > 0.70
         # A real composited overlay is on screen essentially the whole
-        # time; a face that's only passing through this spot (or that
-        # "biggest per frame" only lands on briefly, if another face is
-        # usually bigger) won't recur nearly as often.
-        is_recurring = c["occurrence_frac"] >= 0.5
+        # time, but "on screen" and "face detected" aren't the same thing
+        # -- a streamer looking down, turning to their other monitor, or
+        # just being poorly lit drops out of individual detections even
+        # though their camera box never moves. Requiring *most* samples
+        # to hit (the old 0.5 bar) meant a co-stream with 2-3 overlays
+        # only classified correctly when every single one of them
+        # happened to be well-detected in the same clip -- in practice,
+        # one weak detector out of three was enough to silently drop that
+        # person's tile and change the whole layout for that clip. Use
+        # the same "at least ~1/3 of samples" bar as the single-face
+        # anchor above instead: still well above one-off noise, but not
+        # so strict that ordinary looking-away moments defeat it.
+        is_recurring = c["occurrence_frac"] >= min_confident_occurrence
         return is_small and is_off_center and is_recurring
 
     overlay_clusters = [c for c in clusters if is_overlay(c)]
@@ -294,6 +315,7 @@ def compute_layout(
             for c, w in zip(cams, tile_widths)
         ]
         top = _center_crop(src_w, src_h, target_w, top_out_h)
+        _log_layout(start, end, clusters, f"{len(cams)}-cam co-stream split")
         return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
     if len(overlay_clusters) == 1:
@@ -304,6 +326,7 @@ def compute_layout(
         top_out_h = target_h - bottom_out_h
         bottom = _facecam_crop(src_w, src_h, overlay_clusters[0]["box"], target_w, bottom_out_h)
         top = _center_crop(src_w, src_h, target_w, top_out_h)
+        _log_layout(start, end, clusters, "1-cam facecam split")
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
     # No stable small/off-center overlay -- a large and/or roughly centered
@@ -313,5 +336,7 @@ def compute_layout(
     # consistently-detected face if there's one worth trusting; otherwise
     # a plain center crop beats guessing from a one-off detection.
     if has_confident_anchor:
+        _log_layout(start, end, clusters, "face-anchored crop (no overlay pattern)")
         return _face_centered_crop(src_w, src_h, anchor_x, target_w, target_h)
+    _log_layout(start, end, clusters, "center crop (no confident anchor)")
     return _center_crop(src_w, src_h, target_w, target_h)
