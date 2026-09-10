@@ -88,7 +88,15 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
         # answers "why do winners win" by actually contrasting two
         # concrete groups, not by eyeballing a table and hoping a pattern
         # jumps out.
-        ranked = sorted(videos, key=lambda v: v["views_per_day"], reverse=True)
+        # A video posted hours ago hasn't had time to earn its views, and
+        # its views/day score actively understates it (see
+        # channel_insights). Ranking it against settled uploads would file
+        # it under "lower-performing" for being new and invite a reach- or
+        # content-problem diagnosis it hasn't earned -- so hold those out
+        # of the comparison and report them separately as not-yet-judgeable.
+        too_new = [v for v in videos if v.get("too_new_to_judge")]
+        settled = [v for v in videos if not v.get("too_new_to_judge")]
+        ranked = sorted(settled, key=lambda v: v["views_per_day"], reverse=True)
 
         def _fmt(v: dict) -> str:
             weekday_name = _WEEKDAY_NAMES[v["weekday"]]
@@ -117,9 +125,22 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
             lines.extend(_fmt(v) for v in ranked[:half])
             lines.append("\nLower-performing uploads (bottom half by views/day since posted):")
             lines.extend(_fmt(v) for v in ranked[half:])
-        else:
+        elif ranked:
             lines.append("\nRecent uploads (title -- views, views/day since posted, weekday posted):")
             lines.extend(_fmt(v) for v in ranked)
+
+        if too_new:
+            lines.append(
+                "\nPosted too recently to judge (up less than 2 days -- their view "
+                "counts mostly reflect how little time has passed, NOT how they "
+                "performed). Do NOT treat these as underperforming and do not "
+                "diagnose them as a reach or content problem:"
+            )
+            lines.extend(
+                f'- "{v["title"]}" -- {v["views"]} views, up {v.get("age_days", 0):.1f} days'
+                + (f' -- ⚠ PLATFORM RESTRICTED: {v["restriction"]}' if v.get("restriction") else "")
+                for v in too_new
+            )
 
     if analytics:
         lines.append(f"\nReal YouTube Analytics (last {analytics['lookback_days']} days, the channel's own authenticated data):")

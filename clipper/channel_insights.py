@@ -15,6 +15,12 @@ from typing import List, Optional
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
+# Below this age a video's numbers say more about how long it's been up than
+# how it performed -- short-form earns most of its views in the first day or
+# two, so anything younger is reported but kept out of the performance
+# comparison and the best-day averages rather than counted as a flop.
+_MIN_AGE_DAYS_TO_JUDGE = 2.0
+
 
 def _channel_lookup_params(channel_id_or_handle: str) -> dict:
     if channel_id_or_handle.startswith("UC"):
@@ -70,6 +76,16 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
                 "published_at": published_at,
                 "views": views,
                 "views_per_day": round(views / age_days, 1),
+                "age_days": round(age_days, 1),
+                # A just-posted video hasn't had time to earn its views yet,
+                # and the max(1.0, ...) floor above actively understates it:
+                # something posted 2 hours ago is scored as if a full day had
+                # passed, so a clip pacing at 600 views/day reads as 50/day.
+                # Left unmarked, those land in the "lower-performing" half and
+                # get diagnosed as a reach or content failure purely for being
+                # new -- on exactly the uploads a creator is most likely to be
+                # asking about.
+                "too_new_to_judge": age_days < _MIN_AGE_DAYS_TO_JUDGE,
                 "weekday": published_dt.weekday(),
                 "restriction": _restriction_note(v),
             })
@@ -137,6 +153,8 @@ def _best_day_heuristic(videos: List[dict]):
     totals_by_weekday = [0.0] * 7
     counts_by_weekday = [0] * 7
     for v in videos:
+        if v.get("too_new_to_judge"):
+            continue  # its score reflects its age, not the day it went up
         totals_by_weekday[v["weekday"]] += v["views_per_day"]
         counts_by_weekday[v["weekday"]] += 1
     avg_by_weekday = [

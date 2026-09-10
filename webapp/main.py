@@ -57,9 +57,30 @@ def _load_strategy_notes() -> Optional[str]:
     clip selection to use as guidance. None (not an error) if nothing's
     been saved yet -- callers should treat this exactly like the other
     optional signals (focus, loud moments): a hint when present, no
-    behavior change when absent."""
+    behavior change when absent.
+
+    Prefixed with how old the analysis is, because it otherwise steers
+    every pick at full weight forever: notes written against a channel's
+    numbers from two months ago read identically to ones written this
+    morning, and only one of those deserves to override what the
+    transcript itself says."""
     entry = channel_strategy.load_latest_overview(_channel_strategy_path)
-    return entry["overview"] if entry else None
+    if not entry:
+        return None
+    age_days = max(0.0, (time.time() - entry["timestamp"]) / 86400)
+    if age_days < 1:
+        age = "generated today"
+    elif age_days < 2:
+        age = "generated yesterday"
+    else:
+        age = f"generated {int(age_days)} days ago"
+    staleness = (
+        " -- recent, weight it fully."
+        if age_days <= 14
+        else " -- this is old enough that the channel may have moved on; treat it"
+             " as weaker evidence than what the transcript itself shows."
+    )
+    return f"(Channel analysis {age}{staleness})\n{entry['overview']}"
 # CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
 # in-memory is fine -- a login round-trip through Google takes seconds, not
 # something that needs to survive a restart.
