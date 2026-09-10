@@ -205,6 +205,39 @@ def _center_crop(src_w: int, src_h: int, target_w_ratio: int, target_h_ratio: in
     return CropWindow(x=x, y=y, w=crop_w, h=crop_h)
 
 
+def _top_crop_excluding_overlays(
+    src_w: int, src_h: int, boxes: List[Tuple[int, int, int, int]], target_w: int, target_h: int,
+) -> CropWindow:
+    """The "gameplay" region's crop for a split layout, restricted to
+    whichever vertical band (above or below all the facecam boxes) has
+    more room -- overlays are virtually always along one edge, so this
+    covers the common cases without needing to know which edge.
+
+    A plain _center_crop doesn't know where the facecams are, and for a
+    typical 16:9 source cropped to a taller target ratio it keeps the
+    FULL source height anyway (confirmed: 1920x1080 cropped to a
+    1080x1152 target keeps all 1080px of height) -- so the "gameplay"
+    region silently re-shows the exact same facecam pixels natively,
+    right above the fresh, zoomed-in tiles of those same faces rendered
+    below it. That's what a duplicated/nested-looking camera grid in the
+    output actually was: not a rendering bug, the top crop was simply
+    never excluding the region the bottom band was also showing.
+
+    Falls back to the plain center crop if the box-free band is too
+    thin to be worth cropping to (rather than producing a nonsensically
+    tiny/over-zoomed result)."""
+    if not boxes:
+        return _center_crop(src_w, src_h, target_w, target_h)
+    min_y = min(b[1] for b in boxes)
+    max_y = max(b[1] + b[3] for b in boxes)
+    room_above, room_below = min_y, src_h - max_y
+    band_y, band_h = (0, room_above) if room_above >= room_below else (max_y, room_below)
+    if band_h < src_h * 0.15:
+        return _center_crop(src_w, src_h, target_w, target_h)
+    crop = _center_crop(src_w, band_h, target_w, target_h)
+    return CropWindow(x=crop.x, y=band_y + crop.y, w=crop.w, h=crop.h)
+
+
 def _face_centered_crop(src_w: int, src_h: int, center_x: float, target_w_ratio: int, target_h_ratio: int) -> CropWindow:
     base = _center_crop(src_w, src_h, target_w_ratio, target_h_ratio)
     x = int(round(center_x - base.w / 2))
@@ -253,7 +286,7 @@ def _build_overlay_layout(
     boxes = sorted(boxes, key=lambda b: b[0])
     bottom_out_h = round(target_h * facecam_height_frac)
     top_out_h = target_h - bottom_out_h
-    top = _center_crop(src_w, src_h, target_w, top_out_h)
+    top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
         bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
