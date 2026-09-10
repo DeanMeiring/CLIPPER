@@ -265,40 +265,32 @@ def _face_centered_crop(src_w: int, src_h: int, center_x: float, target_w_ratio:
     return CropWindow(x=x, y=base.y, w=base.w, h=base.h)
 
 
-def _facecam_crop(
-    src_w: int, src_h: int, box, out_w: int, out_h: int, pad: float = 1.7, max_expand: float = 1.35,
-) -> CropWindow:
-    """Crop around a padded face box at the exact aspect ratio needed to
-    scale cleanly to (out_w, out_h) with no distortion.
+def _facecam_crop(src_w: int, src_h: int, box, pad: float = 1.7) -> CropWindow:
+    """Crop around a padded face box at its OWN natural aspect ratio --
+    not forced to match the output tile's aspect.
 
-    A single full-width facecam tile (out_w=1080) has an aspect close
-    enough to a real webcam window's that this "exact fit" barely needs
-    to stretch the crop past the padded box. A multi-cam tile is much
-    narrower (out_w split 2-3 ways) against the same band height, so its
-    aspect is far more portrait than any real facecam -- hitting it
-    exactly would balloon crop_h well past the box itself (measured: a
-    3-way tile needs ~2.6x the padded box height), pulling in a slab of
-    surrounding gameplay rather than the person's own camera feed. Cap
-    the expansion instead -- a mildly non-uniform stretch on a small
-    tile reads far better than gameplay bleeding into what's supposed to
-    be a clean facecam."""
+    This used to expand the crop to exactly match the tile's aspect
+    ratio so ffmpeg's scale wouldn't distort it. That works fine for a
+    single full-width tile (its aspect is already close to a real
+    webcam window's), but a 2-3 way tile is much narrower against the
+    same band height -- forcing a real (typically landscape-ish)
+    facecam box to that portrait tile aspect meant either ballooning
+    the crop far past the box into surrounding gameplay, or (once that
+    expansion was capped) squashing the image with a severe non-uniform
+    stretch -- measured on a real rejected render: crop 248x204 scaled
+    to a 360x768 tile stretched height 2.6x more than width, visibly
+    warped. Neither is fixable by tuning this crop alone.
+
+    render_clip now scales this crop to fit *within* its output tile
+    (preserving aspect) and pads any leftover space with black bars
+    instead of stretching to fill it exactly -- so this just needs to
+    return a clean, undistorted crop around the actual facecam window,
+    and letterboxing handles the rest."""
     fx, fy, fw, fh = box
     cx, cy = fx + fw / 2, fy + fh / 2
 
-    pad_w, pad_h = fw * pad, fh * pad
-    target_aspect = out_w / out_h
-    if pad_w / pad_h > target_aspect:
-        crop_w = pad_w
-        crop_h = crop_w / target_aspect
-    else:
-        crop_h = pad_h
-        crop_w = crop_h * target_aspect
-
-    crop_w = min(crop_w, pad_w * max_expand)
-    crop_h = min(crop_h, pad_h * max_expand)
-
-    crop_w = min(crop_w, src_w)
-    crop_h = min(crop_h, src_h)
+    crop_w = min(fw * pad, src_w)
+    crop_h = min(fh * pad, src_h)
 
     x = int(round(cx - crop_w / 2))
     y = int(round(cy - crop_h / 2))
@@ -336,10 +328,9 @@ def _build_overlay_layout(
     top_out_h = target_h - bottom_out_h
     top = _top_crop_excluding_overlays(src_w, src_h, boxes, target_w, top_out_h)
     if len(boxes) == 1:
-        bottom = _facecam_crop(src_w, src_h, boxes[0], target_w, bottom_out_h, pad=pad)
+        bottom = _facecam_crop(src_w, src_h, boxes[0], pad=pad)
         return SplitLayout(top=top, bottom=bottom, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
-    tile_widths = _tile_widths(target_w, len(boxes))
-    bottom_cams = [_facecam_crop(src_w, src_h, b, w, bottom_out_h, pad=pad) for b, w in zip(boxes, tile_widths)]
+    bottom_cams = [_facecam_crop(src_w, src_h, b, pad=pad) for b in boxes]
     return MultiCamSplitLayout(top=top, bottom_cams=bottom_cams, top_out_h=top_out_h, bottom_out_h=bottom_out_h)
 
 

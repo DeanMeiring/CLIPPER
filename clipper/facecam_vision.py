@@ -283,13 +283,22 @@ bottom portion of the frame is supposed to show one or more clean webcam/
 facecam windows of real people -- their actual camera feed, filling that
 part of the frame.
 
-IMPORTANT: this clip has burned-in captions, and the caption text (white
-text, usually with a colored highlight word, near the bottom of the frame)
-is drawn OVER the video on every clip -- that is expected and correct on
-every single frame, whether or not the caption box happens to overlap the
-facecam band underneath it. Do NOT count caption text, its outline, or its
-drop shadow as a defect. Judge only the actual video content showing
-through/around the caption.
+IMPORTANT, two things that are expected and correct, not defects:
+- This clip has burned-in captions, and the caption text (white text,
+  usually with a colored highlight word, near the bottom of the frame)
+  is drawn OVER the video on every clip, whether or not the caption box
+  happens to overlap the facecam band underneath it. Do NOT count
+  caption text, its outline, or its drop shadow as a defect.
+- When there's more than one facecam side by side, each one is fit into
+  its own tile without stretching -- so a tile can have plain black bars
+  on its left/right or top/bottom around the actual facecam footage if
+  the person's camera feed doesn't perfectly match the tile's shape.
+  Do NOT count plain black letterboxing bars next to/around an otherwise
+  clean facecam as a defect -- only flag it if the visible facecam
+  content itself (not the black bars) is wrong.
+
+Judge only the actual video content showing through/around the caption
+and outside any letterbox bars.
 
 Look specifically at the bottom portion and answer: does the video content
 there (ignoring caption text) show clean, correctly-cropped facecam(s) of

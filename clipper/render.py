@@ -15,6 +15,21 @@ def _escape_for_filter(path: Path) -> str:
     return s
 
 
+def _letterbox_scale_pad(w: int, h: int) -> str:
+    """Scale a facecam crop to fit within w x h without distorting it,
+    padding any leftover space with black bars instead of stretching to
+    fill it exactly.
+
+    A narrow multi-cam tile's aspect ratio (out_w split 2-3 ways against
+    a fixed band height) doesn't match any real facecam window's -- the
+    crop side of this used to force an exact-aspect match, which either
+    pulled surrounding gameplay into the tile or squashed the person's
+    face with a severe non-uniform stretch (measured on a real rejected
+    render: height stretched 2.6x more than width). A small letterboxed
+    thumbnail reads far better than either."""
+    return f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black"
+
+
 def render_clip(
     source_video: Path,
     start: float,
@@ -36,7 +51,10 @@ def render_clip(
         tile_labels = []
         for i, (cam, tw) in enumerate(zip(layout.bottom_cams, tile_widths)):
             label = f"cam{i}"
-            parts.append(f"[0:v]crop={cam.w}:{cam.h}:{cam.x}:{cam.y},scale={tw}:{layout.bottom_out_h}[{label}];")
+            parts.append(
+                f"[0:v]crop={cam.w}:{cam.h}:{cam.x}:{cam.y},"
+                f"{_letterbox_scale_pad(tw, layout.bottom_out_h)}[{label}];"
+            )
             tile_labels.append(f"[{label}]")
         parts.append(f"{''.join(tile_labels)}hstack=inputs={len(tile_labels)}[bottom];")
         parts.append("[top][bottom]vstack=inputs=2[stacked];")
@@ -58,7 +76,8 @@ def render_clip(
         top, bottom = layout.top, layout.bottom
         filter_complex = (
             f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"
-            f"[0:v]crop={bottom.w}:{bottom.h}:{bottom.x}:{bottom.y},scale={out_w}:{layout.bottom_out_h}[bottom];"
+            f"[0:v]crop={bottom.w}:{bottom.h}:{bottom.x}:{bottom.y},"
+            f"{_letterbox_scale_pad(out_w, layout.bottom_out_h)}[bottom];"
             f"[top][bottom]vstack=inputs=2[stacked];"
             f"[stacked]ass='{ass}'[outv]"
         )
