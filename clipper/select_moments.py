@@ -93,10 +93,25 @@ def _ask_claude_for_json_once(client, prompt: str, model: str, max_tokens: int) 
                 f"complete pick(s) out of the response: {e}", flush=True,
             )
             return salvaged
+        # No usable JSON at all -- log what the response actually contained
+        # so a recurrence is diagnosable from Railway logs instead of a
+        # blank raw[:500]. In particular: if the model's entire max_tokens
+        # budget went to a non-"text" block (e.g. thinking) before it ever
+        # got to write the JSON, `raw` ends up empty even though real
+        # tokens were spent -- this makes that visible.
+        block_summary = [
+            f"{getattr(b, 'type', 'unknown')}:{len(getattr(b, 'text', '') or '')}"
+            for b in resp.content
+        ]
+        usage = getattr(resp, "usage", None)
+        print(
+            f"[select_moments] no usable JSON -- stop_reason={resp.stop_reason} "
+            f"blocks={block_summary} usage={usage}", flush=True,
+        )
         raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
 
 
-def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 4096) -> list:
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 8192) -> list:
     try:
         import anthropic
     except ImportError as e:
