@@ -356,6 +356,12 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             "upload_title": pick.upload_title,
             "description": pick.description,
             "reason": pick.reason,
+            # Only WindowPick (long-VOD pipeline) has this -- carried along
+            # so a later per-clip delete can free this candidate window
+            # back up for "generate more" to reconsider, instead of
+            # deleting the clip while permanently blocking whatever moment
+            # it came from.
+            "window_index": getattr(pick, "window_index", None),
         })
         _set(job_id, clips=list(clips_meta))
         _progress(job_id, render_base + render_span * (i / len(render_items)))
@@ -752,7 +758,16 @@ def delete_clip(job_id: str, filename: str) -> dict:
     """Drop a single clip from a finished job's results -- keep the rest.
     Only removes a filename that's actually in the job's own clips list
     (never an arbitrary path), and refuses while the job is still running
-    so a click doesn't yank a file out from under an active render."""
+    so a click doesn't yank a file out from under an active render.
+
+    Also frees the clip's source time range (or candidate window, for the
+    long-VOD pipeline) back up in used_ranges/used_window_indices -- a
+    clip that's been deleted clearly wasn't the moment the creator wanted
+    kept, but a later "generate more" with a different focus (e.g.
+    "funny ones") was still treating that time range as spoken for, so it
+    could never reconsider it even though nothing kept was using it
+    anymore -- exactly the moment most likely to actually match a new
+    focus, permanently locked out."""
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
@@ -760,10 +775,21 @@ def delete_clip(job_id: str, filename: str) -> dict:
         if job["state"] not in TERMINAL_STATES:
             raise HTTPException(409, "job is still running -- wait for it to finish first")
         clips = list(job.get("clips") or [])
-        remaining = [c for c in clips if c.get("file") != filename]
-        if len(remaining) == len(clips):
+        deleted = next((c for c in clips if c.get("file") == filename), None)
+        if deleted is None:
             raise HTTPException(404, "clip not found")
+        remaining = [c for c in clips if c.get("file") != filename]
         job["clips"] = remaining
+
+        if deleted.get("window_index") is not None:
+            used_window_indices = set(job.get("used_window_indices") or [])
+            used_window_indices.discard(deleted["window_index"])
+            job["used_window_indices"] = list(used_window_indices)
+        else:
+            used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+            target = (deleted.get("start"), deleted.get("end"))
+            used_ranges = [r for r in used_ranges if r != target]
+            job["used_ranges"] = [list(r) for r in used_ranges]
     _persist(job_id)
 
     out_dir = BASE_DIR / job_id

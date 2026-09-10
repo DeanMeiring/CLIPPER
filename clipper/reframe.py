@@ -115,19 +115,21 @@ def _detect_faces(video_path: Path, start: float, end: float, samples: int):
         if not ok:
             continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Loosened from the original scaleFactor=1.15/minNeighbors=5/
-        # minSize=(60,60): confirmed in practice that a facecam genuinely
-        # on screen the whole clip was still only detected in 1-2 of 9
-        # samples with those settings -- likely a smaller/angled/lower-
-        # contrast facecam (a co-stream tile is often smaller than a
-        # single streamer's main cam, and people often aren't looking
-        # square at their webcam). Finer scale steps and a smaller minSize
-        # catch more of those; the recurrence-based occurrence_frac check
-        # downstream (not raw per-frame detection) is what actually guards
-        # against one-off false positives hijacking a crop, so loosening
-        # the per-frame detector doesn't reopen that -- it just gives the
-        # recurrence check more real detections to work with.
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=4, minSize=(35, 35))
+        # Tuned from the original scaleFactor=1.15/minNeighbors=5/
+        # minSize=(60,60): that missed a facecam confirmed genuinely on
+        # screen the whole clip (only 1-2 of 9 samples hit). A first pass
+        # at 1.08/4/(35,35) fixed the miss but went too far the other way
+        # -- 21 detected clusters on one clip where only 3 were real,
+        # noticeably "off" on clips that don't actually have a co-stream
+        # overlay. minNeighbors is the main per-frame false-positive
+        # control (back to the original 5, not loosened), scaleFactor is
+        # only slightly finer than stock, and minSize is smaller than
+        # stock but not as small as the first attempt -- still catches a
+        # smaller/angled facecam, without flooding every clip with noise.
+        # The recurrence-based occurrence_frac check downstream is the
+        # real defense against any single false positive being trusted;
+        # this tuning is about not burying real detections in noise.
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(45, 45))
         for f in faces:
             all_faces.append(tuple(int(v) for v in f))
 
