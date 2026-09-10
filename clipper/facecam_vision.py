@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -30,6 +31,13 @@ DEFAULT_MODEL = os.environ.get("CLIPPER_MODEL", "claude-sonnet-4-5")
 # single frame, without making the request slow or expensive.
 _FRAMES = 3
 _MAX_FRAME_WIDTH = 960
+
+# Whole-word only (\b...\b) -- a plain substring check on these would
+# false-positive on real descriptions ("stat" inside "stationary", "ui"
+# inside "quiet", "text" inside "textured/context").
+_RED_FLAG_RE = re.compile(
+    r"\b(card|graphic|icon|logo|score|stat|stats|report|level|ui|text|screenshot|screen shot)\b"
+)
 
 
 def _extract_frames_b64(video_path: Path, start: float, end: float) -> List[str]:
@@ -63,12 +71,18 @@ Identify every distinct FACECAM/WEBCAM overlay window showing a real person's
 live video feed, composited on top of gameplay or other screen content -- the
 kind of small window a streamer's camera feed appears in.
 
-Do NOT include: game UI elements, question marks, icons, logos, text boxes,
-player-name bubbles, spinners, or any other graphic that isn't an actual live
-camera feed of a person -- even if it's roughly face-shaped, face-colored, or
-positioned where a facecam might be. If a candidate box's content is a static
-graphic or texture rather than a real person, or it doesn't appear
-consistently across the frames, leave it out entirely.
+Do NOT include, even if it's roughly face-shaped, face-colored, or positioned
+where a facecam might be:
+- game UI elements, icons, logos, question marks, spinners, player-name
+  bubbles
+- score cards, stat trackers, results/report screens ("LEVEL 12", "TIME
+  3:36", grade letters, etc.), leaderboards, level-complete screens
+- any other static graphic or texture that isn't an actual live camera feed
+  of a person
+
+If you're not confident a candidate box is a real person's live camera feed
+specifically, leave it out -- a missed facecam is a much smaller problem than
+a game-UI graphic rendered as if it were someone's face.
 
 Each real person should appear as exactly ONE box, even if their camera feed
 is highlighted, spotlighted, or duplicated elsewhere on screen (e.g. an
@@ -78,11 +92,14 @@ return two overlapping or near-identical boxes for the same person.
 
 Respond with ONLY a JSON array (no other text), one entry per distinct
 facecam overlay found, in this exact shape:
-[{"x": 0.0, "y": 0.62, "w": 0.18, "h": 0.20}]
+[{"x": 0.0, "y": 0.62, "w": 0.18, "h": 0.20, "what": "person wearing headphones, real camera feed"}]
 
 x/y/w/h are fractions of the frame's width/height (0 to 1), covering the
-visible facecam window as tightly as reasonable. Return an empty array []
-if there's no real facecam overlay visible in these frames at all."""
+visible facecam window as tightly as reasonable. "what" is a short (under 10
+words) description of what's actually in the box -- answering it forces you
+to look closely before committing to a box, and it must describe an actual
+person's live video, not a graphic. Return an empty array [] if there's no
+real facecam overlay visible in these frames at all."""
 
 
 def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
@@ -174,10 +191,22 @@ def detect_facecams(
             continue
         if w <= 1 or h <= 1:
             continue
+        what = str(item.get("what", "")).strip()
+        # Defensive backstop, not the primary defense (that's the prompt
+        # itself and the model's own "what" reasoning) -- catches the
+        # model flagging something as a game-UI/graphic in its own
+        # description while still handing back a box for it. Whole-word
+        # matching only -- a plain substring check would false-positive
+        # on real descriptions like "sitting stationary" (contains "stat")
+        # or "textured background" (contains "text").
+        if what and _RED_FLAG_RE.search(what.lower()):
+            print(f"[facecam_vision] rejected box described as {what!r} (looks like UI, not a person)", flush=True)
+            continue
         x = max(0.0, min(x, src_w - 1))
         y = max(0.0, min(y, src_h - 1))
         w = min(w, src_w - x)
         h = min(h, src_h - y)
         boxes.append((int(x), int(y), int(w), int(h)))
+        print(f"[facecam_vision] kept box ({int(x)},{int(y)},{int(w)},{int(h)}): {what!r}", flush=True)
 
     return _dedupe_boxes(boxes)
