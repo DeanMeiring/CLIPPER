@@ -126,3 +126,40 @@ def render_clip(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {output_path.name}:\n{result.stderr[-2000:]}")
     return output_path
+
+
+def trim_clip(
+    source_path: Path, output_path: Path, trim_start: float, trim_end: float, duration: float,
+) -> Path:
+    """Cut trim_start seconds off the front and trim_end seconds off the
+    back of an ALREADY-RENDERED clip -- for trimming a beat or two before
+    posting it, not part of the original render.
+
+    Captions are burned directly into the pixels at render time (there's
+    no separate subtitle track), so a plain cut of the finished video
+    carries its captions along automatically -- nothing needs re-syncing
+    the way it would if this touched the source video and layout instead."""
+    new_duration = duration - trim_start - trim_end
+    if trim_start < 0 or trim_end < 0:
+        raise ValueError("Trim amounts can't be negative")
+    if new_duration < 1.0:
+        raise ValueError("That trim would leave less than a second of clip")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{trim_start:.3f}",
+        "-i", str(source_path),
+        "-t", f"{new_duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s trimming {source_path.name}") from e
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed trimming {source_path.name}:\n{result.stderr[-2000:]}")
+    return output_path
