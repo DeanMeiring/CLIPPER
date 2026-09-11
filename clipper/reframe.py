@@ -235,10 +235,18 @@ def _center_crop(src_w: int, src_h: int, target_w_ratio: int, target_h_ratio: in
 def _top_crop_excluding_overlays(
     src_w: int, src_h: int, boxes: List[Tuple[int, int, int, int]], target_w: int, target_h: int,
 ) -> CropWindow:
-    """The "gameplay" region's crop for a split layout, restricted to
-    whichever vertical band (above or below all the facecam boxes) has
-    more room -- overlays are virtually always along one edge, so this
-    covers the common cases without needing to know which edge.
+    """The "gameplay" region's crop for a split layout, taken from the
+    widest strip of the source that no facecam box sits in -- looking
+    across the frame as well as down it.
+
+    Only vertical bands were considered at first, on the assumption that
+    overlays sit along one edge. A three-way collab breaks that: cams in
+    the top-right AND bottom-left corners leave no clear band above or
+    below, so the widest gap found was the 170px sliver above the topmost
+    cam, and that got magnified to fill the whole frame -- a rendered
+    clip whose gameplay half was a blown-up strip of near-empty
+    background. The free space in that layout is the column BETWEEN the
+    corners, which this now finds by looking for gaps in both axes.
 
     A plain _center_crop doesn't know where the facecams are, and for a
     typical 16:9 source cropped to a taller target ratio it keeps the
@@ -253,16 +261,51 @@ def _top_crop_excluding_overlays(
     Falls back to the plain center crop if the box-free band is too
     thin to be worth cropping to (rather than producing a nonsensically
     tiny/over-zoomed result)."""
+    full = _center_crop(src_w, src_h, target_w, target_h)
     if not boxes:
-        return _center_crop(src_w, src_h, target_w, target_h)
-    min_y = min(b[1] for b in boxes)
-    max_y = max(b[1] + b[3] for b in boxes)
-    room_above, room_below = min_y, src_h - max_y
-    band_y, band_h = (0, room_above) if room_above >= room_below else (max_y, room_below)
-    if band_h < src_h * 0.15:
-        return _center_crop(src_w, src_h, target_w, target_h)
-    crop = _center_crop(src_w, band_h, target_w, target_h)
-    return CropWindow(x=crop.x, y=band_y + crop.y, w=crop.w, h=crop.h)
+        return full
+
+    def _gaps(intervals: List[Tuple[int, int]], limit: int) -> List[Tuple[int, int]]:
+        """Stretches of 0..limit not covered by any interval."""
+        merged: List[List[int]] = []
+        for lo, hi in sorted(intervals):
+            if merged and lo <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        free, cursor = [], 0
+        for lo, hi in merged:
+            if lo > cursor:
+                free.append((cursor, lo - cursor))
+            cursor = max(cursor, hi)
+        if cursor < limit:
+            free.append((cursor, limit - cursor))
+        return free
+
+    candidates = [
+        (gx, 0, gw, src_h) for gx, gw in _gaps([(b[0], b[0] + b[2]) for b in boxes], src_w)
+    ] + [
+        (0, gy, src_w, gh) for gy, gh in _gaps([(b[1], b[1] + b[3]) for b in boxes], src_h)
+    ]
+
+    best = None
+    for bx, by, bw, bh in candidates:
+        if bw <= 0 or bh <= 0:
+            continue
+        crop = _center_crop(bw, bh, target_w, target_h)
+        area = crop.w * crop.h
+        if best is None or area > best[0]:
+            best = (area, bx, by, crop)
+
+    # Nothing box-free is big enough to be worth the zoom it would force.
+    # A plain centre crop re-shows the source's own facecams above the
+    # tiles rendered from them, which looks like a duplicated camera grid
+    # -- but that still beats magnifying a sliver of background to fill
+    # the frame.
+    if best is None or best[0] < full.w * full.h * 0.25:
+        return full
+    _, bx, by, crop = best
+    return CropWindow(x=bx + crop.x, y=by + crop.y, w=crop.w, h=crop.h)
 
 
 def _face_centered_crop(src_w: int, src_h: int, center_x: float, target_w_ratio: int, target_h_ratio: int) -> CropWindow:
