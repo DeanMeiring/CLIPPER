@@ -414,6 +414,57 @@ def _build_overlay_layout(
     )
 
 
+def _snap_boxes_to_faces(
+    vision_boxes: List[Tuple[int, int, int, int]], clusters: List[dict],
+    src_w: int, src_h: int, min_occurrence: float,
+) -> List[Tuple[int, int, int, int]]:
+    """Re-centre each vision box on a real detected face near it.
+
+    Vision reads a facecam's SIZE well but places it unreliably: a cam
+    actually sitting at y~650 came back at y=345 on one clip, and the
+    resulting tiles cropped the space above each person with only the top
+    of a head showing at the bottom edge. It's a vertical offset, not a
+    misidentification -- the right window, in the wrong place.
+
+    The Haar detector already ran over this clip and its clusters are
+    exactly what's needed to fix that: it is poor at judging whether a
+    face-like patch is a real camera feed (which is why vision decides
+    that) but precise about where a face actually is. So each box keeps
+    vision's size and takes Haar's position, when a recurring face is
+    found near enough to be the same one.
+
+    A box with no recurring face nearby is left exactly as detected --
+    Haar misses real faces often enough (poor lighting, an angled head)
+    that treating a miss as evidence of absence would drop real cams."""
+    snapped: List[Tuple[int, int, int, int]] = []
+    for box in vision_boxes:
+        vx, vy, vw, vh = box
+        vcx, vcy = vx + vw / 2, vy + vh / 2
+        best = None
+        for c in clusters:
+            if c["occurrence_frac"] < min_occurrence:
+                continue  # one-off detector noise, not a face to trust
+            fx, fy, fw, fh = c["box"]
+            fcx, fcy = fx + fw / 2, fy + fh / 2
+            # Within roughly this box's own span, so a cam never snaps
+            # onto the neighbouring streamer's face.
+            if abs(fcx - vcx) > vw or abs(fcy - vcy) > vh:
+                continue
+            dist = (fcx - vcx) ** 2 + (fcy - vcy) ** 2
+            if best is None or dist < best[0]:
+                best = (dist, fcx, fcy)
+        if best is None:
+            snapped.append(box)
+            continue
+        _, fcx, fcy = best
+        nx = int(round(max(0, min(fcx - vw / 2, src_w - vw))))
+        ny = int(round(max(0, min(fcy - vh / 2, src_h - vh))))
+        if (nx, ny) != (vx, vy):
+            print(f"[reframe] snapped facecam box ({vx},{vy}) -> ({nx},{ny}) onto a detected face", flush=True)
+        snapped.append((nx, ny, vw, vh))
+    return snapped
+
+
 def _log_layout(start: float, end: float, clusters: List[dict], outcome: str) -> None:
     """One line per clip on which layout it got and why -- there's no
     other way to tell, after the fact, whether a clip that came out with
@@ -503,8 +554,11 @@ def compute_layout(
         # face, so padding it again by 1.7x overshoots past the window
         # into surrounding gameplay. Just enough margin to keep a
         # razor-tight crop off the window's own edge.
+        snapped_boxes = _snap_boxes_to_faces(
+            vision_boxes[:MAX_COCAM_TILES], clusters, src_w, src_h, min_confident_occurrence,
+        )
         layout = _build_overlay_layout(
-            vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac,
+            snapped_boxes, src_w, src_h, target_w, target_h, facecam_height_frac,
             pad=1.08,
         )
         if layout is not None:
