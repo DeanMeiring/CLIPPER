@@ -414,6 +414,55 @@ def _build_overlay_layout(
     )
 
 
+def layout_from_manual_boxes(
+    video_path: Path,
+    boxes: List[Tuple[int, int, int, int]],
+    target_w: int = 1080,
+    target_h: int = 1920,
+    facecam_height_frac: float = 0.40,
+) -> Layout:
+    """Build a layout directly from facecam box(es) a human drew on the
+    source frame, bypassing detect_facecams()/the Haar heuristic entirely.
+
+    Used when the post-render check rejected what detection produced for a
+    clip (see webapp/main.py's _render_all) and a person has now looked at
+    the actual source frame and knows exactly where the facecam(s) are.
+    Reuses the same tiling geometry (_build_overlay_layout) a correct
+    detection would have produced, so a correct manual box renders exactly
+    like a correct automatic one would have -- pad matches the vision path
+    (1.08x, not the Haar path's 1.7x), since a box drawn around the visible
+    window is already the window, not a bare face needing room to grow
+    into it."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if src_w <= 0 or src_h <= 0:
+        raise RuntimeError(f"Could not read video dimensions (got {src_w}x{src_h}): {video_path}")
+
+    clamped: List[Tuple[int, int, int, int]] = []
+    for x, y, w, h in boxes[:MAX_COCAM_TILES]:
+        x = max(0, min(int(x), src_w - 1))
+        y = max(0, min(int(y), src_h - 1))
+        w = min(int(w), src_w - x)
+        h = min(int(h), src_h - y)
+        if w <= 1 or h <= 1:
+            continue
+        clamped.append((x, y, w, h))
+    if not clamped:
+        raise RuntimeError("No usable facecam boxes given (all were degenerate or off-frame)")
+
+    print(f"[reframe] manual facecam boxes: {clamped} -> {len(clamped)}-cam split", flush=True)
+    layout = _build_overlay_layout(clamped, src_w, src_h, target_w, target_h, facecam_height_frac, pad=1.08)
+    if layout is None:
+        raise RuntimeError("Could not build a layout from the given facecam boxes")
+    return layout
+
+
 def _snap_boxes_to_faces(
     vision_boxes: List[Tuple[int, int, int, int]], clusters: List[dict],
     src_w: int, src_h: int, min_occurrence: float,
