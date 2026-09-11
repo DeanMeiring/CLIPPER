@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 from typing import List, Optional
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -20,6 +21,31 @@ DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 # two, so anything younger is reported but kept out of the performance
 # comparison and the best-day averages rather than counted as a flop.
 _MIN_AGE_DAYS_TO_JUDGE = 2.0
+
+# YouTube's own eligibility ceiling for a video to actually be treated as a
+# Short (feed placement, the Shorts shelf, etc.), not this app's guess --
+# raised from the original 60s in 2024. Everything this app renders is
+# comfortably under this, and every insight/comparison here is meant to be
+# Shorts-vs-Shorts, so a channel's occasional long-form upload is excluded
+# rather than silently diluting the "what's working" picture with a video
+# in a different format nobody here is posting.
+_MAX_SHORT_SECONDS = 180
+
+_ISO8601_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
+
+
+def _parse_iso8601_duration(duration: str) -> Optional[float]:
+    """YouTube's contentDetails.duration is ISO 8601 (e.g. "PT1M30S",
+    "PT47S", "PT2H"). Returns None for anything that doesn't match rather
+    than guessing -- a video whose length can't be read is left out of the
+    Shorts/long-form split entirely instead of being miscounted as either."""
+    if not duration:
+        return None
+    m = _ISO8601_DURATION_RE.match(duration.strip())
+    if not m:
+        return None
+    hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
+    return float(hours * 3600 + minutes * 60 + seconds)
 
 
 def _channel_lookup_params(channel_id_or_handle: str) -> dict:
@@ -65,7 +91,18 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
         )
         v_resp.raise_for_status()
         now = datetime.datetime.now(datetime.timezone.utc)
+        long_form_skipped = 0
         for v in v_resp.json().get("items") or []:
+            duration_seconds = _parse_iso8601_duration((v.get("contentDetails") or {}).get("duration", ""))
+            # Everything this app compares is meant to be Shorts-vs-Shorts --
+            # an occasional long-form upload mixed into a channel's recent
+            # videos would otherwise sit in the same ranking/best-day
+            # average as actual Shorts despite competing in a completely
+            # different format. A duration that couldn't be parsed is kept
+            # rather than guessed at either way.
+            if duration_seconds is not None and duration_seconds > _MAX_SHORT_SECONDS:
+                long_form_skipped += 1
+                continue
             published_at = v["snippet"]["publishedAt"]
             published_dt = datetime.datetime.fromisoformat(published_at.replace("Z", "+00:00"))
             age_days = max(1.0, (now - published_dt).total_seconds() / 86400)
@@ -77,6 +114,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
                 "views": views,
                 "views_per_day": round(views / age_days, 1),
                 "age_days": round(age_days, 1),
+                "duration_seconds": duration_seconds,
                 # A just-posted video hasn't had time to earn its views yet,
                 # and the max(1.0, ...) floor above actively understates it:
                 # something posted 2 hours ago is scored as if a full day had
@@ -93,6 +131,11 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
     best_day, views_per_day_by_weekday = _best_day_heuristic(videos)
 
     hidden_subs = channel.get("statistics", {}).get("hiddenSubscriberCount")
+    note = ("Heuristic from public view counts, normalized by video age -- "
+            "noisy, especially with few videos. Connect your YouTube account "
+            "for real Analytics-based day-of-week performance and retention.")
+    if long_form_skipped:
+        note += f" ({long_form_skipped} longer-than-Shorts upload(s) excluded from this list.)"
     return {
         "channel_title": channel["snippet"]["title"],
         "subscriber_count": None if hidden_subs else int(stats.get("subscriberCount", 0)),
@@ -103,9 +146,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
         "avg_views_per_day_recent": round(sum(v["views_per_day"] for v in videos) / len(videos), 1) if videos else None,
         "best_day_heuristic": best_day,
         "views_per_day_by_weekday": views_per_day_by_weekday,
-        "note": "Heuristic from public view counts, normalized by video age -- "
-                "noisy, especially with few videos. Connect your YouTube account "
-                "for real Analytics-based day-of-week performance and retention.",
+        "note": note,
     }
 
 
