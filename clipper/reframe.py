@@ -554,11 +554,16 @@ def compute_layout(
         # face, so padding it again by 1.7x overshoots past the window
         # into surrounding gameplay. Just enough margin to keep a
         # razor-tight crop off the window's own edge.
-        snapped_boxes = _snap_boxes_to_faces(
-            vision_boxes[:MAX_COCAM_TILES], clusters, src_w, src_h, min_confident_occurrence,
-        )
+        # _snap_boxes_to_faces is deliberately NOT called. Taking Haar's
+        # position for a vision box made things worse in production, the
+        # same way the earlier vision-based refinement did: two cams both
+        # snapped to (1594,263), a box went to (0,60) at the top of the
+        # frame, and one that was already correct at (0,669) was pulled to
+        # (0,570) off the person. Haar's clusters aren't tied to the box
+        # they get matched with, so a single strong cluster attracts every
+        # nearby box. Vision's raw positions are used as found.
         layout = _build_overlay_layout(
-            snapped_boxes, src_w, src_h, target_w, target_h, facecam_height_frac,
+            vision_boxes[:MAX_COCAM_TILES], src_w, src_h, target_w, target_h, facecam_height_frac,
             pad=1.08,
         )
         if layout is not None:
