@@ -45,6 +45,7 @@ from clipper.channel_insights import get_channel_snapshot
 from clipper import channel_strategy
 from clipper.channel_strategy import get_ai_overview
 from clipper import competitor_discovery
+from clipper import competitor_content
 from clipper import youtube_analytics
 from clipper import youtube_oauth
 
@@ -1374,6 +1375,18 @@ def channel_insights() -> dict:
 
 class OverviewRequest(BaseModel):
     focus: Optional[str] = None
+    # Off by default: reads each saved competitor's top video's actual
+    # transcript + loudness, not just its title -- meaningfully slower
+    # (a caption + an audio-only fetch per video, capped below) than the
+    # metadata-only overview, so it's an explicit opt-in rather than
+    # something that silently makes every overview take longer.
+    analyze_content: bool = False
+
+
+# Worst-case latency ceiling for the opt-in content analysis: this many
+# competitor videos, each a caption fetch + a short audio-only download,
+# on top of the Claude call itself.
+_MAX_CONTENT_ANALYSIS_VIDEOS = 5
 
 
 @protected.post("/api/channel-insights/overview")
@@ -1405,9 +1418,35 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
             continue
         if comp_snapshot:
             competitor_snapshots.append(comp_snapshot)
+
+    content_analyses = []
+    if req.analyze_content and competitor_snapshots:
+        for comp in competitor_snapshots[:_MAX_CONTENT_ANALYSIS_VIDEOS]:
+            videos = [v for v in (comp.get("recent_videos") or []) if not v.get("too_new_to_judge")]
+            if not videos:
+                continue
+            top = max(videos, key=lambda v: v["views_per_day"])
+            video_url = f"https://www.youtube.com/watch?v={top['id']}"
+            try:
+                content = competitor_content.analyze_video_content(video_url, top.get("duration_seconds") or 60.0)
+            except Exception as e:
+                print(f"[channel_strategy] content analysis for {video_url} failed, skipping: {e}", flush=True)
+                continue
+            if content:
+                content_analyses.append({
+                    "channel_title": comp.get("channel_title"),
+                    "video_title": top.get("title"),
+                    "transcript_text": content.transcript_text,
+                    "loud_moments": [
+                        {"start": m.start, "end": m.end, "peak_db": m.peak_db, "jump_db": m.jump_db}
+                        for m in content.loud_moments
+                    ],
+                })
+
     try:
         overview = get_ai_overview(
-            snapshot, data.get("analytics"), focus=req.focus, competitors=competitor_snapshots,
+            snapshot, data.get("analytics"), focus=req.focus,
+            competitors=competitor_snapshots, content_analyses=content_analyses,
         )
     except Exception as e:
         raise HTTPException(502, f"Could not generate an overview: {e}") from e
@@ -2794,6 +2833,10 @@ ANALYTICS_HTML = """<!doctype html>
 
 <div class="section">
   <label style="margin-top:0">🤖 AI strategy overview</label>
+  <label style="margin-top:10px;display:flex;align-items:center;gap:8px;font-weight:normal;text-transform:none;letter-spacing:normal">
+    <input id="ai-overview-analyze-content" type="checkbox" style="width:auto">
+    🔬 Also read competitor clips' actual content (transcript + loudness), not just titles -- slower
+  </label>
   <button id="ai-overview-btn" type="button">🤖 Get AI strategy overview</button>
   <button id="ai-overview-clear-btn" type="button" style="margin-left:8px">🗑 Clear saved analysis</button>
   <div id="ai-overview-body"></div>
@@ -2982,15 +3025,17 @@ loadChannelInsights();
 
 const aiOverviewBtn = document.getElementById('ai-overview-btn');
 const aiOverviewBody = document.getElementById('ai-overview-body');
+const aiOverviewAnalyzeContent = document.getElementById('ai-overview-analyze-content');
 aiOverviewBtn.addEventListener('click', async () => {
+  const analyzeContent = aiOverviewAnalyzeContent.checked;
   aiOverviewBtn.disabled = true;
-  aiOverviewBtn.textContent = 'Thinking...';
+  aiOverviewBtn.textContent = analyzeContent ? 'Reading competitor clips (this takes longer)...' : 'Thinking...';
   aiOverviewBody.innerHTML = '';
   try {
     const resp = await fetch('/api/channel-insights/overview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ analyze_content: analyzeContent }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {

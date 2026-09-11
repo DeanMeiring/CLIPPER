@@ -90,13 +90,13 @@ def is_url(source: str) -> bool:
     return bool(URL_RE.match(source))
 
 
-def _base_ydl_opts() -> dict:
+def base_ydl_opts() -> dict:
     opts = {
         "quiet": True, "no_warnings": False, "noplaylist": True,
         # A persistently failing source (e.g. a 403 on a restricted/expired
         # VOD) can otherwise have yt-dlp retry with growing backoff for a
         # very long time -- bound that so a bad source fails in minutes,
-        # not indefinitely. _run_with_timeout below is the hard backstop
+        # not indefinitely. run_with_timeout below is the hard backstop
         # in case even this isn't enough (a genuinely stalled connection).
         "socket_timeout": 30,
         "retries": 3,
@@ -124,7 +124,7 @@ class CorruptDownload(RuntimeError):
     through every remaining candidate for nothing."""
 
 
-def _run_with_timeout(
+def run_with_timeout(
     fn: Callable[[], _T],
     timeout_seconds: float,
     on_late_completion: Optional[Callable[[], None]] = None,
@@ -183,10 +183,10 @@ def probe_video(source: str) -> VideoInfo:
     import yt_dlp
 
     def _extract() -> dict:
-        with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
+        with yt_dlp.YoutubeDL(base_ydl_opts()) as ydl:
             return ydl.extract_info(source, download=False)
 
-    info = _run_with_timeout(_extract, timeout_seconds=90.0)
+    info = run_with_timeout(_extract, timeout_seconds=90.0)
 
     extractor = (info.get("extractor_key") or info.get("extractor") or "").lower()
     video_id = str(info.get("id", ""))
@@ -262,7 +262,7 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
     out_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(out_dir / f"{out_name}.%(ext)s")
     ydl_opts = {
-        **_base_ydl_opts(),
+        **base_ydl_opts(),
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
@@ -278,7 +278,7 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
         for p in out_dir.glob(f"{out_name}.*"):
             p.unlink(missing_ok=True)
 
-    _run_with_timeout(_extract, timeout_seconds=240.0, on_late_completion=_cleanup_late_files)
+    run_with_timeout(_extract, timeout_seconds=240.0, on_late_completion=_cleanup_late_files)
 
     candidates = list(out_dir.glob(f"{out_name}.*"))
     video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
@@ -322,7 +322,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
 
     outtmpl = str(out_dir / "%(id)s.%(ext)s")
     ydl_opts = {
-        **_base_ydl_opts(),
+        **base_ydl_opts(),
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
@@ -357,7 +357,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
             if p not in existing_before:
                 p.unlink(missing_ok=True)
 
-    info = _run_with_timeout(_extract, timeout_seconds=600.0, on_late_completion=_cleanup_late_files)
+    info = run_with_timeout(_extract, timeout_seconds=600.0, on_late_completion=_cleanup_late_files)
     video_id = info["id"]
     title = info.get("title", video_id)
     duration = float(info.get("duration") or 0.0)

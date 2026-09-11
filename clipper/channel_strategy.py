@@ -123,8 +123,40 @@ def _format_competitor_block(competitors: list) -> str:
     return "\n\n".join(blocks)
 
 
+def _format_content_analysis_block(content_analyses: list) -> str:
+    """One block per analyzed competitor video: its actual transcript and
+    where it gets loud, not just its title -- this is what lets Claude
+    describe WHAT KIND of moment won (a clutch, a fail, a funny exchange)
+    instead of only noticing a title pattern. Each entry is
+    {channel_title, video_title, transcript_text, loud_moments}."""
+    blocks = []
+    for a in content_analyses:
+        header = f'-- {a.get("channel_title", "unknown channel")}: "{a.get("video_title", "")}" --'
+        parts = [header]
+        transcript = (a.get("transcript_text") or "").strip()
+        if transcript:
+            # A Shorts-length transcript is naturally small (well under a
+            # a minute of speech); this cap is a backstop against an
+            # unusually dense/long one, not something normal clips hit.
+            parts.append(f"Transcript: {transcript[:1500]}")
+        loud = a.get("loud_moments") or []
+        if loud:
+            spots = ", ".join(
+                f'{m["start"]:.0f}-{m["end"]:.0f}s (peak {m["peak_db"]:.0f}dB, +{m["jump_db"]:.0f}dB over baseline)'
+                for m in loud[:5]
+            )
+            parts.append(f"Loud/high-energy moments: {spots}")
+        if len(parts) > 1:
+            blocks.append("\n".join(parts))
+    return "\n\n".join(blocks)
+
+
 def _build_prompt(
-    snapshot: dict, analytics: Optional[dict], focus: Optional[str], competitors: Optional[list] = None,
+    snapshot: dict,
+    analytics: Optional[dict],
+    focus: Optional[str],
+    competitors: Optional[list] = None,
+    content_analyses: Optional[list] = None,
 ) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
@@ -206,6 +238,7 @@ def _build_prompt(
         lines.append("\n(No connected Analytics account -- only public view counts above, no retention/traffic data.)")
 
     competitor_block = _format_competitor_block(competitors) if competitors else ""
+    content_block = _format_content_analysis_block(content_analyses) if content_analyses else ""
 
     focus_line = f"\nThe creator specifically wants advice on: {focus}\n" if focus else ""
     data_block = "\n".join(lines)
@@ -214,6 +247,12 @@ def _build_prompt(
         f"creator's own channel, do not mix these into the above analysis, only use them for "
         f"the COMPETITOR PATTERNS section below:\n\n{competitor_block}"
         if competitor_block else ""
+    )
+    content_section = (
+        f"\n\nActual content of some of those competitor videos -- their real transcript "
+        f"and where the audio gets loud, not just the title -- for the WHAT KIND OF MOMENT "
+        f"WINS section below:\n\n{content_block}"
+        if content_block else ""
     )
     competitor_patterns_section = (
         "\nCOMPETITOR PATTERNS: compare this creator's own top-performing titles above\n"
@@ -226,13 +265,22 @@ def _build_prompt(
         "inventing a pattern.\n"
         if competitor_block else ""
     )
+    content_patterns_section = (
+        "\nWHAT KIND OF MOMENT WINS: from the actual transcript(s) and loud-moment\n"
+        "timestamps above, describe the TYPE of moment that's winning for competitors --\n"
+        "a clutch/comeback, a fail, a funny exchange, a shocked reaction, an argument,\n"
+        "a jumpscare -- and whether it lines up with a loud/high-energy spot or is quiet\n"
+        "(a punchline, a deadpan line). Say what kind of moment this creator should be\n"
+        "watching their own footage for, specifically. Don't just restate the transcript.\n"
+        if content_block else ""
+    )
 
     return f"""You're a short-form YouTube strategy advisor looking at one creator's own
 channel data below. Give concrete, specific advice grounded in what's
 actually there -- don't give generic "post consistently" filler advice
 that isn't backed by this data.
 {focus_line}
-{data_block}{competitor_section}
+{data_block}{competitor_section}{content_section}
 
 A common frustration this creator has: a clip they personally thought was
 weak takes off, while one they were proud of gets almost nothing. There
@@ -262,7 +310,7 @@ tie it to a specific number or title in the data above -- if a claim
 doesn't cite something concrete from this data, cut it instead of padding
 the answer with it.
 
-Based on this data, answer in exactly {5 if competitor_block else 4} short sections (plain text, no
+Based on this data, answer in exactly {4 + bool(competitor_block) + bool(content_block)} short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-2 sentences --
 stay terse, this is a quick read not a report):
 
@@ -281,8 +329,8 @@ more of, and what should they stop clipping?
 
 FORMAT NOTES: one concrete format or editing change from the
 retention/traffic signals (or general best practice if none given).
-{competitor_patterns_section}
-Hard limit: under {260 if competitor_block else 220} words total, and every section must be a complete
+{competitor_patterns_section}{content_patterns_section}
+Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block else 0)} words total, and every section must be a complete
 thought -- if you're running long, cut detail, not sentences."""
 
 
@@ -293,6 +341,7 @@ def get_ai_overview(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     competitors: Optional[list] = None,
+    content_analyses: Optional[list] = None,
 ) -> str:
     import anthropic
 
@@ -300,7 +349,7 @@ def get_ai_overview(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    prompt = _build_prompt(snapshot, analytics, focus, competitors)
+    prompt = _build_prompt(snapshot, analytics, focus, competitors, content_analyses)
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,
