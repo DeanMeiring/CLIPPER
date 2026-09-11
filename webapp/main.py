@@ -371,6 +371,33 @@ def _render_atomic(video_path: Path, pick, layout, ass_path: Path, out_path: Pat
         tmp_path.unlink(missing_ok=True)
 
 
+def _save_still(video_path: Path, out_path: Path) -> Optional[Path]:
+    """Write one frame from partway through a clip as a JPEG beside it.
+
+    A rejected facecam render is only useful if someone can actually look
+    at it, and a 25MB mp4 is awkward to get off the server and past an
+    upload limit. A still is a couple of hundred KB, opens straight in a
+    browser, and shows the facecam band just as well as the video does."""
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if frames > 0 and fps > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, (frames / fps) * 1000 * 0.5)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            return None
+        return out_path if cv2.imwrite(str(out_path), frame) else None
+    except Exception as e:  # noqa: BLE001 - a missing still must never fail a render
+        print(f"[render] could not write a still for {out_path.name}: {e}", flush=True)
+        return None
+
+
 def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -416,7 +443,11 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                 try:
                     rejected_path = out_path.with_name(f"{out_path.stem}_rejected_facecam{out_path.suffix}")
                     shutil.copy2(out_path, rejected_path)
-                    print(f"[render] kept the rejected facecam render as {rejected_path.name} for inspection", flush=True)
+                    still = _save_still(rejected_path, rejected_path.with_suffix(".jpg"))
+                    print(
+                        f"[render] kept the rejected facecam render as {rejected_path.name}"
+                        + (f" (still: {still.name})" if still else ""), flush=True,
+                    )
                 except OSError as e:
                     print(f"[render] could not keep the rejected render: {e}", flush=True)
                 try:
@@ -855,10 +886,18 @@ def cancel_job(job_id: str, save: bool = False) -> dict:
 
 @protected.get("/api/jobs/{job_id}/clips/{filename}")
 def get_clip(job_id: str, filename: str) -> FileResponse:
+    # Reject any filename that isn't a plain name, so a crafted path can't
+    # walk out of the job directory and serve an arbitrary file off disk.
+    if Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(400, "bad filename")
     path = BASE_DIR / job_id / filename
     if not path.is_file():
         raise HTTPException(404, "not found")
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    # A rejected render is saved alongside its clip as a .jpg still, and
+    # labelling that video/mp4 makes a browser download it instead of just
+    # showing it -- which defeats the point of having a still at all.
+    media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "video/mp4"
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @protected.delete("/api/jobs/{job_id}/clips/{filename}")
