@@ -35,7 +35,7 @@ from clipper.reframe import (
     compute_layout,
     layout_from_manual_boxes,
 )
-from clipper.render import render_clip
+from clipper.render import render_clip, trim_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
@@ -48,6 +48,7 @@ from clipper import competitor_discovery
 from clipper import competitor_content
 from clipper import youtube_analytics
 from clipper import youtube_oauth
+from clipper import youtube_upload
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1117,6 +1118,72 @@ def get_clip(job_id: str, filename: str) -> FileResponse:
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
+class YouTubeUploadRequest(BaseModel):
+    # Defaults to Unlisted rather than Public -- a wrong first click (the
+    # wrong clip, a typo'd title before ever seeing this modal) shouldn't
+    # be able to go live on the channel by accident. Public is one
+    # deliberate radio-button choice away, not the default.
+    privacy_status: str = "unlisted"
+    # Optional: shave a beat off either end before posting, without
+    # re-rendering or touching the kept copy on disk -- captions are
+    # burned into the pixels already, so trimming the finished file
+    # carries them along for free.
+    trim_start: float = 0.0
+    trim_end: float = 0.0
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/upload-youtube")
+def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest) -> dict:
+    """Post one already-rendered, already-hand-picked clip straight to the
+    connected YouTube channel -- the manual "I've decided this one's going
+    up" action, never a bulk or automatic publish. Uses the clip's
+    already-generated upload_title/description as-is."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+
+    access_token = _youtube_token_store.get_valid_access_token()
+    if not access_token:
+        raise HTTPException(409, "Connect your YouTube account on the analytics page first.")
+
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    trimmed_path = None
+    if req.trim_start > 0 or req.trim_end > 0:
+        trimmed_path = path.with_name(f".{path.stem}.trimmed{path.suffix}")
+        try:
+            trim_clip(path, trimmed_path, req.trim_start, req.trim_end, float(clip.get("duration") or 0))
+        except (RuntimeError, ValueError) as e:
+            trimmed_path.unlink(missing_ok=True)
+            raise HTTPException(400, f"Could not trim the clip: {e}") from e
+        upload_path = trimmed_path
+    else:
+        upload_path = path
+
+    try:
+        video_id = youtube_upload.upload_video(
+            access_token, upload_path,
+            title=clip.get("upload_title") or clip.get("title") or filename,
+            description=clip.get("description") or "",
+            privacy_status=req.privacy_status,
+        )
+    except (youtube_upload.UploadError, ValueError) as e:
+        raise HTTPException(502, str(e)) from e
+    finally:
+        if trimmed_path is not None:
+            trimmed_path.unlink(missing_ok=True)
+
+    return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+
+
 @protected.delete("/api/jobs/{job_id}/clips/{filename}")
 def delete_clip(job_id: str, filename: str) -> dict:
     """Drop a single clip from a finished job's results -- keep the rest.
@@ -1673,11 +1740,19 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open { display: flex; }
+  .privacy-option {
+    display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+    text-transform: none; letter-spacing: normal;
+  }
+  .privacy-option input { width: auto; margin-top: 3px; }
+  .privacy-option .privacy-label { display: block; font-weight: 700; font-size: 0.9rem; color: var(--text); }
+  .privacy-option .privacy-desc { font-size: 0.78rem; color: var(--muted); margin-top: 2px; font-weight: 400; }
   .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
@@ -1898,6 +1973,50 @@ INDEX_HTML = """<!doctype html>
       <button id="facecam-go-btn" type="button">Re-render with these boxes</button>
       <button id="facecam-clear-btn" type="button" class="ghost">Clear boxes</button>
       <button id="facecam-cancel-btn" type="button" class="ghost">Skip for now</button>
+    </div>
+  </div>
+</div>
+
+<div id="youtube-upload-modal-overlay">
+  <div class="modal">
+    <p>Upload to YouTube</p>
+    <p class="hint" id="youtube-upload-title-hint"></p>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="unlisted" checked>
+      <span>
+        <span class="privacy-label">Unlisted</span>
+        <span class="privacy-desc" style="display:block">Only people with the link can see it -- good for a final check before going public.</span>
+      </span>
+    </label>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="public">
+      <span>
+        <span class="privacy-label">Public</span>
+        <span class="privacy-desc" style="display:block">Live immediately on your channel and in search/Shorts feed.</span>
+      </span>
+    </label>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="private">
+      <span>
+        <span class="privacy-label">Private</span>
+        <span class="privacy-desc" style="display:block">Only you can see it.</span>
+      </span>
+    </label>
+    <label style="margin-top:16px">Trim before uploading (optional)</label>
+    <div class="row">
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the start (s)</label>
+        <input id="youtube-upload-trim-start" type="number" value="0" min="0" step="0.5">
+      </div>
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the end (s)</label>
+        <input id="youtube-upload-trim-end" type="number" value="0" min="0" step="0.5">
+      </div>
+    </div>
+    <p class="hint" id="youtube-upload-trim-hint"></p>
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="youtube-upload-go-btn" type="button">Upload</button>
+      <button id="youtube-upload-cancel-btn" type="button" class="ghost">Cancel</button>
     </div>
   </div>
 </div>
@@ -2450,12 +2569,77 @@ facecamGoBtn.addEventListener('click', async () => {
   }
 });
 
+const youtubeUploadModal = document.getElementById('youtube-upload-modal-overlay');
+const youtubeUploadTitleHint = document.getElementById('youtube-upload-title-hint');
+const youtubeUploadGoBtn = document.getElementById('youtube-upload-go-btn');
+const youtubeUploadTrimStart = document.getElementById('youtube-upload-trim-start');
+const youtubeUploadTrimEnd = document.getElementById('youtube-upload-trim-end');
+const youtubeUploadTrimHint = document.getElementById('youtube-upload-trim-hint');
+let youtubeUploadJobId = null;
+let youtubeUploadFilename = null;
+let youtubeUploadDuration = 0;
+
+function openYoutubeUploadModal(jobId, clip) {
+  youtubeUploadJobId = jobId;
+  youtubeUploadFilename = clip.file;
+  youtubeUploadDuration = clip.duration || 0;
+  youtubeUploadTitleHint.textContent = `"${clip.upload_title || clip.title}"`;
+  youtubeUploadTrimHint.textContent = `Clip is ${youtubeUploadDuration}s long.`;
+  youtubeUploadTrimStart.value = '0';
+  youtubeUploadTrimEnd.value = '0';
+  document.querySelector('input[name="youtube-privacy"][value="unlisted"]').checked = true;
+  youtubeUploadModal.classList.add('open');
+}
+
+document.getElementById('youtube-upload-cancel-btn').addEventListener('click', () => {
+  youtubeUploadModal.classList.remove('open');
+  youtubeUploadJobId = null;
+  youtubeUploadFilename = null;
+});
+
+youtubeUploadGoBtn.addEventListener('click', async () => {
+  if (!youtubeUploadJobId || !youtubeUploadFilename) return;
+  const jobId = youtubeUploadJobId;
+  const filename = youtubeUploadFilename;
+  const privacyInput = document.querySelector('input[name="youtube-privacy"]:checked');
+  const privacyStatus = privacyInput ? privacyInput.value : 'unlisted';
+  const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(youtubeUploadTrimEnd.value) || 0);
+  if (trimStart + trimEnd >= youtubeUploadDuration) {
+    alert('That trim would cut the whole clip -- leave at least a second.');
+    return;
+  }
+  youtubeUploadGoBtn.disabled = true;
+  youtubeUploadGoBtn.textContent = (trimStart || trimEnd) ? 'Trimming & uploading...' : 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: privacyStatus, trim_start: trimStart, trim_end: trimEnd }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Upload failed.');
+      return;
+    }
+    youtubeUploadModal.classList.remove('open');
+    youtubeUploadJobId = null;
+    youtubeUploadFilename = null;
+    alert(`Uploaded -- ${data.url}`);
+  } catch (e) {
+    alert('Upload failed.');
+  } finally {
+    youtubeUploadGoBtn.disabled = false;
+    youtubeUploadGoBtn.textContent = 'Upload';
+  }
+});
+
 // The part that actually *asks*: once a job is done, if any clip's
 // facecam got rejected, open the picker for it right away instead of
 // leaving a button to be noticed. Each clip is offered once per page
 // load, so "Skip for now" is respected -- the button stays on the clip.
 function maybePromptFacecam(jobId, job) {
-  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open')) return;
+  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open')) return;
   const next = (job.clips || []).find(c => c.facecam_uncertain && c.source_frame && !facecamPrompted.has(`${jobId}/${c.file}`));
   if (!next) return;
   facecamPrompted.add(`${jobId}/${next.file}`);
@@ -2576,6 +2760,13 @@ async function poll(jobId) {
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
         div.appendChild(fixBtn);
       }
+
+      const uploadBtn = document.createElement('button');
+      uploadBtn.type = 'button';
+      uploadBtn.textContent = '📤 Upload to YouTube';
+      uploadBtn.style.marginLeft = '8px';
+      uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
+      div.appendChild(uploadBtn);
 
       const delClipBtn = document.createElement('button');
       delClipBtn.type = 'button';
