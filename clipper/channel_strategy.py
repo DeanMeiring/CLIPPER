@@ -74,7 +74,58 @@ def clear_history(path: Path) -> None:
         pass
 
 
-def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str]) -> str:
+def load_competitors(path: Path) -> list:
+    """The creator's saved list of competitor channels ({channel_id,
+    channel_title}) to compare against in the AI overview -- picked via
+    competitor_discovery's streamer search, not hand-typed, since a
+    creator clipping someone else's stream often has no idea who else is
+    clipping the same person. Empty list if nothing's been saved yet."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def save_competitors(path: Path, channels: list) -> None:
+    """Overwrite the saved competitor list -- the frontend always sends the
+    full desired list (added/removed client-side first), so a plain
+    replace is simpler and race-free compared to incremental add/remove
+    calls against the same file."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(channels), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _format_competitor_block(competitors: list) -> str:
+    """One labeled section per competitor channel, each listing its
+    highest-performing recent titles the same way the creator's own
+    top-half is shown -- so Claude is comparing two concrete lists of
+    titles against each other, not summarizing a vague impression of
+    "what other clip channels do"."""
+    blocks = []
+    for c in competitors:
+        title = c.get("channel_title") or "unknown channel"
+        videos = c.get("recent_videos") or []
+        settled = [v for v in videos if not v.get("too_new_to_judge")]
+        ranked = sorted(settled, key=lambda v: v["views_per_day"], reverse=True)[:6]
+        if not ranked:
+            continue
+        lines = [f'-- {title} --']
+        for v in ranked:
+            weekday_name = _WEEKDAY_NAMES[v["weekday"]]
+            lines.append(f'"{v["title"]}" -- {v["views"]} views, {v["views_per_day"]}/day, posted {weekday_name}')
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _build_prompt(
+    snapshot: dict, analytics: Optional[dict], focus: Optional[str], competitors: Optional[list] = None,
+) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
         f"Subscribers: {snapshot.get('subscriber_count')}",
@@ -154,15 +205,34 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
     else:
         lines.append("\n(No connected Analytics account -- only public view counts above, no retention/traffic data.)")
 
+    competitor_block = _format_competitor_block(competitors) if competitors else ""
+
     focus_line = f"\nThe creator specifically wants advice on: {focus}\n" if focus else ""
     data_block = "\n".join(lines)
+    competitor_section = (
+        f"\n\nOther channels clipping similar streamers/content, for comparison -- NOT this "
+        f"creator's own channel, do not mix these into the above analysis, only use them for "
+        f"the COMPETITOR PATTERNS section below:\n\n{competitor_block}"
+        if competitor_block else ""
+    )
+    competitor_patterns_section = (
+        "\nCOMPETITOR PATTERNS: compare this creator's own top-performing titles above\n"
+        "against the competitor channels' top-performing titles. Name one concrete\n"
+        "title/hook/wording pattern (e.g. a phrasing style, emoji use, question\n"
+        "hooks, ALL CAPS words, naming the streamer in the title, numbers) that\n"
+        "shows up repeatedly in the competitors' best performers but not in this\n"
+        "creator's own -- something they could actually try, not a vague \"be more\n"
+        "engaging\". If nothing clearly differs, say that plainly instead of\n"
+        "inventing a pattern.\n"
+        if competitor_block else ""
+    )
 
     return f"""You're a short-form YouTube strategy advisor looking at one creator's own
 channel data below. Give concrete, specific advice grounded in what's
 actually there -- don't give generic "post consistently" filler advice
 that isn't backed by this data.
 {focus_line}
-{data_block}
+{data_block}{competitor_section}
 
 A common frustration this creator has: a clip they personally thought was
 weak takes off, while one they were proud of gets almost nothing. There
@@ -192,7 +262,7 @@ tie it to a specific number or title in the data above -- if a claim
 doesn't cite something concrete from this data, cut it instead of padding
 the answer with it.
 
-Based on this data, answer in exactly 4 short sections (plain text, no
+Based on this data, answer in exactly {5 if competitor_block else 4} short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-2 sentences --
 stay terse, this is a quick read not a report):
 
@@ -211,8 +281,8 @@ more of, and what should they stop clipping?
 
 FORMAT NOTES: one concrete format or editing change from the
 retention/traffic signals (or general best practice if none given).
-
-Hard limit: under 220 words total, and every section must be a complete
+{competitor_patterns_section}
+Hard limit: under {260 if competitor_block else 220} words total, and every section must be a complete
 thought -- if you're running long, cut detail, not sentences."""
 
 
@@ -222,6 +292,7 @@ def get_ai_overview(
     focus: Optional[str] = None,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
+    competitors: Optional[list] = None,
 ) -> str:
     import anthropic
 
@@ -229,7 +300,7 @@ def get_ai_overview(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    prompt = _build_prompt(snapshot, analytics, focus)
+    prompt = _build_prompt(snapshot, analytics, focus, competitors)
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,
