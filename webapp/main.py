@@ -44,6 +44,7 @@ from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot
 from clipper import channel_strategy
 from clipper.channel_strategy import get_ai_overview
+from clipper import competitor_discovery
 from clipper import youtube_analytics
 from clipper import youtube_oauth
 
@@ -57,6 +58,7 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 # account survives restarts/redeploys -- see clipper/youtube_oauth.py.
 _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
+_competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -1262,13 +1264,13 @@ def youtube_login() -> RedirectResponse:
 @protected.get("/auth/youtube/callback")
 def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
     if error:
-        return RedirectResponse(f"/?youtube_error={error}")
+        return RedirectResponse(f"/analytics?youtube_error={error}")
     issued_at = _youtube_oauth_states.pop(state, None)
     if issued_at is None or time.time() - issued_at > 600:
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
     _youtube_token_store.save(token)
-    return RedirectResponse("/?youtube_connected=1")
+    return RedirectResponse("/analytics?youtube_connected=1")
 
 
 @protected.post("/api/youtube/disconnect")
@@ -1378,8 +1380,10 @@ class OverviewRequest(BaseModel):
 def channel_insights_overview(req: OverviewRequest) -> dict:
     """A plain-language strategy read from Claude over the same channel
     data the insights panel shows -- best day, what content is working,
-    format notes. Costs a Claude API call, so this is its own on-demand
-    endpoint (a button) rather than something the panel auto-loads."""
+    format notes, plus a competitor-pattern comparison if any competitor
+    channels are saved. Costs a Claude API call, so this is its own
+    on-demand endpoint (a button) rather than something the panel
+    auto-loads."""
     data = _gather_channel_insights_data()
     snapshot = data.get("heuristic")
     if not snapshot:
@@ -1389,8 +1393,22 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
             or data.get("setup_needed")
             or "No channel data available yet -- set YOUTUBE_OWN_CHANNEL or connect your YouTube account first.",
         )
+    competitor_snapshots = []
+    for c in channel_strategy.load_competitors(_competitor_channels_path):
+        channel_id = c.get("channel_id")
+        if not channel_id:
+            continue
+        try:
+            comp_snapshot = get_channel_snapshot(channel_id)
+        except Exception as e:
+            print(f"[channel_strategy] competitor lookup for {channel_id!r} failed, skipping: {e}", flush=True)
+            continue
+        if comp_snapshot:
+            competitor_snapshots.append(comp_snapshot)
     try:
-        overview = get_ai_overview(snapshot, data.get("analytics"), focus=req.focus)
+        overview = get_ai_overview(
+            snapshot, data.get("analytics"), focus=req.focus, competitors=competitor_snapshots,
+        )
     except Exception as e:
         raise HTTPException(502, f"Could not generate an overview: {e}") from e
     channel_strategy.save_overview(_channel_strategy_path, overview, channel_title=snapshot.get("channel_title"))
@@ -1404,6 +1422,60 @@ def channel_insights_clear_overview() -> dict:
     fresh instead of piling onto whatever's already saved."""
     channel_strategy.clear_history(_channel_strategy_path)
     return {"ok": True}
+
+
+@protected.get("/api/competitor-search")
+def competitor_search(streamer: str) -> dict:
+    """Discover YouTube channels actively clipping `streamer`, for the
+    competitor picker -- a creator clipping someone else's stream usually
+    has no idea who else clips the same person, so this searches instead
+    of asking them to type in channel names. The most expensive lookup
+    this app makes (100 YouTube quota units), so it only ever runs from
+    this explicit button, never automatically."""
+    if not streamer or not streamer.strip():
+        raise HTTPException(400, "enter a streamer name to search for")
+    if not os.environ.get("YOUTUBE_API_KEY"):
+        raise HTTPException(400, "YOUTUBE_API_KEY is not set on this deployment")
+    try:
+        candidates = competitor_discovery.search_clipping_channels(streamer)
+    except Exception as e:
+        raise HTTPException(502, f"Search failed: {e}") from e
+    return {"channels": [
+        {
+            "channel_id": c.channel_id,
+            "channel_title": c.channel_title,
+            "thumbnail": c.thumbnail,
+            "subscriber_count": c.subscriber_count,
+            "sample_video_title": c.sample_video_title,
+            "sample_video_views": c.sample_video_views,
+        }
+        for c in candidates
+    ]}
+
+
+class CompetitorChannel(BaseModel):
+    channel_id: str
+    channel_title: str
+
+
+class CompetitorChannelsRequest(BaseModel):
+    channels: List[CompetitorChannel]
+
+
+@protected.get("/api/competitor-channels")
+def get_competitor_channels() -> dict:
+    return {"channels": channel_strategy.load_competitors(_competitor_channels_path)}
+
+
+@protected.post("/api/competitor-channels")
+def set_competitor_channels(req: CompetitorChannelsRequest) -> dict:
+    """Replace the saved competitor list -- the frontend keeps the full
+    set client-side (after an add or a remove) and always sends it whole,
+    so this is a plain overwrite rather than incremental add/remove calls
+    against the same file."""
+    channels = [{"channel_id": c.channel_id, "channel_title": c.channel_title} for c in req.channels]
+    channel_strategy.save_competitors(_competitor_channels_path, channels)
+    return {"channels": channels}
 
 
 @app.get("/healthz")
@@ -1424,6 +1496,11 @@ def notify_test() -> dict:
 @protected.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
+
+
+@protected.get("/analytics", response_class=HTMLResponse)
+def analytics_page() -> str:
+    return ANALYTICS_HTML
 
 
 app.include_router(protected)
@@ -1681,13 +1758,7 @@ INDEX_HTML = """<!doctype html>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
 
-<div id="insights-panel">
-  <label style="margin-top:0">📈 Channel insights — best day to post</label>
-  <div id="insights-body"><div class="hint">Loading...</div></div>
-  <button id="ai-overview-btn" type="button" style="margin-top:10px">🤖 Get AI strategy overview</button>
-  <button id="ai-overview-clear-btn" type="button" style="margin-top:10px;margin-left:8px">🗑 Clear saved analysis</button>
-  <div id="ai-overview-body"></div>
-</div>
+<button id="analytics-link-btn" type="button" style="margin-top:10px">📊 Analytics &amp; AI strategy</button>
 
 </div>
 </div>
@@ -2509,6 +2580,170 @@ deleteBtn.addEventListener('click', async () => {
   deleteBtn.disabled = false;
 });
 
+document.getElementById('analytics-link-btn').addEventListener('click', () => {
+  window.location.href = '/analytics';
+});
+
+const notifyTestBtn = document.getElementById('notify-test-btn');
+notifyTestBtn.addEventListener('click', async () => {
+  notifyTestBtn.disabled = true;
+  notifyTestBtn.textContent = 'Sending...';
+  const resp = await fetch('/api/notify-test', { method: 'POST' });
+  notifyTestBtn.textContent = resp.ok
+    ? '✅ Sent -- check Telegram'
+    : '❌ Failed -- check CLIPPER_BOT_API is set and message the bot first';
+  setTimeout(() => {
+    notifyTestBtn.textContent = '🔔 Test Telegram notification';
+    notifyTestBtn.disabled = false;
+  }, 3000);
+});
+</script>
+</body>
+</html>
+"""
+
+
+ANALYTICS_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — analytics</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, textarea {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 2px; text-transform: none; letter-spacing: normal; }
+  .back-link { display: inline-block; margin-bottom: 4px; color: var(--muted); font-size: 0.85rem; text-decoration: none; }
+  .back-link:hover { color: var(--accent); }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .section:first-of-type { margin-top: 20px; padding-top: 0; border-top: none; }
+  #insights-body > div { margin-top: 6px; }
+  #insights-body > button { margin-top: 12px; }
+  #competitor-search-row { display: flex; gap: 8px; margin-top: 6px; }
+  #competitor-search-row input { flex: 1; margin-top: 0; }
+  #competitor-search-row button { margin-top: 0; padding: 0 16px; white-space: nowrap; }
+  .competitor-card {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .competitor-card img { width: 56px; height: 56px; border-radius: 8px; object-fit: cover; background: var(--track); flex-shrink: 0; }
+  .competitor-card .info { flex: 1; min-width: 0; }
+  .competitor-card .title { font-size: 0.88rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .competitor-card .meta { font-size: 0.75rem; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .competitor-card button { margin-top: 0; padding: 6px 12px; font-size: 0.8rem; flex-shrink: 0; }
+  .competitor-card button.remove-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .competitor-card button.remove-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
+  #ai-overview-body { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="page">
+<div class="card">
+
+<a href="/" class="back-link">&larr; Back to clipper</a>
+<div class="brand"><span class="logo">📊</span><h1>Analytics &amp; AI strategy</h1></div>
+<p class="subtitle">Best day to post, what's working, and how you compare to channels clipping the same streamers.</p>
+
+<div class="section">
+  <label style="margin-top:0">📈 Channel insights — best day to post</label>
+  <div id="insights-body"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🔍 Compare against other clipping channels</label>
+  <p class="hint">Search a streamer you clip to find channels already posting clips of them, then add a few as
+    comparison points -- the AI overview below will contrast your top titles against theirs.</p>
+  <div id="competitor-search-row">
+    <input id="competitor-search-input" placeholder="Streamer name, e.g. jynxzi">
+    <button id="competitor-search-btn" type="button">Search</button>
+  </div>
+  <div class="hint" id="competitor-search-status" style="display:none"></div>
+  <div id="competitor-search-results"></div>
+  <label style="margin-top:16px">Comparing against</label>
+  <div id="competitor-saved-list"></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🤖 AI strategy overview</label>
+  <button id="ai-overview-btn" type="button">🤖 Get AI strategy overview</button>
+  <button id="ai-overview-clear-btn" type="button" style="margin-left:8px">🗑 Clear saved analysis</button>
+  <div id="ai-overview-body"></div>
+</div>
+
+</div>
+</div>
+
+<script>
 function formatSeconds(s) {
   s = Math.round(s || 0);
   const m = Math.floor(s / 60);
@@ -2621,9 +2856,6 @@ aiOverviewBtn.addEventListener('click', async () => {
     if (!resp.ok) {
       aiOverviewBody.appendChild(el('div', { className: 'hint', text: data.detail || 'Could not generate an overview.' }));
     } else if (!data.overview || !data.overview.trim()) {
-      // The API call succeeded but came back with nothing usable -- show
-      // that explicitly instead of silently appending an empty, invisible
-      // box that looks indistinguishable from the button doing nothing.
       aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Got an empty response -- try again.' }));
     } else {
       const pre = el('div', { text: data.overview });
@@ -2634,8 +2866,6 @@ aiOverviewBtn.addEventListener('click', async () => {
       pre.style.borderRadius = '8px';
       aiOverviewBody.appendChild(pre);
     }
-    // The Claude call takes 10-15s -- scroll the result into view once it
-    // lands so it isn't missed below the fold after the wait.
     aiOverviewBody.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Could not generate an overview.' }));
@@ -2671,18 +2901,136 @@ aiOverviewClearBtn.addEventListener('click', async () => {
   }
 })();
 
-const notifyTestBtn = document.getElementById('notify-test-btn');
-notifyTestBtn.addEventListener('click', async () => {
-  notifyTestBtn.disabled = true;
-  notifyTestBtn.textContent = 'Sending...';
-  const resp = await fetch('/api/notify-test', { method: 'POST' });
-  notifyTestBtn.textContent = resp.ok
-    ? '✅ Sent -- check Telegram'
-    : '❌ Failed -- check CLIPPER_BOT_API is set and message the bot first';
-  setTimeout(() => {
-    notifyTestBtn.textContent = '🔔 Test Telegram notification';
-    notifyTestBtn.disabled = false;
-  }, 3000);
+const competitorSearchInput = document.getElementById('competitor-search-input');
+const competitorSearchBtn = document.getElementById('competitor-search-btn');
+const competitorSearchStatus = document.getElementById('competitor-search-status');
+const competitorSearchResults = document.getElementById('competitor-search-results');
+const competitorSavedList = document.getElementById('competitor-saved-list');
+let savedCompetitors = [];
+
+function buildCompetitorCard(c, opts) {
+  const card = document.createElement('div');
+  card.className = 'competitor-card';
+
+  const img = document.createElement('img');
+  if (c.thumbnail) img.src = c.thumbnail;
+  card.appendChild(img);
+
+  const info = document.createElement('div');
+  info.className = 'info';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = c.channel_title;
+  info.appendChild(title);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = opts.metaText;
+  info.appendChild(meta);
+  card.appendChild(info);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = opts.btnText;
+  if (opts.btnClass) btn.className = opts.btnClass;
+  btn.disabled = !!opts.btnDisabled;
+  btn.addEventListener('click', opts.onClick);
+  card.appendChild(btn);
+
+  return card;
+}
+
+function renderSavedCompetitors() {
+  competitorSavedList.innerHTML = '';
+  if (!savedCompetitors.length) {
+    competitorSavedList.appendChild(el('div', { className: 'hint', text: 'No competitor channels added yet -- search a streamer above.' }));
+    return;
+  }
+  savedCompetitors.forEach(c => {
+    competitorSavedList.appendChild(buildCompetitorCard(
+      { channel_title: c.channel_title, thumbnail: null },
+      {
+        metaText: 'Included in the AI overview comparison',
+        btnText: 'Remove',
+        btnClass: 'remove-btn',
+        onClick: () => {
+          savedCompetitors = savedCompetitors.filter(x => x.channel_id !== c.channel_id);
+          persistCompetitors();
+        },
+      },
+    ));
+  });
+}
+
+async function persistCompetitors() {
+  renderSavedCompetitors();
+  try {
+    await fetch('/api/competitor-channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channels: savedCompetitors.map(c => ({ channel_id: c.channel_id, channel_title: c.channel_title })) }),
+    });
+  } catch (e) {
+    // best-effort -- the list still reflects the change in this tab even if the save failed
+  }
+}
+
+async function loadSavedCompetitors() {
+  try {
+    const resp = await fetch('/api/competitor-channels');
+    const data = await resp.json();
+    savedCompetitors = data.channels || [];
+  } catch (e) {
+    savedCompetitors = [];
+  }
+  renderSavedCompetitors();
+}
+loadSavedCompetitors();
+
+async function runCompetitorSearch() {
+  const streamer = competitorSearchInput.value.trim();
+  if (!streamer) return;
+  competitorSearchResults.innerHTML = '';
+  competitorSearchStatus.style.display = 'block';
+  competitorSearchStatus.textContent = 'Searching YouTube...';
+  competitorSearchBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/competitor-search?streamer=${encodeURIComponent(streamer)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      competitorSearchStatus.textContent = data.detail || 'Search failed.';
+      return;
+    }
+    const results = data.channels || [];
+    if (!results.length) {
+      competitorSearchStatus.textContent = `No clipping channels found for "${streamer}".`;
+      return;
+    }
+    competitorSearchStatus.style.display = 'none';
+    results.forEach(c => {
+      const alreadyAdded = savedCompetitors.some(x => x.channel_id === c.channel_id);
+      const subsText = c.subscriber_count != null ? `${c.subscriber_count} subs · ` : '';
+      competitorSearchResults.appendChild(buildCompetitorCard(c, {
+        metaText: `${subsText}top clip: "${c.sample_video_title}" (${c.sample_video_views} views)`,
+        btnText: alreadyAdded ? 'Added' : '+ Add',
+        btnDisabled: alreadyAdded,
+        onClick: (e) => {
+          if (savedCompetitors.some(x => x.channel_id === c.channel_id)) return;
+          savedCompetitors.push({ channel_id: c.channel_id, channel_title: c.channel_title });
+          persistCompetitors();
+          e.currentTarget.textContent = 'Added';
+          e.currentTarget.disabled = true;
+        },
+      }));
+    });
+  } catch (e) {
+    competitorSearchStatus.textContent = 'Search failed -- try again.';
+  } finally {
+    competitorSearchBtn.disabled = false;
+  }
+}
+competitorSearchBtn.addEventListener('click', runCompetitorSearch);
+competitorSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runCompetitorSearch();
 });
 </script>
 </body>
