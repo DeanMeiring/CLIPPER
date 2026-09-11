@@ -16,7 +16,7 @@ import traceback
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -27,7 +27,14 @@ from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
 from clipper.loud_moments import find_loud_moments
-from clipper.reframe import MultiCamSplitLayout, SplitLayout, center_crop_layout, compute_layout
+from clipper.reframe import (
+    MAX_COCAM_TILES,
+    MultiCamSplitLayout,
+    SplitLayout,
+    center_crop_layout,
+    compute_layout,
+    layout_from_manual_boxes,
+)
 from clipper.render import render_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
@@ -140,8 +147,19 @@ class RegenerateRequest(BaseModel):
     reset_used: bool = False
 
 
+class FacecamBox(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class FacecamBoxesRequest(BaseModel):
+    boxes: List[FacecamBox]
+
+
 def _job_public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("request", "pending_regenerate")}
+    return {k: v for k, v in job.items() if k not in ("request", "pending_regenerate", "pending_manual_facecam")}
 
 
 def _persist(job_id: str) -> None:
@@ -245,8 +263,12 @@ def _estimate_long_vod_seconds(num_candidates: int, num_clips: int) -> float:
 def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
+        pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
     if pending_regenerate is not None:
         _run_regenerate(job_id, pending_regenerate)
+        return
+    if pending_manual_facecam is not None:
+        _run_manual_facecam_render(job_id, pending_manual_facecam)
         return
 
     req: JobRequest = jobs[job_id]["request"]
@@ -349,7 +371,7 @@ def _run_job(job_id: str) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
-def _render_atomic(video_path: Path, pick, layout, ass_path: Path, out_path: Path) -> None:
+def _render_atomic(video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path) -> None:
     """Render to a temp file alongside the target, then move it into place
     in one step.
 
@@ -365,7 +387,7 @@ def _render_atomic(video_path: Path, pick, layout, ass_path: Path, out_path: Pat
     new one, never a partial."""
     tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
     try:
-        render_clip(video_path, pick.start, pick.end, layout, ass_path, tmp_path)
+        render_clip(video_path, start, end, layout, ass_path, tmp_path)
         os.replace(tmp_path, out_path)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -398,6 +420,31 @@ def _save_still(video_path: Path, out_path: Path) -> Optional[Path]:
         return None
 
 
+def _save_source_still(video_path: Path, start: float, end: float, out_path: Path) -> Optional[Path]:
+    """Write one frame from partway through the clip's window in the SOURCE
+    video (before any crop/tile) as a JPEG.
+
+    _save_still's frame comes from the rendered/rejected clip, which only
+    shows the crop that was already judged wrong -- no help for finding
+    where the facecam(s) actually are. This one is the raw source frame a
+    manual facecam fix gets drawn on top of."""
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_MSEC, (start + (end - start) / 2) * 1000)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            return None
+        return out_path if cv2.imwrite(str(out_path), frame) else None
+    except Exception as e:  # noqa: BLE001 - a missing still must never fail a render
+        print(f"[render] could not write a source still for {out_path.name}: {e}", flush=True)
+        return None
+
+
 def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -418,8 +465,10 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
-        _render_atomic(video_path, pick, layout, ass_path, out_path)
+        _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
+        facecam_uncertain = False
+        source_frame_name = None
         if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
             # This briefly ran on single-cam only, on the theory that a check
             # rejecting 100% of multi-cam renders couldn't be measuring
@@ -452,9 +501,18 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                     print(f"[render] could not keep the rejected render: {e}", flush=True)
                 try:
                     fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
-                    _render_atomic(video_path, pick, fallback_layout, ass_path, out_path)
+                    _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
+                # The rejected/fallback still only shows what verification
+                # saw (the wrong crop) -- fixing this needs to see where the
+                # facecam(s) actually ARE, in the raw source frame, to draw
+                # a box around them. Saved unconditionally on rejection so
+                # "fix facecam position" always has something to show.
+                source_frame_path = out_dir / f"clip_{out_index:02d}_source_frame.jpg"
+                if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
+                    source_frame_name = source_frame_path.name
+                facecam_uncertain = True
 
         clips_meta.append({
             "file": out_path.name,
@@ -472,6 +530,16 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             # deleting the clip while permanently blocking whatever moment
             # it came from.
             "window_index": getattr(pick, "window_index", None),
+            # The clip's own downloaded source file, so a later manual
+            # facecam fix can re-open it without re-downloading anything.
+            "source_video": video_path.name,
+            # True when the post-render check rejected the automatic
+            # facecam placement and this clip shipped as a plain crop
+            # instead -- the frontend offers "fix facecam position" exactly
+            # when this is set, so a human can draw the box(es) detection
+            # got wrong instead of losing the facecam entirely.
+            "facecam_uncertain": facecam_uncertain,
+            "source_frame": source_frame_name,
         })
         _set(job_id, clips=list(clips_meta))
         _progress(job_id, render_base + render_span * (i / len(render_items)))
@@ -685,6 +753,62 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
 
 
+def _run_manual_facecam_render(job_id: str, req: dict) -> None:
+    """Re-render one clip using facecam box(es) a human drew on its source
+    frame, bypassing detection and the post-render check entirely -- the
+    escape hatch for a clip the automatic check flagged as
+    facecam_uncertain (see _render_all). Reuses the clip's already-
+    downloaded source file and its existing caption (.ass) file; only the
+    layout and the rendered video change."""
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_source"
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    filename = req["filename"]
+    boxes = [tuple(b) for b in req["boxes"]]
+
+    with jobs_lock:
+        clips = list(jobs[job_id].get("clips") or [])
+    clip = next((c for c in clips if c.get("file") == filename), None)
+    if clip is None:
+        _set(job_id, state="error", error=f"{filename} is no longer part of this job's clips.")
+        return
+
+    source_video = clip.get("source_video")
+    if not source_video:
+        _set(job_id, state="error", error="This clip predates manual facecam fixes -- try Generate more clips instead.")
+        return
+    video_path = raw_dir / source_video
+    if not video_path.exists():
+        _set(job_id, state="error", error="The downloaded source is gone -- resubmit the URL instead.")
+        return
+
+    ass_path = out_dir / f"_{Path(filename).stem}.ass"
+    if not ass_path.exists():
+        _set(job_id, state="error", error="This clip's caption file is missing -- try Generate more clips instead.")
+        return
+
+    _set(job_id, state="rendering", message=f'Re-rendering "{clip.get("title") or filename}" with your facecam placement...')
+    _progress(job_id, 0.2)
+    cancel()
+
+    layout = layout_from_manual_boxes(video_path, boxes, target_w=1080, target_h=1920)
+    _progress(job_id, 0.5)
+    cancel()
+    out_path = out_dir / filename
+    _render_atomic(video_path, clip["start"], clip["end"], layout, ass_path, out_path)
+
+    with jobs_lock:
+        clips = list(jobs[job_id].get("clips") or [])
+        for c in clips:
+            if c.get("file") == filename:
+                c["facecam_uncertain"] = False
+        jobs[job_id]["clips"] = clips
+    _persist(job_id)
+
+    _progress(job_id, 1.0)
+    _set(job_id, state="done", message=f'Done -- "{clip.get("title") or filename}" updated with your facecam placement.')
+
+
 def _keepalive_loop(stop_event: threading.Event) -> None:
     """Railway's sleepApplication only watches HTTP traffic to the service
     -- a background job running with nobody polling looks idle to it even
@@ -847,6 +971,48 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
         # whenever it's set, with no regard for the current state, so a
         # stale error here would show up glued onto this run's status even
         # after it finishes cleanly.
+        job["error"] = None
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return {"ok": True}
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/facecam-boxes")
+def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> dict:
+    """Re-render one clip using facecam box(es) a human drew on its source
+    frame -- the fix for a clip the automatic post-render check rejected
+    (facecam_uncertain=True), where detection placed the facecam window
+    wrong and it shipped as a plain crop instead. Skips detection and
+    re-verification entirely: a human who looked at the actual frame and
+    drew the box is more reliable than either."""
+    if Path(filename).name != filename:
+        raise HTTPException(400, "bad filename")
+    if not req.boxes:
+        raise HTTPException(400, "at least one facecam box is required")
+    if len(req.boxes) > MAX_COCAM_TILES:
+        raise HTTPException(400, f"at most {MAX_COCAM_TILES} facecam boxes are supported")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if not clip.get("source_video"):
+            raise HTTPException(409, "this clip predates manual facecam fixes -- try Generate more clips instead")
+        raw_dir = BASE_DIR / job_id / "_source"
+        if not (raw_dir / clip["source_video"]).exists():
+            raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+        job["pending_manual_facecam"] = {
+            "filename": filename,
+            "boxes": [[b.x, b.y, b.w, b.h] for b in req.boxes],
+        }
+        job["state"] = "queued"
+        job["message"] = f"Queued -- re-rendering {filename} with your facecam placement"
+        job["progress"] = 0.0
         job["error"] = None
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
@@ -1324,11 +1490,11 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open { display: flex; }
   .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
@@ -1376,6 +1542,15 @@ INDEX_HTML = """<!doctype html>
   #search-row input { flex: 1; margin-top: 0; }
   #search-row button { margin-top: 0; padding: 0 16px; white-space: nowrap; }
   #search-results-section { margin-bottom: 16px; display: none; }
+  #facecam-stage { position: relative; display: inline-block; max-width: 100%; touch-action: none; cursor: crosshair; user-select: none; }
+  #facecam-still-img { display: block; max-width: 100%; height: auto; border-radius: 8px; background: var(--track); }
+  #facecam-box-layer { position: absolute; inset: 0; }
+  .facecam-box { position: absolute; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 20%, transparent); box-sizing: border-box; }
+  .facecam-box .rm-btn {
+    position: absolute; top: -10px; right: -10px; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--danger); color: #fff; border: none; font-size: 12px; line-height: 20px;
+    text-align: center; cursor: pointer; padding: 0; margin: 0;
+  }
 </style>
 </head>
 <body>
@@ -1525,6 +1700,25 @@ INDEX_HTML = """<!doctype html>
     <div class="modal-actions" style="margin-top:16px">
       <button id="regen-go-btn" type="button">Generate</button>
       <button id="regen-cancel-btn" type="button" class="ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="facecam-modal-overlay">
+  <div class="modal" style="max-width:560px">
+    <p>Fix facecam position</p>
+    <p class="hint">The automatic check wasn't happy with where the facecam(s) landed, so this clip shipped as a
+      plain crop instead. Click and drag on the frame below to draw a box tightly around each facecam window
+      (up to 3), then re-render.</p>
+    <div id="facecam-stage">
+      <img id="facecam-still-img" draggable="false">
+      <div id="facecam-box-layer"></div>
+    </div>
+    <p class="hint" id="facecam-count-hint"></p>
+    <div class="modal-actions" style="margin-top:12px">
+      <button id="facecam-go-btn" type="button">Re-render with these boxes</button>
+      <button id="facecam-clear-btn" type="button" class="ghost">Clear boxes</button>
+      <button id="facecam-cancel-btn" type="button" class="ghost">Cancel</button>
     </div>
   </div>
 </div>
@@ -1876,6 +2070,153 @@ regenGoBtn.addEventListener('click', async () => {
   }
 });
 
+const facecamModal = document.getElementById('facecam-modal-overlay');
+const facecamStage = document.getElementById('facecam-stage');
+const facecamImg = document.getElementById('facecam-still-img');
+const facecamBoxLayer = document.getElementById('facecam-box-layer');
+const facecamCountHint = document.getElementById('facecam-count-hint');
+const facecamGoBtn = document.getElementById('facecam-go-btn');
+const FACECAM_MAX_BOXES = 3;
+let facecamJobId = null;
+let facecamFilename = null;
+let facecamBoxes = []; // {left, top, width, height} in displayed <img> CSS pixels
+let facecamDrawStart = null;
+
+function openFacecamModal(jobId, filename, sourceFrame) {
+  facecamJobId = jobId;
+  facecamFilename = filename;
+  facecamBoxes = [];
+  facecamDrawStart = null;
+  facecamImg.src = `/api/jobs/${jobId}/clips/${sourceFrame}`;
+  renderFacecamBoxes();
+  facecamModal.classList.add('open');
+}
+
+function renderFacecamBoxes(draftBox) {
+  facecamBoxLayer.innerHTML = '';
+  const all = draftBox ? [...facecamBoxes, draftBox] : facecamBoxes;
+  all.forEach((b, idx) => {
+    const el = document.createElement('div');
+    el.className = 'facecam-box';
+    el.style.left = b.left + 'px';
+    el.style.top = b.top + 'px';
+    el.style.width = b.width + 'px';
+    el.style.height = b.height + 'px';
+    if (!b.draft) {
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = '×';
+      rm.addEventListener('click', (e) => {
+        e.stopPropagation();
+        facecamBoxes.splice(idx, 1);
+        renderFacecamBoxes();
+      });
+      el.appendChild(rm);
+    }
+    facecamBoxLayer.appendChild(el);
+  });
+  facecamCountHint.textContent = facecamBoxes.length >= FACECAM_MAX_BOXES
+    ? `Maximum ${FACECAM_MAX_BOXES} facecam boxes.`
+    : `${facecamBoxes.length} box(es) drawn -- click and drag on the frame to add ${facecamBoxes.length ? 'another' : 'one'} (up to ${FACECAM_MAX_BOXES}).`;
+}
+
+function facecamPoint(e) {
+  const rect = facecamImg.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
+    y: Math.max(0, Math.min(e.clientY - rect.top, rect.height)),
+    rect,
+  };
+}
+
+facecamStage.addEventListener('pointerdown', (e) => {
+  if (facecamBoxes.length >= FACECAM_MAX_BOXES) return;
+  const { x, y, rect } = facecamPoint(e);
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+  facecamDrawStart = { x, y };
+  facecamStage.setPointerCapture(e.pointerId);
+});
+
+facecamStage.addEventListener('pointermove', (e) => {
+  if (!facecamDrawStart) return;
+  const { x, y } = facecamPoint(e);
+  renderFacecamBoxes({
+    left: Math.min(x, facecamDrawStart.x),
+    top: Math.min(y, facecamDrawStart.y),
+    width: Math.abs(x - facecamDrawStart.x),
+    height: Math.abs(y - facecamDrawStart.y),
+    draft: true,
+  });
+});
+
+facecamStage.addEventListener('pointerup', (e) => {
+  if (!facecamDrawStart) return;
+  const { x, y } = facecamPoint(e);
+  const box = {
+    left: Math.min(x, facecamDrawStart.x),
+    top: Math.min(y, facecamDrawStart.y),
+    width: Math.abs(x - facecamDrawStart.x),
+    height: Math.abs(y - facecamDrawStart.y),
+  };
+  facecamDrawStart = null;
+  if (box.width > 8 && box.height > 8 && facecamBoxes.length < FACECAM_MAX_BOXES) {
+    facecamBoxes.push(box);
+  }
+  renderFacecamBoxes();
+});
+
+document.getElementById('facecam-clear-btn').addEventListener('click', () => {
+  facecamBoxes = [];
+  renderFacecamBoxes();
+});
+
+document.getElementById('facecam-cancel-btn').addEventListener('click', () => {
+  facecamModal.classList.remove('open');
+  facecamJobId = null;
+  facecamFilename = null;
+});
+
+facecamGoBtn.addEventListener('click', async () => {
+  if (!facecamJobId || !facecamFilename) return;
+  if (!facecamBoxes.length) {
+    alert('Draw at least one box around a facecam first.');
+    return;
+  }
+  const jobId = facecamJobId;
+  const filename = facecamFilename;
+  const scaleX = facecamImg.naturalWidth / facecamImg.clientWidth;
+  const scaleY = facecamImg.naturalHeight / facecamImg.clientHeight;
+  const boxes = facecamBoxes.map(b => ({
+    x: Math.round(b.left * scaleX),
+    y: Math.round(b.top * scaleY),
+    w: Math.round(b.width * scaleX),
+    h: Math.round(b.height * scaleY),
+  }));
+  facecamGoBtn.disabled = true;
+  facecamGoBtn.textContent = 'Starting...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/facecam-boxes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ boxes }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || 'Could not start the re-render.');
+      return;
+    }
+    facecamModal.classList.remove('open');
+    facecamJobId = null;
+    facecamFilename = null;
+    loadJobsList();
+    attachToJob(jobId);
+  } finally {
+    facecamGoBtn.disabled = false;
+    facecamGoBtn.textContent = 'Re-render with these boxes';
+  }
+});
+
 cancelBtn.addEventListener('click', () => {
   if (!currentJobId) return;
   stopModal.classList.add('open');
@@ -1981,6 +2322,15 @@ async function poll(jobId) {
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+      if (c.facecam_uncertain && c.source_frame) {
+        const fixBtn = document.createElement('button');
+        fixBtn.type = 'button';
+        fixBtn.textContent = '🎯 Fix facecam position';
+        fixBtn.style.marginLeft = '8px';
+        fixBtn.addEventListener('click', () => openFacecamModal(jobId, c.file, c.source_frame));
+        div.appendChild(fixBtn);
+      }
+
       const delClipBtn = document.createElement('button');
       delClipBtn.type = 'button';
       delClipBtn.textContent = '🗑 Delete this clip';
