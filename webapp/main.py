@@ -1478,6 +1478,30 @@ def set_competitor_channels(req: CompetitorChannelsRequest) -> dict:
     return {"channels": channels}
 
 
+@protected.get("/api/competitor-channels/insights")
+def get_competitor_channels_insights() -> dict:
+    """Recent-video snapshots for every saved competitor -- the same
+    heuristic lookup used for the AI overview, but returned directly for
+    the top-videos charts on the analytics page instead of feeding a
+    Claude call. Cheap (a few YouTube Data API quota units per channel,
+    not the 100-unit search), so unlike competitor-search this is safe to
+    run on every page load. A channel whose lookup fails is skipped, not
+    fatal -- one bad handle shouldn't blank out the rest of the page."""
+    results = []
+    for c in channel_strategy.load_competitors(_competitor_channels_path):
+        channel_id = c.get("channel_id")
+        if not channel_id:
+            continue
+        try:
+            snapshot = get_channel_snapshot(channel_id)
+        except Exception as e:
+            print(f"[analytics] competitor insights lookup for {channel_id!r} failed, skipping: {e}", flush=True)
+            continue
+        if snapshot:
+            results.append(snapshot)
+    return {"channels": results}
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -2624,6 +2648,18 @@ ANALYTICS_HTML = """<!doctype html>
     --danger-hover: #b91c1c;
     --track: #e5e7eb;
     --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+    /* Chart series colors -- "your channel" gets the app's own accent
+       (it's not a competitor among competitors, so it sits outside the
+       categorical rotation); competitor channels are assigned blue, aqua,
+       yellow, magenta in that order, skipping orange deliberately -- orange
+       next to yellow is the one adjacent pair in this palette that fails
+       colorblind-safety, so a 5th competitor folds into a repeat rather
+       than ever seat orange beside yellow. */
+    --chart-you: #4a3aa7;
+    --chart-c1: #2a78d6;
+    --chart-c2: #1baf7a;
+    --chart-c3: #eda100;
+    --chart-c4: #e87ba4;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -2634,6 +2670,11 @@ ANALYTICS_HTML = """<!doctype html>
       --border: #2b2e37;
       --track: #2b2e37;
       --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+      --chart-you: #9085e9;
+      --chart-c1: #3987e5;
+      --chart-c2: #199e70;
+      --chart-c3: #c98500;
+      --chart-c4: #d55181;
     }
   }
   * { box-sizing: border-box; }
@@ -2704,6 +2745,18 @@ ANALYTICS_HTML = """<!doctype html>
   .competitor-card button.remove-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .competitor-card button.remove-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
   #ai-overview-body { margin-top: 10px; }
+  .chart-block { margin-top: 18px; }
+  .chart-block:first-child { margin-top: 8px; }
+  .chart-title { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: 700; }
+  .chart-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .chart-title .hint { font-weight: 400; margin: 0; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .bar-label { flex: 0 0 42%; min-width: 0; }
+  .bar-label .bar-title { font-size: 0.78rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-label .bar-sub { font-size: 0.68rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { flex: 1; height: 20px; background: var(--track); border-radius: 4px; }
+  .bar-fill { height: 16px; margin-top: 2px; border-radius: 0 4px 4px 0; min-width: 3px; }
+  .bar-value { flex: 0 0 auto; min-width: 46px; text-align: right; font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -2720,6 +2773,11 @@ ANALYTICS_HTML = """<!doctype html>
 </div>
 
 <div class="section">
+  <label style="margin-top:0">🏆 Your top 10 videos</label>
+  <div id="own-top-videos"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
   <label style="margin-top:0">🔍 Compare against other clipping channels</label>
   <p class="hint">Search a streamer you clip to find channels already posting clips of them, then add a few as
     comparison points -- the AI overview below will contrast your top titles against theirs.</p>
@@ -2731,6 +2789,7 @@ ANALYTICS_HTML = """<!doctype html>
   <div id="competitor-search-results"></div>
   <label style="margin-top:16px">Comparing against</label>
   <div id="competitor-saved-list"></div>
+  <div id="competitor-top-videos"></div>
 </div>
 
 <div class="section">
@@ -2760,6 +2819,81 @@ function el(tag, opts) {
   }
   return node;
 }
+
+function formatCompact(n) {
+  n = n || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
+  return String(n);
+}
+
+const DAY_NAMES_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Builds one labeled bar-chart block (title + up to 10 ranked bars) and
+// returns it -- callers own placing it (one channel per block, so a page
+// with several competitor channels appends several of these into one
+// container). Single series per block, so per the dataviz color rules this
+// needs no legend box -- the title + colored dot next to it already say
+// what's plotted. A flat single hue per channel (not a sequential ramp) is
+// enough: bar LENGTH already carries the magnitude, so color here only
+// needs to carry which channel this block belongs to.
+function buildTopVideosBlock(label, colorVar, videos, subtitle) {
+  const block = document.createElement('div');
+  block.className = 'chart-block';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'chart-title';
+  const dot = document.createElement('span');
+  dot.className = 'chart-dot';
+  dot.style.background = colorVar;
+  titleRow.appendChild(dot);
+  titleRow.appendChild(el('span', { text: label }));
+  if (subtitle) titleRow.appendChild(el('span', { className: 'hint', text: subtitle }));
+  block.appendChild(titleRow);
+
+  // Too-new-to-judge videos are excluded here the same way they're excluded
+  // from every other performance comparison in this app -- a video posted
+  // hours ago hasn't earned its views yet, and ranking it by raw view count
+  // against settled uploads would bury it near the bottom for being new,
+  // not for underperforming.
+  const top = (videos || [])
+    .filter(v => !v.too_new_to_judge)
+    .slice()
+    .sort((a, b) => b.views - a.views)
+    .slice(0, 10);
+
+  if (!top.length) {
+    block.appendChild(el('div', { className: 'hint', text: 'No settled uploads yet to rank.' }));
+    return block;
+  }
+
+  const maxViews = top[0].views || 1;
+  top.forEach(v => {
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+
+    const labelCol = document.createElement('div');
+    labelCol.className = 'bar-label';
+    labelCol.appendChild(el('div', { className: 'bar-title', text: v.title }));
+    labelCol.appendChild(el('div', { className: 'bar-sub', text: `posted ${DAY_NAMES_SHORT[v.weekday]} · ${v.views_per_day}/day` }));
+    row.appendChild(labelCol);
+
+    const track = document.createElement('div');
+    track.className = 'bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'bar-fill';
+    fill.style.width = Math.max(3, Math.round((v.views / maxViews) * 100)) + '%';
+    fill.style.background = colorVar;
+    track.appendChild(fill);
+    row.appendChild(track);
+
+    row.appendChild(el('div', { className: 'bar-value', text: formatCompact(v.views) }));
+    block.appendChild(row);
+  });
+  return block;
+}
+
+const CHART_COMPETITOR_COLORS = ['var(--chart-c1)', 'var(--chart-c2)', 'var(--chart-c3)', 'var(--chart-c4)'];
 
 async function loadChannelInsights() {
   const body = document.getElementById('insights-body');
@@ -2837,6 +2971,12 @@ async function loadChannelInsights() {
   } else {
     body.appendChild(el('div', { className: 'hint', text: 'YouTube OAuth isn\\'t configured on this deployment -- see the README for setup steps to enable real Analytics data.' }));
   }
+
+  const ownTopVideos = document.getElementById('own-top-videos');
+  ownTopVideos.innerHTML = '';
+  ownTopVideos.appendChild(buildTopVideosBlock(
+    'Your channel', 'var(--chart-you)', (data.heuristic || {}).recent_videos || [],
+  ));
 }
 loadChannelInsights();
 
@@ -2972,6 +3112,36 @@ async function persistCompetitors() {
   } catch (e) {
     // best-effort -- the list still reflects the change in this tab even if the save failed
   }
+  loadCompetitorTopVideos();
+}
+
+async function loadCompetitorTopVideos() {
+  const container = document.getElementById('competitor-top-videos');
+  if (!savedCompetitors.length) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = '';
+  container.appendChild(el('div', { className: 'hint', text: 'Loading competitor videos...' }));
+  try {
+    const resp = await fetch('/api/competitor-channels/insights');
+    const data = await resp.json();
+    const channels = data.channels || [];
+    container.innerHTML = '';
+    if (!channels.length) {
+      container.appendChild(el('div', { className: 'hint', text: 'Could not load video data for the saved competitor channel(s).' }));
+      return;
+    }
+    channels.forEach((snap, idx) => {
+      const color = CHART_COMPETITOR_COLORS[idx % CHART_COMPETITOR_COLORS.length];
+      container.appendChild(buildTopVideosBlock(
+        snap.channel_title, color, snap.recent_videos || [],
+      ));
+    });
+  } catch (e) {
+    container.innerHTML = '';
+    container.appendChild(el('div', { className: 'hint', text: 'Could not load competitor videos.' }));
+  }
 }
 
 async function loadSavedCompetitors() {
@@ -2983,6 +3153,7 @@ async function loadSavedCompetitors() {
     savedCompetitors = [];
   }
   renderSavedCompetitors();
+  loadCompetitorTopVideos();
 }
 loadSavedCompetitors();
 
