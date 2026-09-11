@@ -12,31 +12,79 @@ import secrets
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
-from clipper.reframe import compute_layout
+from clipper.loud_moments import find_loud_moments
+from clipper.reframe import MultiCamSplitLayout, SplitLayout, center_crop_layout, compute_layout
 from clipper.render import render_clip
+from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator
 from clipper.notify import send_telegram
+from clipper.channel_insights import get_channel_snapshot
+from clipper import channel_strategy
+from clipper.channel_strategy import get_ai_overview
+from clipper import youtube_analytics
+from clipper import youtube_oauth
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 JOB_META_NAME = "job.json"
 TERMINAL_STATES = ("done", "error", "cancelled")
+
+# Persists on the same volume job data lives on, so the connected YouTube
+# account survives restarts/redeploys -- see clipper/youtube_oauth.py.
+_youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
+_channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
+
+
+def _load_strategy_notes() -> Optional[str]:
+    """The most recently saved AI channel-analysis overview, if any, for
+    clip selection to use as guidance. None (not an error) if nothing's
+    been saved yet -- callers should treat this exactly like the other
+    optional signals (focus, loud moments): a hint when present, no
+    behavior change when absent.
+
+    Prefixed with how old the analysis is, because it otherwise steers
+    every pick at full weight forever: notes written against a channel's
+    numbers from two months ago read identically to ones written this
+    morning, and only one of those deserves to override what the
+    transcript itself says."""
+    entry = channel_strategy.load_latest_overview(_channel_strategy_path)
+    if not entry:
+        return None
+    age_days = max(0.0, (time.time() - entry["timestamp"]) / 86400)
+    if age_days < 1:
+        age = "generated today"
+    elif age_days < 2:
+        age = "generated yesterday"
+    else:
+        age = f"generated {int(age_days)} days ago"
+    staleness = (
+        " -- recent, weight it fully."
+        if age_days <= 14
+        else " -- this is old enough that the channel may have moved on; treat it"
+             " as weaker evidence than what the transcript itself shows."
+    )
+    return f"(Channel analysis {age}{staleness})\n{entry['overview']}"
+# CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
+# in-memory is fine -- a login round-trip through Google takes seconds, not
+# something that needs to survive a restart.
+_youtube_oauth_states: dict[str, float] = {}
 
 
 class JobCancelled(Exception):
@@ -89,6 +137,7 @@ class RegenerateRequest(BaseModel):
     num_clips: int = 3
     min_len: float = 20.0
     max_len: float = 90.0
+    reset_used: bool = False
 
 
 def _job_public(job: dict) -> dict:
@@ -108,7 +157,18 @@ def _persist(job_id: str) -> None:
     out_dir = BASE_DIR / job_id
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / JOB_META_NAME).write_text(json.dumps(data), encoding="utf-8")
+        # _set() is called many times per job from the worker thread, and
+        # can race with a request-handler thread persisting the same job
+        # (cancel, regenerate). Writing straight to job.json (open truncates
+        # then writes) lets two concurrent writers interleave into a
+        # corrupt/partial file. Write to a per-writer temp file and rename
+        # it into place instead -- an OS-level atomic op on POSIX -- so
+        # concurrent writers only ever race on which write "wins" cleanly,
+        # never on producing a half-written file.
+        final_path = out_dir / JOB_META_NAME
+        tmp_path = out_dir / f".{JOB_META_NAME}.tmp-{os.getpid()}-{threading.get_ident()}"
+        tmp_path.write_text(json.dumps(data), encoding="utf-8")
+        tmp_path.replace(final_path)
     except OSError:
         pass  # best-effort -- a disk hiccup here shouldn't take down the job
 
@@ -236,6 +296,7 @@ def _run_job(job_id: str) -> None:
         mapped = select_and_map(
             candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, api_key=None, source_title=source_title,
+            strategy_notes=_load_strategy_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -263,12 +324,17 @@ def _run_job(job_id: str) -> None:
         _cache_transcript(raw_dir, dl.video_path, dl.duration, words)
 
         cancel()
+        _set(job_id, state="selecting", message="Scanning audio for loud/high-energy moments...")
+        loud_moments = find_loud_moments(dl.video_path, dl.duration)
+
+        cancel()
         _set(job_id, state="selecting", message=f"Asking Claude to pick up to {req.num_clips} moments...")
         _progress(job_id, 0.55)
         picks = select_clips(
             words, dl.duration,
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
-            focus=req.focus, source_title=dl.title,
+            focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
+            strategy_notes=_load_strategy_notes(),
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -281,6 +347,55 @@ def _run_job(job_id: str) -> None:
     clips_meta = _render_all(job_id, out_dir, render_items, render_base, [])
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
+
+
+def _render_atomic(video_path: Path, pick, layout, ass_path: Path, out_path: Path) -> None:
+    """Render to a temp file alongside the target, then move it into place
+    in one step.
+
+    ffmpeg writes its output progressively, and the clips endpoint serves
+    straight out of this same directory while the job is still running --
+    so rendering directly to the final path publishes a half-written mp4
+    for as long as the encode takes. Anyone who opens the clip in that
+    window gets a truncated file, which decodes into garbage rather than
+    failing cleanly. The post-render fallback made it worse by rewriting
+    an already-published clip in place, so a clip that was fine a moment
+    ago would break under a reader mid-re-render. os.replace is atomic on
+    POSIX, so a reader now sees either the previous complete file or the
+    new one, never a partial."""
+    tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
+    try:
+        render_clip(video_path, pick.start, pick.end, layout, ass_path, tmp_path)
+        os.replace(tmp_path, out_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _save_still(video_path: Path, out_path: Path) -> Optional[Path]:
+    """Write one frame from partway through a clip as a JPEG beside it.
+
+    A rejected facecam render is only useful if someone can actually look
+    at it, and a 25MB mp4 is awkward to get off the server and past an
+    upload limit. A still is a couple of hundred KB, opens straight in a
+    browser, and shows the facecam band just as well as the video does."""
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if frames > 0 and fps > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, (frames / fps) * 1000 * 0.5)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            return None
+        return out_path if cv2.imwrite(str(out_path), frame) else None
+    except Exception as e:  # noqa: BLE001 - a missing still must never fail a render
+        print(f"[render] could not write a still for {out_path.name}: {e}", flush=True)
+        return None
 
 
 def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
@@ -303,7 +418,44 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         build_ass(clip_words, pick.start, ass_path)
-        render_clip(video_path, pick.start, pick.end, layout, ass_path, out_path)
+        _render_atomic(video_path, pick, layout, ass_path, out_path)
+
+        if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
+            # This briefly ran on single-cam only, on the theory that a check
+            # rejecting 100% of multi-cam renders couldn't be measuring
+            # anything real. Turning it off proved the opposite: the renders
+            # that then shipped had two tiles of gameplay and overlay border
+            # around the people. The check has been right every time.
+            # False (not None -- that means the check itself wasn't usable)
+            # means vision confidently saw something wrong with the rendered
+            # facecam band; re-render as a plain crop rather than ship a clip
+            # with a broken-looking facecam.
+            verified = facecam_vision.verify_rendered_facecam(out_path)
+            if verified is False:
+                print(f"[render] clip {out_index} failed post-render facecam check -- re-rendering as a plain crop", flush=True)
+                # Keep what was rejected. Overwriting it in place meant a
+                # rejected facecam render could never be looked at, so every
+                # round of "still no facecam" came down to guessing at pixels
+                # from box coordinates in a log. This costs one file per
+                # rejection and makes the rejected version openable at
+                # /api/jobs/{id}/clips/<name>, which settles in seconds what
+                # otherwise takes a deploy and a regenerate to find out.
+                try:
+                    rejected_path = out_path.with_name(f"{out_path.stem}_rejected_facecam{out_path.suffix}")
+                    shutil.copy2(out_path, rejected_path)
+                    still = _save_still(rejected_path, rejected_path.with_suffix(".jpg"))
+                    print(
+                        f"[render] kept the rejected facecam render as {rejected_path.name}"
+                        + (f" (still: {still.name})" if still else ""), flush=True,
+                    )
+                except OSError as e:
+                    print(f"[render] could not keep the rejected render: {e}", flush=True)
+                try:
+                    fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
+                    _render_atomic(video_path, pick, fallback_layout, ass_path, out_path)
+                except Exception as e:
+                    print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
+
         clips_meta.append({
             "file": out_path.name,
             "start": pick.start,
@@ -314,6 +466,12 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             "upload_title": pick.upload_title,
             "description": pick.description,
             "reason": pick.reason,
+            # Only WindowPick (long-VOD pipeline) has this -- carried along
+            # so a later per-clip delete can free this candidate window
+            # back up for "generate more" to reconsider, instead of
+            # deleting the clip while permanently blocking whatever moment
+            # it came from.
+            "window_index": getattr(pick, "window_index", None),
         })
         _set(job_id, clips=list(clips_meta))
         _progress(job_id, render_base + render_span * (i / len(render_items)))
@@ -433,6 +591,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     focus = req.get("focus") or None
     min_len = float(req.get("min_len") or 20.0)
     max_len = float(req.get("max_len") or 90.0)
+    reset_used = bool(req.get("reset_used"))
 
     with jobs_lock:
         job = jobs[job_id]
@@ -440,8 +599,21 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         source_title = job.get("source_title") or ""
         source_duration = job.get("duration") or 0.0
         existing_clips = list(job.get("clips") or [])
-        used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
-        used_window_indices = set(job.get("used_window_indices") or [])
+        # reset_used ("start fresh") deliberately ignores which windows/
+        # ranges earlier clips came from when SELECTING this batch, so it
+        # can freely re-pick from the whole candidate pool -- the tradeoff
+        # a tester explicitly asked for over the normal anti-duplicate
+        # behavior, useful once a small candidate pool (long-VOD
+        # chat-highlight windows especially) is mostly exhausted from
+        # repeated regenerates. It only relaxes *selection*, though: the
+        # original set is kept (original_used_*) and still merged into
+        # what gets persisted below, so a still-kept older clip's window
+        # isn't forgotten for the *next* (non-reset) regenerate just
+        # because this one ignored it.
+        original_used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+        original_used_window_indices = set(job.get("used_window_indices") or [])
+        used_ranges = [] if reset_used else list(original_used_ranges)
+        used_window_indices = set() if reset_used else set(original_used_window_indices)
     if not pipeline:
         pipeline = "long_vod" if list(raw_dir.glob("cand_*.mp4")) else "short"
 
@@ -475,21 +647,25 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         mapped = select_and_map(
             candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
             focus=focus, api_key=None, source_title=source_title,
+            strategy_notes=_load_strategy_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
-        used_window_indices |= {pick.window_index for _, pick in mapped}
-        _set(job_id, used_window_indices=list(used_window_indices))
+        persisted_used_window_indices = original_used_window_indices | {pick.window_index for _, pick in mapped}
+        _set(job_id, used_window_indices=list(persisted_used_window_indices))
     else:
         cached = _load_transcript_for_regenerate(raw_dir)
         if not cached:
             _set(job_id, state="error", error="The downloaded source video is gone -- resubmit the source URL instead.")
             return
         cancel()
+        loud_moments = find_loud_moments(cached["video_path"], cached["duration"])
+        cancel()
         picks = select_clips(
             cached["words"], cached["duration"],
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
-            focus=focus, source_title=source_title,
+            focus=focus, source_title=source_title, loud_moments=loud_moments,
+            strategy_notes=_load_strategy_notes(),
         )
 
         def _overlaps_used(p) -> bool:
@@ -497,8 +673,8 @@ def _run_regenerate(job_id: str, req: dict) -> None:
 
         picks = [p for p in picks if not _overlaps_used(p)][:num_clips]
         render_items = [(cached["video_path"], cached["words"], pick) for pick in picks]
-        used_ranges = used_ranges + [(pick.start, pick.end) for pick in picks]
-        _set(job_id, used_ranges=[list(r) for r in used_ranges])
+        persisted_used_ranges = original_used_ranges + [(pick.start, pick.end) for pick in picks]
+        _set(job_id, used_ranges=[list(r) for r in persisted_used_ranges])
 
     if not render_items:
         _set(job_id, state="error", error="Claude didn't return any new, non-overlapping moments this time -- try a different focus.")
@@ -563,6 +739,14 @@ def _worker() -> None:
         except JobCancelled:
             _set(job_id, state="cancelled", message="Cancelled by user.")
         except Exception as e:  # noqa: BLE001 - surface any pipeline failure to the client
+            # The UI only ever shows str(e) -- previously that was also
+            # the *only* place a failure's detail existed at all, since
+            # nothing here reached the server logs. Print the full
+            # traceback too, so a job-runner exception can be diagnosed
+            # from Railway logs instead of only from a screenshot of the
+            # (much shorter) UI error message.
+            print(f"[worker] job {job_id} failed:", flush=True)
+            traceback.print_exc()
             _set(job_id, state="error", error=str(e))
         finally:
             stop_keepalive.set()
@@ -577,6 +761,13 @@ threading.Thread(target=_worker, daemon=True).start()
 
 @protected.post("/api/jobs")
 def create_job(req: JobRequest) -> dict:
+    if not req.source or not req.source.strip():
+        # Without this, an empty source silently resolves to the
+        # container's own working directory in download_video() and
+        # fails much later, mid-job, with a confusing ffprobe error --
+        # reject it immediately instead with a message that actually
+        # explains what's wrong.
+        raise HTTPException(400, "Enter a video URL or file path first.")
     job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
         jobs[job_id] = {
@@ -651,6 +842,12 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
         # starts, but the UI shouldn't show the stale figure even briefly.
         job["created_at"] = time.time()
         job["estimate_minutes"] = None
+        # Clear any error left over from an earlier failed attempt on this
+        # same job -- the frontend appends job.error to the status line
+        # whenever it's set, with no regard for the current state, so a
+        # stale error here would show up glued onto this run's status even
+        # after it finishes cleanly.
+        job["error"] = None
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
     job_queue.put(job_id)
@@ -689,10 +886,97 @@ def cancel_job(job_id: str, save: bool = False) -> dict:
 
 @protected.get("/api/jobs/{job_id}/clips/{filename}")
 def get_clip(job_id: str, filename: str) -> FileResponse:
+    # Reject any filename that isn't a plain name, so a crafted path can't
+    # walk out of the job directory and serve an arbitrary file off disk.
+    if Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(400, "bad filename")
     path = BASE_DIR / job_id / filename
     if not path.is_file():
         raise HTTPException(404, "not found")
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    # A rejected render is saved alongside its clip as a .jpg still, and
+    # labelling that video/mp4 makes a browser download it instead of just
+    # showing it -- which defeats the point of having a still at all.
+    media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "video/mp4"
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@protected.delete("/api/jobs/{job_id}/clips/{filename}")
+def delete_clip(job_id: str, filename: str) -> dict:
+    """Drop a single clip from a finished job's results -- keep the rest.
+    Only removes a filename that's actually in the job's own clips list
+    (never an arbitrary path), and refuses while the job is still running
+    so a click doesn't yank a file out from under an active render.
+
+    Also frees the clip's source time range (or candidate window, for the
+    long-VOD pipeline) back up in used_ranges/used_window_indices -- a
+    clip that's been deleted clearly wasn't the moment the creator wanted
+    kept, but a later "generate more" with a different focus (e.g.
+    "funny ones") was still treating that time range as spoken for, so it
+    could never reconsider it even though nothing kept was using it
+    anymore -- exactly the moment most likely to actually match a new
+    focus, permanently locked out."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clips = list(job.get("clips") or [])
+        deleted = next((c for c in clips if c.get("file") == filename), None)
+        if deleted is None:
+            raise HTTPException(404, "clip not found")
+        remaining = [c for c in clips if c.get("file") != filename]
+        job["clips"] = remaining
+
+        if deleted.get("window_index") is not None:
+            used_window_indices = set(job.get("used_window_indices") or [])
+            used_window_indices.discard(deleted["window_index"])
+            job["used_window_indices"] = list(used_window_indices)
+        else:
+            used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+            target = (deleted.get("start"), deleted.get("end"))
+            used_ranges = [r for r in used_ranges if r != target]
+            job["used_ranges"] = [list(r) for r in used_ranges]
+    _persist(job_id)
+
+    out_dir = BASE_DIR / job_id
+    (out_dir / filename).unlink(missing_ok=True)
+    (out_dir / f"_{Path(filename).stem}.ass").unlink(missing_ok=True)
+    return {"ok": True, "clips": remaining}
+
+
+@protected.delete("/api/jobs/{job_id}/clips")
+def delete_all_clips(job_id: str) -> dict:
+    """Drop every clip from a finished job at once -- keeps the job (and
+    its already-downloaded source/candidates) around so "generate more"
+    can immediately pick fresh ones without re-downloading anything.
+
+    Also resets used_ranges/used_window_indices to empty, same reasoning
+    as the single-clip delete above but for all of them at once: a
+    creator who just wiped every clip clearly wants a genuinely fresh
+    batch, not one still constrained by what an earlier, now-deleted
+    round already picked -- including candidate windows (like a collab
+    moment) that got used early and then never came up again."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clips = list(job.get("clips") or [])
+        job["clips"] = []
+        job["used_ranges"] = []
+        job["used_window_indices"] = []
+    _persist(job_id)
+
+    out_dir = BASE_DIR / job_id
+    for clip in clips:
+        filename = clip.get("file")
+        if not filename:
+            continue
+        (out_dir / filename).unlink(missing_ok=True)
+        (out_dir / f"_{Path(filename).stem}.ass").unlink(missing_ok=True)
+    return {"ok": True, "clips": []}
 
 
 _trending_cache: dict = {"at": 0.0, "sections": {}}
@@ -733,6 +1017,184 @@ def search_creator_endpoint(q: str) -> dict:
         print(f"[trending] search failed: {e}", flush=True)
         results = []
     return {"results": [vars(e) for e in results]}
+
+
+def _youtube_redirect_uri() -> str:
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        raise HTTPException(400, "RAILWAY_PUBLIC_DOMAIN isn't set -- can't build an OAuth redirect URI")
+    return f"https://{domain}/auth/youtube/callback"
+
+
+@protected.get("/auth/youtube/login")
+def youtube_login() -> RedirectResponse:
+    """Kick off the OAuth flow for the channel owner's own YouTube account
+    (see clipper/youtube_oauth.py) -- reads real Analytics data instead of
+    just the public Data API's view counts."""
+    if not youtube_oauth.is_configured():
+        raise HTTPException(
+            400,
+            "YOUTUBE_OAUTH_CLIENT_ID / YOUTUBE_OAUTH_CLIENT_SECRET aren't set -- "
+            "see the README for how to create them in Google Cloud Console.",
+        )
+    redirect_uri = _youtube_redirect_uri()
+    state = secrets.token_urlsafe(24)
+    _youtube_oauth_states[state] = time.time()
+    # Prune old, abandoned login attempts instead of growing forever --
+    # this dict only ever holds a handful of entries for a single-tenant
+    # app, so a plain sweep on every login is plenty.
+    cutoff = time.time() - 600
+    for s, issued_at in list(_youtube_oauth_states.items()):
+        if issued_at < cutoff:
+            _youtube_oauth_states.pop(s, None)
+    return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state))
+
+
+@protected.get("/auth/youtube/callback")
+def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
+    if error:
+        return RedirectResponse(f"/?youtube_error={error}")
+    issued_at = _youtube_oauth_states.pop(state, None)
+    if issued_at is None or time.time() - issued_at > 600:
+        raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
+    token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
+    _youtube_token_store.save(token)
+    return RedirectResponse("/?youtube_connected=1")
+
+
+@protected.post("/api/youtube/disconnect")
+def youtube_disconnect() -> dict:
+    _youtube_token_store.clear()
+    return {"ok": True}
+
+
+def _gather_channel_insights_data() -> dict:
+    """Shared by /api/channel-insights and /api/channel-insights/overview
+    so the AI overview reasons over exactly the same numbers the panel
+    shows, not a second, possibly-inconsistent fetch."""
+    result: dict = {"oauth_configured": youtube_oauth.is_configured(), "oauth_connected": False}
+
+    access_token = None
+    channel_id = os.environ.get("YOUTUBE_OWN_CHANNEL") or None
+    if youtube_oauth.is_configured():
+        access_token = _youtube_token_store.get_valid_access_token()
+        result["oauth_connected"] = access_token is not None
+        if access_token:
+            try:
+                own = youtube_analytics.get_own_channel(access_token)
+            except Exception as e:
+                result["analytics_error"] = f"Could not read the connected channel: {e}"
+                own = None
+            if own:
+                channel_id = own["id"]
+                result["channel_title"] = own["title"]
+
+    if channel_id:
+        try:
+            snapshot = get_channel_snapshot(channel_id)
+        except Exception as e:
+            snapshot = None
+            result["heuristic_error"] = str(e)
+        if snapshot:
+            result["heuristic"] = snapshot
+        elif "heuristic_error" not in result:
+            # A None return (as opposed to a raised exception) means the
+            # lookup itself succeeded but found no matching channel -- most
+            # often YOUTUBE_OWN_CHANNEL missing the "@" prefix on a handle
+            # (falls through to the legacy "username" lookup, which most
+            # channels don't have) or a plain typo. Surface that instead of
+            # silently showing nothing.
+            result["heuristic_error"] = (
+                f"No YouTube channel found for {channel_id!r}. If this is a handle, "
+                "make sure it starts with \"@\" (e.g. @YourChannel), not just the name."
+            )
+    else:
+        result["setup_needed"] = (
+            "Set YOUTUBE_OWN_CHANNEL (your channel ID, @handle, or username) to see "
+            "a heuristic snapshot without connecting an account, or connect your "
+            "YouTube account below for real Analytics data."
+        )
+
+    if access_token and channel_id and result["oauth_connected"]:
+        try:
+            result["analytics"] = youtube_analytics.get_insights(access_token, channel_id)
+        except Exception as e:
+            result["analytics_error"] = str(e)
+
+        # Per-video retention, merged onto each video in the heuristic
+        # snapshot by id -- tells apart "nobody clicked it" (low views,
+        # retention doesn't matter yet) from "people clicked but didn't
+        # stick around" (decent views, weak retention), which raw view
+        # counts alone can't distinguish.
+        recent_videos = (result.get("heuristic") or {}).get("recent_videos")
+        if recent_videos:
+            try:
+                retention_by_id = youtube_analytics.get_video_retention(access_token, channel_id)
+            except Exception as e:
+                result["retention_error"] = str(e)
+                retention_by_id = {}
+            for v in recent_videos:
+                r = retention_by_id.get(v.get("id"))
+                if r:
+                    v["average_view_duration_seconds"] = r["average_view_duration_seconds"]
+                    v["average_view_percentage"] = r["average_view_percentage"]
+
+    saved = channel_strategy.load_latest_overview(_channel_strategy_path)
+    if saved:
+        result["saved_strategy_notes_at"] = saved["timestamp"]
+
+    return result
+
+
+@protected.get("/api/channel-insights")
+def channel_insights() -> dict:
+    """Best-day-to-post and channel-performance signals for the channel
+    you're uploading clips to -- combines two independent sources:
+
+    - `analytics`: real YouTube Analytics data (day-of-week views,
+      retention, traffic sources) for the connected account, if OAuth is
+      set up and connected. Most accurate, needs setup.
+    - `heuristic`: a rough best-day guess from public view counts on
+      recent uploads (normalized by video age), for whichever channel is
+      configured -- works immediately with no OAuth, but noisier.
+    """
+    return _gather_channel_insights_data()
+
+
+class OverviewRequest(BaseModel):
+    focus: Optional[str] = None
+
+
+@protected.post("/api/channel-insights/overview")
+def channel_insights_overview(req: OverviewRequest) -> dict:
+    """A plain-language strategy read from Claude over the same channel
+    data the insights panel shows -- best day, what content is working,
+    format notes. Costs a Claude API call, so this is its own on-demand
+    endpoint (a button) rather than something the panel auto-loads."""
+    data = _gather_channel_insights_data()
+    snapshot = data.get("heuristic")
+    if not snapshot:
+        raise HTTPException(
+            400,
+            data.get("heuristic_error")
+            or data.get("setup_needed")
+            or "No channel data available yet -- set YOUTUBE_OWN_CHANNEL or connect your YouTube account first.",
+        )
+    try:
+        overview = get_ai_overview(snapshot, data.get("analytics"), focus=req.focus)
+    except Exception as e:
+        raise HTTPException(502, f"Could not generate an overview: {e}") from e
+    channel_strategy.save_overview(_channel_strategy_path, overview, channel_title=snapshot.get("channel_title"))
+    return {"overview": overview}
+
+
+@protected.delete("/api/channel-insights/overview")
+def channel_insights_clear_overview() -> dict:
+    """Wipe the saved AI-overview history, so a stale or noisy analysis
+    stops influencing clip selection -- the next overview generated starts
+    fresh instead of piling onto whatever's already saved."""
+    channel_strategy.clear_history(_channel_strategy_path)
+    return {"ok": True}
 
 
 @app.get("/healthz")
@@ -1001,6 +1463,14 @@ INDEX_HTML = """<!doctype html>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
 
+<div id="insights-panel">
+  <label style="margin-top:0">📈 Channel insights — best day to post</label>
+  <div id="insights-body"><div class="hint">Loading...</div></div>
+  <button id="ai-overview-btn" type="button" style="margin-top:10px">🤖 Get AI strategy overview</button>
+  <button id="ai-overview-clear-btn" type="button" style="margin-top:10px;margin-left:8px">🗑 Clear saved analysis</button>
+  <div id="ai-overview-body"></div>
+</div>
+
 </div>
 </div>
 
@@ -1045,6 +1515,13 @@ INDEX_HTML = """<!doctype html>
     <input id="regen-focus" placeholder="e.g. funniest moments">
     <label>How many more clips?</label>
     <input id="regen-num-clips" type="number" value="3" min="1" max="10">
+    <label style="margin-top:12px;display:flex;align-items:center;gap:8px;font-weight:normal">
+      <input id="regen-reset-used" type="checkbox" style="width:auto">
+      🔁 Start fresh (ignore previously-picked moments -- may repeat earlier clips)
+    </label>
+    <p class="hint">Off (default): only ever picks NEW moments, same as before. On: forgets what's already been
+      picked so Claude can freely re-pick from everything again -- useful once repeated "generate more" calls
+      have used up most of the available moments and it's only returning 1-2 clips.</p>
     <div class="modal-actions" style="margin-top:16px">
       <button id="regen-go-btn" type="button">Generate</button>
       <button id="regen-cancel-btn" type="button" class="ghost">Cancel</button>
@@ -1224,6 +1701,29 @@ async function loadJobsList() {
         regenBtn.addEventListener('click', () => openRegenModal(job.id));
         row.appendChild(regenBtn);
 
+        if (hasClips) {
+          const clearBtn = document.createElement('button');
+          clearBtn.type = 'button';
+          clearBtn.textContent = '🗑 Clear clips & regenerate';
+          clearBtn.addEventListener('click', async () => {
+            if (!confirm('Delete all clips from this job? The downloaded source stays, so regenerating is still fast.')) return;
+            clearBtn.disabled = true;
+            try {
+              const r = await fetch(`/api/jobs/${job.id}/clips`, { method: 'DELETE' });
+              if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                alert(data.detail || 'Could not clear clips.');
+                return;
+              }
+              await loadJobsList();
+              openRegenModal(job.id);
+            } finally {
+              clearBtn.disabled = false;
+            }
+          });
+          row.appendChild(clearBtn);
+        }
+
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'job-delete';
@@ -1323,6 +1823,7 @@ document.getElementById('mood-skip-btn').addEventListener('click', () => {
 const regenModal = document.getElementById('regen-modal-overlay');
 const regenFocusInput = document.getElementById('regen-focus');
 const regenNumClipsInput = document.getElementById('regen-num-clips');
+const regenResetUsedInput = document.getElementById('regen-reset-used');
 const regenGoBtn = document.getElementById('regen-go-btn');
 let regenJobId = null;
 
@@ -1330,6 +1831,7 @@ function openRegenModal(jobId) {
   regenJobId = jobId;
   regenFocusInput.value = '';
   regenNumClipsInput.value = '3';
+  regenResetUsedInput.checked = false;
   regenModal.classList.add('open');
 }
 
@@ -1356,6 +1858,7 @@ regenGoBtn.addEventListener('click', async () => {
       body: JSON.stringify({
         focus: regenFocusInput.value.trim() || null,
         num_clips: parseInt(regenNumClipsInput.value, 10) || 3,
+        reset_used: regenResetUsedInput.checked,
       }),
     });
     if (!resp.ok) {
@@ -1477,6 +1980,34 @@ async function poll(jobId) {
     link.textContent = `Download ${c.file}`;
     div.appendChild(link);
 
+    if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+      const delClipBtn = document.createElement('button');
+      delClipBtn.type = 'button';
+      delClipBtn.textContent = '🗑 Delete this clip';
+      delClipBtn.style.marginLeft = '8px';
+      delClipBtn.addEventListener('click', async () => {
+        if (!confirm(`Delete ${c.file}? This can't be undone.`)) return;
+        delClipBtn.disabled = true;
+        delClipBtn.textContent = 'Deleting...';
+        try {
+          const r = await fetch(`/api/jobs/${jobId}/clips/${c.file}`, { method: 'DELETE' });
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            alert(data.detail || 'Could not delete this clip.');
+            delClipBtn.disabled = false;
+            delClipBtn.textContent = '🗑 Delete this clip';
+            return;
+          }
+          poll(jobId);
+        } catch (e) {
+          alert('Could not delete this clip.');
+          delClipBtn.disabled = false;
+          delClipBtn.textContent = '🗑 Delete this clip';
+        }
+      });
+      div.appendChild(delClipBtn);
+    }
+
     clipsEl.appendChild(div);
   });
 
@@ -1514,6 +2045,168 @@ deleteBtn.addEventListener('click', async () => {
   }
   deleteBtn.disabled = false;
 });
+
+function formatSeconds(s) {
+  s = Math.round(s || 0);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, '0')}`;
+}
+
+function el(tag, opts) {
+  const node = document.createElement(tag);
+  if (opts) {
+    if (opts.text) node.textContent = opts.text;
+    if (opts.className) node.className = opts.className;
+    if (opts.href) node.href = opts.href;
+  }
+  return node;
+}
+
+async function loadChannelInsights() {
+  const body = document.getElementById('insights-body');
+  body.innerHTML = '';
+  let data;
+  try {
+    const resp = await fetch('/api/channel-insights');
+    data = await resp.json();
+  } catch (e) {
+    body.appendChild(el('div', { className: 'hint', text: 'Could not load channel insights.' }));
+    return;
+  }
+
+  if (data.channel_title) {
+    body.appendChild(el('div', { text: `Channel: ${data.channel_title}` }));
+  }
+
+  if (data.analytics) {
+    const a = data.analytics;
+    body.appendChild(el('div', {
+      text: a.best_day
+        ? `📅 Best day to post (last ${a.lookback_days}d, real Analytics data): ${a.best_day}`
+        : `Not enough Analytics data yet over the last ${a.lookback_days} days.`,
+    }));
+    body.appendChild(el('div', { className: 'hint', text: `Views by day: ${Object.entries(a.views_by_day).map(([d, v]) => `${d} ${v}`).join(' · ')}` }));
+    body.appendChild(el('div', { className: 'hint', text: `Avg view duration: ${formatSeconds(a.average_view_duration_seconds)} (${(a.average_view_percentage || 0).toFixed(0)}% of video) · Subs gained: ${a.subscribers_gained} · lost: ${a.subscribers_lost}` }));
+    if (a.traffic_sources && a.traffic_sources.length) {
+      body.appendChild(el('div', { className: 'hint', text: `Top traffic sources: ${a.traffic_sources.map(t => `${t.source} (${t.views})`).join(', ')}` }));
+    }
+  } else if (data.analytics_error) {
+    body.appendChild(el('div', { className: 'hint', text: `Analytics: ${data.analytics_error}` }));
+  }
+
+  if (data.heuristic) {
+    const h = data.heuristic;
+    if (!data.analytics) {
+      body.appendChild(el('div', {
+        text: h.best_day_heuristic
+          ? `📅 Best day to post (heuristic, from public view counts): ${h.best_day_heuristic}`
+          : 'Not enough recent uploads yet to guess a best day.',
+      }));
+    }
+    const subs = h.subscriber_count === null ? 'hidden' : h.subscriber_count;
+    body.appendChild(el('div', { className: 'hint', text: `${h.video_count} videos · ${subs} subscribers · sampled ${h.recent_videos_sampled} recent upload(s)` }));
+    body.appendChild(el('div', { className: 'hint', text: h.note }));
+  } else if (data.heuristic_error) {
+    body.appendChild(el('div', { className: 'hint', text: `Heuristic: ${data.heuristic_error}` }));
+  }
+
+  if (data.setup_needed) {
+    body.appendChild(el('div', { className: 'hint', text: data.setup_needed }));
+  }
+
+  if (data.saved_strategy_notes_at) {
+    const when = new Date(data.saved_strategy_notes_at * 1000).toLocaleDateString();
+    body.appendChild(el('div', {
+      className: 'hint',
+      text: `🧠 Using saved strategy notes from ${when} to help pick clips -- generate a fresh overview below to update them.`,
+    }));
+  }
+
+  if (data.oauth_configured) {
+    const btn = el('button', { text: data.oauth_connected ? '🔌 Disconnect YouTube account' : '🔗 Connect YouTube account for real Analytics' });
+    btn.type = 'button';
+    if (data.oauth_connected) {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        await fetch('/api/youtube/disconnect', { method: 'POST' });
+        loadChannelInsights();
+      });
+    } else {
+      btn.addEventListener('click', () => { window.location.href = '/auth/youtube/login'; });
+    }
+    body.appendChild(btn);
+  } else {
+    body.appendChild(el('div', { className: 'hint', text: 'YouTube OAuth isn\\'t configured on this deployment -- see the README for setup steps to enable real Analytics data.' }));
+  }
+}
+loadChannelInsights();
+
+const aiOverviewBtn = document.getElementById('ai-overview-btn');
+const aiOverviewBody = document.getElementById('ai-overview-body');
+aiOverviewBtn.addEventListener('click', async () => {
+  aiOverviewBtn.disabled = true;
+  aiOverviewBtn.textContent = 'Thinking...';
+  aiOverviewBody.innerHTML = '';
+  try {
+    const resp = await fetch('/api/channel-insights/overview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      aiOverviewBody.appendChild(el('div', { className: 'hint', text: data.detail || 'Could not generate an overview.' }));
+    } else if (!data.overview || !data.overview.trim()) {
+      // The API call succeeded but came back with nothing usable -- show
+      // that explicitly instead of silently appending an empty, invisible
+      // box that looks indistinguishable from the button doing nothing.
+      aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Got an empty response -- try again.' }));
+    } else {
+      const pre = el('div', { text: data.overview });
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.marginTop = '10px';
+      pre.style.padding = '12px';
+      pre.style.border = '1px solid var(--border)';
+      pre.style.borderRadius = '8px';
+      aiOverviewBody.appendChild(pre);
+    }
+    // The Claude call takes 10-15s -- scroll the result into view once it
+    // lands so it isn't missed below the fold after the wait.
+    aiOverviewBody.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) {
+    aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Could not generate an overview.' }));
+  } finally {
+    aiOverviewBtn.disabled = false;
+    aiOverviewBtn.textContent = '🤖 Get AI strategy overview';
+  }
+});
+
+const aiOverviewClearBtn = document.getElementById('ai-overview-clear-btn');
+aiOverviewClearBtn.addEventListener('click', async () => {
+  if (!confirm('Clear the saved AI analysis? Future clip picks will stop using it until you generate a new one.')) return;
+  aiOverviewClearBtn.disabled = true;
+  try {
+    await fetch('/api/channel-insights/overview', { method: 'DELETE' });
+    aiOverviewBody.innerHTML = '';
+    loadChannelInsights();
+  } finally {
+    aiOverviewClearBtn.disabled = false;
+  }
+});
+
+(function handleYoutubeOAuthRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('youtube_connected') || params.has('youtube_error')) {
+    if (params.has('youtube_error')) {
+      alert('YouTube connection failed: ' + params.get('youtube_error'));
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete('youtube_connected');
+    url.searchParams.delete('youtube_error');
+    window.history.replaceState({}, '', url.toString());
+  }
+})();
 
 const notifyTestBtn = document.getElementById('notify-test-btn');
 notifyTestBtn.addEventListener('click', async () => {

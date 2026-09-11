@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .download import download_video, is_url, probe_video
+from .loud_moments import find_loud_moments
 from .transcribe import get_transcript
 from .select_moments import select_clips
 from .long_vod import gather_candidates, is_long_vod, select_and_map
@@ -85,11 +86,17 @@ def main(argv=None) -> int:
             return 1
         print(f"      -> {len(words)} words")
 
+        print("      Scanning audio for loud/high-energy moments...")
+        loud_moments = find_loud_moments(dl.video_path, dl.duration)
+        if loud_moments:
+            print(f"      -> {len(loud_moments)} loud moment(s) flagged")
+
         print(f"[3/5] Asking Claude to pick up to {args.clips} clip-worthy moments...")
         picks = select_clips(
             words, dl.duration,
             n_clips=args.clips, min_len=args.min_len, max_len=args.max_len,
             focus=args.focus, api_key=args.api_key, source_title=dl.title,
+            loud_moments=loud_moments,
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
 

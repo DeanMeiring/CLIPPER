@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .loud_moments import LoudMoment
 from .transcribe import Word
 
 # Check https://docs.claude.com/en/docs/about-claude/models for current model
@@ -69,22 +70,7 @@ def _salvage_json_array(raw: str) -> Optional[list]:
     return items or None
 
 
-def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 4096) -> list:
-    try:
-        import anthropic
-    except ImportError as e:
-        raise RuntimeError(
-            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
-        ) from e
-
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
-            "or pass --api-key."
-        )
-
-    client = anthropic.Anthropic(api_key=api_key)
+def _ask_claude_for_json_once(client, prompt: str, model: str, max_tokens: int) -> list:
     resp = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -107,7 +93,51 @@ def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_to
                 f"complete pick(s) out of the response: {e}", flush=True,
             )
             return salvaged
+        # No usable JSON at all -- log what the response actually contained
+        # so a recurrence is diagnosable from Railway logs instead of a
+        # blank raw[:500]. In particular: if the model's entire max_tokens
+        # budget went to a non-"text" block (e.g. thinking) before it ever
+        # got to write the JSON, `raw` ends up empty even though real
+        # tokens were spent -- this makes that visible.
+        block_summary = [
+            f"{getattr(b, 'type', 'unknown')}:{len(getattr(b, 'text', '') or '')}"
+            for b in resp.content
+        ]
+        usage = getattr(resp, "usage", None)
+        print(
+            f"[select_moments] no usable JSON -- stop_reason={resp.stop_reason} "
+            f"blocks={block_summary} usage={usage}", flush=True,
+        )
         raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
+
+
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 8192) -> list:
+    try:
+        import anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "anthropic is required for AI moment-selection. Install it with: pip install anthropic"
+        ) from e
+
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Set ANTHROPIC_API_KEY (get one at https://console.anthropic.com/) "
+            "or pass --api-key."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
+    except RuntimeError as e:
+        # A response with no usable JSON and nothing for the salvage pass
+        # to recover from is rare but confirmed to happen (seen in
+        # practice: the model's output cut off right after the opening
+        # ```json fence, before a single field). Rather than failing the
+        # whole job over what's likely a one-off bad generation, retry
+        # once with a fresh sample before giving up for real.
+        print(f"[select_moments] first attempt failed ({e}), retrying once", flush=True)
+        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
 
 
 def _chunk_transcript(words: List[Word], mark_every: float = 10.0) -> str:
@@ -151,6 +181,63 @@ def _with_shorts_tag(title: str) -> str:
     return f"{title} #Shorts"
 
 
+def _loud_moments_block(loud_moments: Optional[List[LoudMoment]]) -> str:
+    if not loud_moments:
+        return ""
+    listing = "\n".join(
+        f"- {m.start:.0f}s-{m.end:.0f}s (peak {m.peak_db:.0f} dBFS, {m.jump_db:.0f} dB above the surrounding baseline)"
+        for m in loud_moments
+    )
+    return f"""
+Audio analysis also flagged these moments as noticeably louder than the
+surrounding audio -- shouting, a scream, a "crash out", or a similar burst
+of volume. Treat this as a hint, not a verdict: game sound effects, music
+stings, and other loud-but-unremarkable audio trigger it too, and plenty of
+great clips aren't loud at all. Cross-check against what's actually being
+said in the transcript at that timestamp before picking one of these as a
+clip -- only pick it if the content itself earns it.
+{listing}
+"""
+
+
+_GROUP_BANTER_NOTE = """
+A transcript that reads messily -- overlapping speech, interruptions, cut-off
+sentences, unclear who's talking -- is often just what it looks like in text
+when MULTIPLE PEOPLE are reacting/bantering together, not a sign the moment
+itself is weak. Group banter between multiple streamers (a collab/co-op
+moment, everyone reacting to the same thing at once) is frequently the
+funniest, highest-energy content on a stream precisely because of that
+back-and-forth chaos. Don't undervalue or skip a candidate just because its
+transcript is harder to read than a single person talking cleanly -- judge
+it by whether the energy and content would land as a clip, not by how
+cleanly it transcribes."""
+
+
+def _strategy_notes_block(strategy_notes: Optional[str]) -> str:
+    if not strategy_notes:
+        return ""
+    return f"""
+A previous analysis of THIS channel's own real upload performance (actual
+view counts, retention, and traffic data -- not a generic best-practices
+list) found the following. Treat this as a genuine third factor in your
+decision, on equal footing with how strong a moment reads in the
+transcript and any audio/chat signal below -- not just a tiebreaker:
+- SELECTION: when candidates are close, prefer the one whose topic, pacing,
+  or hook most resembles what this data shows actually working for this
+  specific audience (or actively avoid a pattern it shows failing).
+- TITLE/DESCRIPTION: write upload_title and description to match the hook
+  style, phrasing, and topic angle this data shows earning clicks for THIS
+  channel specifically -- not a generic clip-title style. If it names a
+  reach problem (good content, weak title) on past clips, that's a direct
+  instruction to make the title stronger and more specific this time, not
+  just descriptive.
+Still judge each moment on its own merits from the transcript -- don't force
+a pick that doesn't actually work as a clip just because it superficially
+matches this analysis.
+{strategy_notes}
+"""
+
+
 def select_clips(
     words: List[Word],
     video_duration: float,
@@ -161,11 +248,15 @@ def select_clips(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
+    loud_moments: Optional[List[LoudMoment]] = None,
+    strategy_notes: Optional[str] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
+    loud_line = _loud_moments_block(loud_moments)
+    strategy_line = _strategy_notes_block(strategy_notes)
 
     prompt = f"""You are picking highlight clips from a video transcript for short-form
 content (YouTube Shorts / TikTok / Reels). The transcript below has [mm:ss]
@@ -173,7 +264,8 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}
+{source_line}{focus_line}{loud_line}{strategy_line}{_GROUP_BANTER_NOTE}
+
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
 - work as a standalone moment (a hook, a punchline, a strong claim, a story
@@ -189,9 +281,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "end": 58.0,
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
     "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip"
+    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
 
@@ -242,6 +334,7 @@ def select_from_candidate_windows(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
+    strategy_notes: Optional[str] = None,
 ) -> List[WindowPick]:
     """Pick the best clips from a set of pre-filtered candidate windows
     (long-VOD pipeline) instead of one continuous transcript.
@@ -256,6 +349,7 @@ def select_from_candidate_windows(
 
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource VOD title: {source_title}\n" if source_title else ""
+    strategy_line = _strategy_notes_block(strategy_notes)
 
     blocks = []
     for w in windows:
@@ -272,10 +366,12 @@ that were already pre-filtered out of a much longer livestream VOD (chat
 activity spikes and/or moments viewers already clipped). Each candidate
 window below is its own short segment with its own transcript, timestamped
 LOCALLY from 0 at the start of that window -- not the VOD's absolute time.
-{source_line}{focus_line}
+{source_line}{focus_line}{strategy_line}
 Not every candidate window is actually a good clip -- some chat spikes are
-noise, reactions to something off-screen, or don't read well out of context.
-Pick only the ones that would genuinely work as a standalone short-form clip.
+noise, or a reaction to something off-screen that doesn't work without
+context. Pick only the ones that would genuinely work as a standalone
+short-form clip.
+{_GROUP_BANTER_NOTE}
 
 Pick up to {n_clips} windows. For each one you pick, give a start/end IN
 SECONDS LOCAL TO THAT WINDOW (0 to its duration) -- use the whole window or
@@ -293,9 +389,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "end": 52.0,
     "title": "short internal label, not shown on screen",
     "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
     "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip"
+    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
 

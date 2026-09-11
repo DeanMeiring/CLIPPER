@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .reframe import CropWindow, Layout, SplitLayout
+from .reframe import CropWindow, Layout, MultiCamSplitLayout, SplitLayout
 
 
 def _escape_for_filter(path: Path) -> str:
@@ -13,6 +13,21 @@ def _escape_for_filter(path: Path) -> str:
     s = str(path).replace("\\", "/")
     s = s.replace(":", "\\:")
     return s
+
+
+def _letterbox_scale_pad(w: int, h: int) -> str:
+    """Scale a facecam crop to fit within w x h without distorting it,
+    padding any leftover space with black bars instead of stretching to
+    fill it exactly.
+
+    A narrow multi-cam tile's aspect ratio (out_w split 2-3 ways against
+    a fixed band height) doesn't match any real facecam window's -- the
+    crop side of this used to force an exact-aspect match, which either
+    pulled surrounding gameplay into the tile or squashed the person's
+    face with a severe non-uniform stretch (measured on a real rejected
+    render: height stretched 2.6x more than width). A small letterboxed
+    thumbnail reads far better than either."""
+    return f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black"
 
 
 def render_clip(
@@ -29,11 +44,39 @@ def render_clip(
     duration = max(0.1, end - start)
     ass = _escape_for_filter(ass_path)
 
-    if isinstance(layout, SplitLayout):
+    if isinstance(layout, MultiCamSplitLayout):
+        top = layout.top
+        parts = [f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"]
+        tile_labels = []
+        for i, (cam, tw) in enumerate(zip(layout.bottom_cams, layout.bottom_cam_out_widths)):
+            label = f"cam{i}"
+            parts.append(
+                f"[0:v]crop={cam.w}:{cam.h}:{cam.x}:{cam.y},"
+                f"{_letterbox_scale_pad(tw, layout.bottom_out_h)}[{label}];"
+            )
+            tile_labels.append(f"[{label}]")
+        parts.append(f"{''.join(tile_labels)}hstack=inputs={len(tile_labels)}[bottom];")
+        parts.append("[top][bottom]vstack=inputs=2[stacked];")
+        parts.append(f"[stacked]ass='{ass}'[outv]")
+        filter_complex = "".join(parts)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}",
+            "-i", str(source_video),
+            "-t", f"{duration:.3f}",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    elif isinstance(layout, SplitLayout):
         top, bottom = layout.top, layout.bottom
         filter_complex = (
             f"[0:v]crop={top.w}:{top.h}:{top.x}:{top.y},scale={out_w}:{layout.top_out_h}[top];"
-            f"[0:v]crop={bottom.w}:{bottom.h}:{bottom.x}:{bottom.y},scale={out_w}:{layout.bottom_out_h}[bottom];"
+            f"[0:v]crop={bottom.w}:{bottom.h}:{bottom.x}:{bottom.y},"
+            f"{_letterbox_scale_pad(out_w, layout.bottom_out_h)}[bottom];"
             f"[top][bottom]vstack=inputs=2[stacked];"
             f"[stacked]ass='{ass}'[outv]"
         )
@@ -68,7 +111,18 @@ def render_clip(
             str(output_path),
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # A hard wall-clock ceiling: this runs on the web app's single sequential
+    # worker thread, and the cancel signal is only checked between pipeline
+    # steps, not inside a blocking subprocess call -- an ffmpeg hang (a
+    # malformed/truncated source, an unusual codec, a filter stall) would
+    # otherwise wedge that thread, and every future queued job, forever.
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after {e.timeout:.0f}s rendering {output_path.name} "
+            "-- source video may be corrupt or an unusual codec"
+        ) from e
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {output_path.name}:\n{result.stderr[-2000:]}")
     return output_path

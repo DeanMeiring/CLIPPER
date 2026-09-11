@@ -171,3 +171,52 @@ Runs locally too:
 pip install -r requirements.txt
 uvicorn webapp.main:app --reload
 ```
+
+### Channel insights — best day to post
+
+The web app has a "Channel insights" panel showing a best-day-to-post
+suggestion and channel-performance signals, from two independent sources:
+
+- **A no-auth heuristic** — works immediately, no setup. Set the
+  `YOUTUBE_OWN_CHANNEL` variable to your channel's ID (starts with `UC...`),
+  `@handle`, or legacy username, and it uses the public YouTube Data API
+  (the same `YOUTUBE_API_KEY` already used for trending lookups) to guess a
+  best day from your recent uploads' view counts, normalized by video age.
+  Noisy, especially with few videos.
+- **Real YouTube Analytics** (day-of-week views, retention, traffic
+  sources) for your own connected channel — much more accurate, needs a
+  one-time OAuth setup:
+
+  1. Open the [Google Cloud Console](https://console.cloud.google.com/) and
+     create a project (or pick an existing one) via the project selector at
+     the top of the page.
+  2. Go to [APIs & Services → Library](https://console.cloud.google.com/apis/library)
+     and enable both **YouTube Data API v3** and **YouTube Analytics API**.
+  3. Go to [APIs & Services → OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent)
+     and configure it: User type **External** is fine for personal use.
+     Leave it in **Testing** mode (no Google verification needed) and add
+     your own Google account under **Test users** — only test users can
+     complete the login while it's in Testing mode.
+  4. Go to [APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials),
+     click **Create Credentials → OAuth client ID**, choose **Web
+     application**, and add this as an **Authorized redirect URI** (swap in
+     your actual Railway domain):
+     ```
+     https://<your-app>.up.railway.app/auth/youtube/callback
+     ```
+  5. Copy the generated **Client ID** and **Client secret**, and set them as
+     Railway service variables: `YOUTUBE_OAUTH_CLIENT_ID` and
+     `YOUTUBE_OAUTH_CLIENT_SECRET`.
+  6. Redeploy, open the app, and click **Connect YouTube account** in the
+     Channel insights panel — it'll walk you through Google's consent
+     screen and back.
+
+  Note: even with a real connected account, YouTube's Analytics API has no
+  "hour of day" dimension on regular reports — the audience-activity
+  heatmap YouTube Studio shows isn't exposed via any public API. "Best day
+  to post" here means best *day of the week*, from your channel's real
+  views/watch-time data, which is the accurate ceiling of what's obtainable
+  through official APIs.
+
+
+Claude is being very useful I just eat through the usage so fast.
