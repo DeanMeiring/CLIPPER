@@ -1030,6 +1030,24 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
     return {"ok": True}
 
 
+_SOURCE_VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".ts"}
+
+
+def _infer_source_video(out_dir: Path) -> Optional[str]:
+    """A clip from before source_video was tracked per-clip has no
+    filename recorded for its downloaded source. The normal (non-long-VOD)
+    pipeline downloads exactly one video into _source/ per job, shared by
+    every clip in it -- if exactly one video file is sitting there, it's
+    unambiguous which one this clip came from. A long-VOD job's _source/
+    instead holds one small file per candidate window, so this correctly
+    declines (returns None) rather than guessing wrong for those."""
+    raw_dir = out_dir / "_source"
+    if not raw_dir.is_dir():
+        return None
+    candidates = [p for p in raw_dir.iterdir() if p.is_file() and p.suffix.lower() in _SOURCE_VIDEO_EXTS]
+    return candidates[0].name if len(candidates) == 1 else None
+
+
 @protected.post("/api/jobs/{job_id}/clips/{filename}/ensure-source-frame")
 def ensure_source_frame(job_id: str, filename: str) -> dict:
     """Return the clip's source-frame filename for the facecam picker to
@@ -1054,12 +1072,23 @@ def ensure_source_frame(job_id: str, filename: str) -> dict:
     if existing and (out_dir / existing).is_file():
         return {"source_frame": existing}
 
-    source_video = clip.get("source_video")
+    source_video = clip.get("source_video") or _infer_source_video(out_dir)
     if not source_video:
         raise HTTPException(409, "this clip predates manual facecam fixes -- try Generate more clips instead")
     video_path = out_dir / "_source" / source_video
     if not video_path.is_file():
         raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+    if not clip.get("source_video"):
+        # Backfill so set_facecam_boxes (the actual re-render, triggered
+        # next by "Re-render with these boxes") doesn't have to repeat
+        # this inference -- once known, it's known for good.
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is not None:
+                for c in job.get("clips") or []:
+                    if c.get("file") == filename:
+                        c["source_video"] = source_video
+        _persist(job_id)
 
     source_frame_path = out_dir / f"{Path(filename).stem}_source_frame.jpg"
     if not _save_source_still(video_path, clip.get("start", 0.0), clip.get("end", 0.0), source_frame_path):
@@ -3111,7 +3140,13 @@ async function poll(jobId) {
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
-      if (c.source_frame || c.source_video) {
+      {
+        // Always offered, even with neither field set -- a clip old
+        // enough to predate source_video tracking entirely still has a
+        // chance: ensure-source-frame can infer the source from the job's
+        // download folder when there's only one candidate for it. If that
+        // fails too, the modal says so instead of the button just not
+        // being there with no explanation.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
         fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
