@@ -1951,7 +1951,7 @@ INDEX_HTML = """<!doctype html>
   .privacy-option input { width: auto; margin-top: 3px; }
   .privacy-option .privacy-label { display: block; font-weight: 700; font-size: 0.9rem; color: var(--text); }
   .privacy-option .privacy-desc { font-size: 0.78rem; color: var(--muted); margin-top: 2px; font-weight: 400; }
-  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
   .modal-actions { display: flex; flex-direction: column; gap: 8px; }
@@ -2192,10 +2192,10 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <div id="youtube-upload-modal-overlay">
-  <div class="modal">
+  <div class="modal" style="max-height:92vh;overflow:auto">
     <p>Upload to YouTube</p>
     <p class="hint" id="youtube-upload-title-hint"></p>
-    <video id="youtube-upload-preview" controls preload="metadata" style="width:100%;border-radius:8px;background:var(--track);display:block"></video>
+    <video id="youtube-upload-preview" controls preload="metadata" style="width:100%;max-height:40vh;border-radius:8px;background:var(--track);display:block;object-fit:contain"></video>
     <label class="privacy-option">
       <input type="radio" name="youtube-privacy" value="unlisted" checked>
       <span>
