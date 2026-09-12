@@ -45,7 +45,7 @@ def is_long_vod(info: VideoInfo) -> bool:
     return info.duration >= LONG_VOD_THRESHOLD_SECONDS and "twitch" in info.extractor
 
 
-def _probe_source_accessible(source: str, duration: float, raw_dir: Path) -> None:
+def probe_source_accessible(source: str, duration: float, raw_dir: Path) -> None:
     """Cheap upfront sanity check: pull one short window from partway
     through the VOD before committing to downloading/transcribing up to
     20 full candidate windows. A VOD that's subscriber-only, deleted-but-
@@ -113,7 +113,7 @@ def gather_candidates(
         should_cancel()
 
     report("Checking that the source video is actually accessible...")
-    _probe_source_accessible(source, info.duration, raw_dir)
+    probe_source_accessible(source, info.duration, raw_dir)
 
     if should_cancel:
         should_cancel()

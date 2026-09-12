@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
-from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
+from clipper.long_vod import gather_candidates, is_long_vod, probe_source_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
     MAX_COCAM_TILES,
@@ -39,7 +39,7 @@ from clipper.render import render_clip, trim_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
-from clipper.trending import get_trending_sections, search_creator, get_recommendation_candidates
+from clipper.trending import get_trending_sections, search_creator, get_recommendation_candidates, parse_twitch_duration
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot
 from clipper import channel_strategy
@@ -1298,13 +1298,26 @@ def search_creator_endpoint(q: str) -> dict:
     return {"results": [vars(e) for e in results]}
 
 
+_MAX_ACCESSIBILITY_PROBES = 6  # bound worst-case latency: stop checking further down the ranking
+
+
 @protected.post("/api/recommend-vod")
 def recommend_vod_endpoint() -> dict:
     """Which of the tracked streamers' recent VODs (TRENDING_TWITCH_LOGINS
     -- the same watchlist the trending rows use) is most worth downloading
     and clipping today. Not cached and only run on a button click, same as
     the AI overview: it's a real Claude API call, so it shouldn't fire on
-    every page load."""
+    every page load.
+
+    Twitch's video-list API can't tell us a VOD is subscriber-only,
+    deleted-but-listed, or otherwise blocked -- that only shows up once
+    something actually tries to download it. So before handing a pick back,
+    this probes it for real accessibility (the same check a job does before
+    committing to a full download) and walks down Claude's ranking past any
+    VOD that fails it, capped at _MAX_ACCESSIBILITY_PROBES candidates so one
+    bad streak of inaccessible VODs can't make this endpoint hang."""
+    import shutil
+    import tempfile
     from datetime import datetime
 
     twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
@@ -1329,12 +1342,14 @@ def recommend_vod_endpoint() -> dict:
 
     try:
         result = channel_strategy.recommend_vod(candidate_dicts, notes=_load_strategy_notes())
+        ranking = result["ranking"]
+        reasons = {ranking[0]: result["why_best"]} if ranking else {}
+        if len(ranking) > 1:
+            reasons[ranking[1]] = result["why_second"]
     except (RuntimeError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
 
-    def _entry(index: Optional[int], reason: Optional[str]) -> Optional[dict]:
-        if index is None:
-            return None
+    def _entry(index: int, reason: Optional[str]) -> dict:
         c = candidates[index]
         return {
             "name": c.name, "url": c.url, "title": c.title,
@@ -1343,17 +1358,45 @@ def recommend_vod_endpoint() -> dict:
             "reason": reason,
         }
 
-    pick = _entry(result["pick_index"], result["why"])
-    if pick is None:
-        # Claude's response didn't parse into a valid index -- fall back to
-        # the highest view count rather than surfacing nothing.
-        best = max(candidates, key=lambda c: c.view_count or 0)
-        pick = _entry(candidates.index(best), "Highest view count among today's tracked VODs (fallback -- couldn't parse a reasoned pick).")
+    picks: list = []
+    skipped_inaccessible = 0
+    probe_dir = Path(tempfile.mkdtemp(prefix="vod_probe_"))
+    try:
+        for index in ranking[:_MAX_ACCESSIBILITY_PROBES]:
+            c = candidates[index]
+            duration_seconds = parse_twitch_duration(c.duration or "")
+            if duration_seconds:
+                try:
+                    probe_source_accessible(c.url, duration_seconds, probe_dir)
+                except RuntimeError:
+                    skipped_inaccessible += 1
+                    continue
+            # No parseable duration -- can't pick a probe point, so take it
+            # on trust rather than blocking the recommendation on that.
+            reason = reasons.get(index)
+            if reason is None:
+                reason = (
+                    f"Next best option after {skipped_inaccessible} higher-ranked VOD(s) "
+                    "turned out to be inaccessible right now."
+                )
+            picks.append(_entry(index, reason))
+            if len(picks) >= 2:
+                break
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+    if not picks:
+        raise HTTPException(
+            409,
+            f"Checked the top {min(len(ranking), _MAX_ACCESSIBILITY_PROBES)} tracked VODs and none of them "
+            "were downloadable right now (likely subscriber-only or otherwise restricted). Try again later.",
+        )
 
     return {
-        "pick": pick,
-        "runner_up": _entry(result["runner_up_index"], result["runner_up_why"]),
+        "pick": picks[0],
+        "runner_up": picks[1] if len(picks) > 1 else None,
         "candidates_considered": len(candidates),
+        "skipped_inaccessible": skipped_inaccessible,
     }
 
 
