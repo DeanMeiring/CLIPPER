@@ -41,7 +41,7 @@ from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
 from clipper.trending import get_trending_sections, search_creator, get_recommendation_candidates, parse_twitch_duration
 from clipper.notify import send_telegram
-from clipper.channel_insights import get_channel_snapshot
+from clipper.channel_insights import get_channel_snapshot, MAX_SHORT_SECONDS
 from clipper import channel_strategy
 from clipper.channel_strategy import get_ai_overview
 from clipper import competitor_discovery
@@ -282,6 +282,12 @@ def _run_job(job_id: str) -> None:
         return
 
     req: JobRequest = jobs[job_id]["request"]
+    # YouTube only classifies a video as a Short if it's 180s or under, full
+    # stop -- no title/description tag or anything else overrides that. A
+    # clip this app renders past that line can never actually become a
+    # Short no matter what "Upload to YouTube" sends, so clamp here rather
+    # than let a job silently produce something that was never eligible.
+    req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -702,7 +708,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     num_clips = max(1, int(req.get("num_clips") or 3))
     focus = req.get("focus") or None
     min_len = float(req.get("min_len") or 20.0)
-    max_len = float(req.get("max_len") or 90.0)
+    max_len = min(float(req.get("max_len") or 90.0), MAX_SHORT_SECONDS)
     reset_used = bool(req.get("reset_used"))
 
     with jobs_lock:
@@ -2078,7 +2084,8 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div>
     <label>Max length (s)</label>
-    <input id="max_len" type="number" value="90">
+    <input id="max_len" type="number" value="90" max="180">
+    <div class="hint">Capped at 180s -- YouTube won't count anything longer as a Short.</div>
   </div>
 </div>
 
