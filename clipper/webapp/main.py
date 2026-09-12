@@ -536,16 +536,18 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                 facecam_uncertain = True
                 has_trusted_facecam = False
 
-        if not has_trusted_facecam:
-            # No facecam the pipeline trusts in this clip -- detection found
-            # none, or what it found was just rejected. Either way keep a raw
-            # source frame so a person can place the facecam by hand: the
-            # rejected still only shows the crop that was judged wrong, not
-            # where the facecam(s) actually sit in the source.
-            source_frame_path = out_dir / f"clip_{out_index:02d}_source_frame.jpg"
-            if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
-                source_frame_name = source_frame_path.name
-                print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
+        # Always keep a raw source frame so a person can place the facecam
+        # by hand, even when the pipeline trusts its own placement -- the
+        # post-render check catches an obviously broken facecam band, but
+        # it isn't proof the placement is actually right (e.g. it can
+        # confidently approve a frame that grabbed an on-screen overlay
+        # graphic instead of an actual face). Without this, a clip the
+        # check happened to approve had no way to fix a wrong placement
+        # short of "generate more clips" and hoping for something different.
+        source_frame_path = out_dir / f"clip_{out_index:02d}_source_frame.jpg"
+        if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
+            source_frame_name = source_frame_path.name
+            print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
 
         clips_meta.append({
             "file": out_path.name,
@@ -572,9 +574,15 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             # the wrong place, so the frontend prompts for a manual
             # placement as soon as the job finishes.
             "facecam_uncertain": facecam_uncertain,
-            # Set whenever the clip has no trusted facecam (rejected, or
-            # none detected at all): the frame the manual box-picker draws
-            # on. Its presence is what makes the fix/add button appear.
+            # True when the pipeline auto-placed and trusted a facecam here
+            # (passed the post-render check, or the check wasn't usable) --
+            # distinct from facecam_manual, so the frontend can label the
+            # button "Adjust" (something's there, maybe wrong) rather than
+            # "Add" (nothing's there) for a clip nobody has touched yet.
+            "facecam_trusted": has_trusted_facecam,
+            # The frame the manual box-picker draws on. Always saved now
+            # (see above) so any clip's facecam can be overridden by hand,
+            # not just ones the pipeline itself flagged as uncertain.
             "source_frame": source_frame_name,
         })
         _set(job_id, clips=list(clips_meta))
@@ -1052,11 +1060,17 @@ def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> d
             raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
         filenames = [filename]
         if req.apply_to_all_missing:
-            # Every other clip with no trusted automatic facecam -- the
-            # ones with a source frame saved for manual placement.
+            # Every other clip with no trusted automatic facecam and no
+            # manual placement of its own yet. Every clip now carries a
+            # source_frame (any facecam can be manually overridden, not
+            # just ones the pipeline flagged), so that alone can no longer
+            # be the filter here -- it would stamp this clip's box position
+            # onto clips that already have a perfectly good, differently
+            # positioned facecam.
             filenames += [
                 c["file"] for c in (job.get("clips") or [])
                 if c.get("file") != filename and c.get("source_frame") and c.get("source_video")
+                and not c.get("facecam_trusted") and not c.get("facecam_manual")
             ]
         job["pending_manual_facecam"] = {
             "filenames": filenames,
@@ -2607,7 +2621,12 @@ let lastFacecamSourceBoxes = null;    // the last placement submitted -- pre-fil
 const facecamPrompted = new Set();    // `${jobId}/${file}` already prompted for on this page load
 
 function facecamOthersMissing(job, clip) {
-  return (job.clips || []).filter(c => c.file !== clip.file && c.source_frame).length;
+  // Every clip now carries a source_frame (so any facecam can be manually
+  // overridden), but the batch "apply to others" option must still only
+  // ever target clips with no trusted placement yet -- otherwise it would
+  // offer to stamp this clip's box position onto clips that already have a
+  // perfectly good, differently-positioned facecam.
+  return (job.clips || []).filter(c => c.file !== clip.file && c.source_frame && !c.facecam_trusted && !c.facecam_manual).length;
 }
 
 function openFacecamModal(jobId, clip, othersMissing) {
@@ -3029,7 +3048,7 @@ async function poll(jobId) {
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
         fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
-          : (c.facecam_manual ? '🎯 Adjust facecam position' : '🎯 Add facecam manually');
+          : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam position' : '🎯 Add facecam manually';
         fixBtn.style.marginLeft = '8px';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
         div.appendChild(fixBtn);
