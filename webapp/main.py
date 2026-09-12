@@ -39,7 +39,7 @@ from clipper.render import render_clip, trim_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
-from clipper.trending import get_trending_sections, search_creator
+from clipper.trending import get_trending_sections, search_creator, get_recommendation_candidates
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot
 from clipper import channel_strategy
@@ -1298,6 +1298,65 @@ def search_creator_endpoint(q: str) -> dict:
     return {"results": [vars(e) for e in results]}
 
 
+@protected.post("/api/recommend-vod")
+def recommend_vod_endpoint() -> dict:
+    """Which of the tracked streamers' recent VODs (TRENDING_TWITCH_LOGINS
+    -- the same watchlist the trending rows use) is most worth downloading
+    and clipping today. Not cached and only run on a button click, same as
+    the AI overview: it's a real Claude API call, so it shouldn't fire on
+    every page load."""
+    from datetime import datetime
+
+    twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
+    candidates = get_recommendation_candidates(twitch_logins)
+    if not candidates:
+        raise HTTPException(
+            409,
+            "No recent VODs found -- set TRENDING_TWITCH_LOGINS to the streamers you clip, "
+            "or check that TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET are configured.",
+        )
+
+    candidate_dicts = []
+    for c in candidates:
+        d = vars(c).copy()
+        d["_published_ts"] = None
+        if c.published_at:
+            try:
+                d["_published_ts"] = datetime.fromisoformat(c.published_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        candidate_dicts.append(d)
+
+    try:
+        result = channel_strategy.recommend_vod(candidate_dicts, notes=_load_strategy_notes())
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(400, str(e)) from e
+
+    def _entry(index: Optional[int], reason: Optional[str]) -> Optional[dict]:
+        if index is None:
+            return None
+        c = candidates[index]
+        return {
+            "name": c.name, "url": c.url, "title": c.title,
+            "view_count": c.view_count, "duration": c.duration,
+            "thumbnail": c.thumbnail, "published_at": c.published_at,
+            "reason": reason,
+        }
+
+    pick = _entry(result["pick_index"], result["why"])
+    if pick is None:
+        # Claude's response didn't parse into a valid index -- fall back to
+        # the highest view count rather than surfacing nothing.
+        best = max(candidates, key=lambda c: c.view_count or 0)
+        pick = _entry(candidates.index(best), "Highest view count among today's tracked VODs (fallback -- couldn't parse a reasoned pick).")
+
+    return {
+        "pick": pick,
+        "runner_up": _entry(result["runner_up_index"], result["runner_up_why"]),
+        "candidates_considered": len(candidates),
+    }
+
+
 def _youtube_redirect_uri() -> str:
     domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if not domain:
@@ -1795,6 +1854,15 @@ INDEX_HTML = """<!doctype html>
   .creator-card .name { font-size: 0.78rem; font-weight: 700; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .creator-card .meta { font-size: 0.7rem; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .live-badge { display: inline-block; background: var(--danger); color: #fff; font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-top: 6px; letter-spacing: 0.03em; }
+  #recommend-vod-btn { padding: 8px 16px; }
+  .recommend-card { display: flex; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
+  .recommend-card img { width: 110px; height: 62px; object-fit: cover; border-radius: 6px; background: var(--track); flex: 0 0 auto; }
+  .recommend-card .rc-body { min-width: 0; flex: 1; }
+  .recommend-card .rc-tag { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; color: var(--accent); text-transform: uppercase; }
+  .recommend-card .rc-title { font-weight: 700; font-size: 0.88rem; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recommend-card .rc-meta { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+  .recommend-card .rc-reason { font-size: 0.8rem; margin-top: 6px; }
+  .recommend-card button { margin-top: 8px; padding: 5px 12px; font-size: 0.8rem; }
   .actions { display: flex; align-items: center; gap: 0; }
   #search-row { display: flex; gap: 8px; margin-top: 0; }
   #search-row input { flex: 1; margin-top: 0; }
@@ -1826,6 +1894,13 @@ INDEX_HTML = """<!doctype html>
 <div class="trending-section" id="search-results-section">
   <div class="trending-row" id="search-results"></div>
   <div class="hint" id="search-status" style="display:none"></div>
+</div>
+
+<div class="trending-section" id="recommend-vod-section">
+  <label style="margin-top:0">Recommended VOD to clip today</label>
+  <button id="recommend-vod-btn" type="button">🎯 Recommend one</button>
+  <div class="hint" id="recommend-vod-status" style="display:none"></div>
+  <div id="recommend-vod-results" style="display:none; margin-top:10px"></div>
 </div>
 
 <div id="trending-wrap">
@@ -2096,6 +2171,91 @@ async function loadTrending() {
   }
 }
 loadTrending();
+
+function formatDuration(d) {
+  // Twitch's own format is already compact (e.g. "3h20m10s") -- just
+  // space it out a bit for readability.
+  if (!d) return '';
+  return d.replace(/(\d+)h/, '$1h ').replace(/(\d+)m/, '$1m ').trim();
+}
+
+function buildRecommendCard(entry, tag) {
+  const card = document.createElement('div');
+  card.className = 'recommend-card';
+
+  const img = document.createElement('img');
+  if (entry.thumbnail) img.src = entry.thumbnail;
+  card.appendChild(img);
+
+  const body = document.createElement('div');
+  body.className = 'rc-body';
+
+  const tagEl = document.createElement('div');
+  tagEl.className = 'rc-tag';
+  tagEl.textContent = tag;
+  body.appendChild(tagEl);
+
+  const title = document.createElement('div');
+  title.className = 'rc-title';
+  title.title = entry.title || '';
+  title.textContent = `${entry.name} — ${entry.title || ''}`;
+  body.appendChild(title);
+
+  const meta = document.createElement('div');
+  meta.className = 'rc-meta';
+  const metaParts = [];
+  if (entry.view_count != null) metaParts.push(`${formatViewers(entry.view_count)} views`);
+  if (entry.duration) metaParts.push(formatDuration(entry.duration));
+  meta.textContent = metaParts.join(' · ');
+  body.appendChild(meta);
+
+  if (entry.reason) {
+    const reason = document.createElement('div');
+    reason.className = 'rc-reason';
+    reason.textContent = entry.reason;
+    body.appendChild(reason);
+  }
+
+  const useBtn = document.createElement('button');
+  useBtn.type = 'button';
+  useBtn.textContent = 'Use this VOD';
+  useBtn.addEventListener('click', () => {
+    document.getElementById('source').value = entry.url;
+    document.getElementById('source').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  body.appendChild(useBtn);
+
+  card.appendChild(body);
+  return card;
+}
+
+const recommendVodBtn = document.getElementById('recommend-vod-btn');
+const recommendVodStatus = document.getElementById('recommend-vod-status');
+const recommendVodResults = document.getElementById('recommend-vod-results');
+
+recommendVodBtn.addEventListener('click', async () => {
+  recommendVodBtn.disabled = true;
+  recommendVodResults.style.display = 'none';
+  recommendVodResults.innerHTML = '';
+  recommendVodStatus.style.display = 'block';
+  recommendVodStatus.textContent = "Checking your tracked streamers' recent VODs...";
+  try {
+    const resp = await fetch('/api/recommend-vod', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      recommendVodStatus.textContent = data.detail || 'Could not get a recommendation.';
+      return;
+    }
+    recommendVodStatus.style.display = 'none';
+    if (data.pick) recommendVodResults.appendChild(buildRecommendCard(data.pick, 'Top pick'));
+    if (data.runner_up) recommendVodResults.appendChild(buildRecommendCard(data.runner_up, 'Runner-up'));
+    recommendVodResults.style.display = 'block';
+  } catch (e) {
+    recommendVodStatus.textContent = 'Could not get a recommendation -- try again.';
+  } finally {
+    recommendVodBtn.disabled = false;
+  }
+});
 
 const searchInput = document.getElementById('search-input');
 const searchBtn = document.getElementById('search-btn');
