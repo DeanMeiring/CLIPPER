@@ -354,19 +354,19 @@ this is not a discovery task, just triage of a small list.
 Candidates:
 {candidates_block}
 {notes_block}
-Pick the ONE candidate most worth clipping right now. View count is the
-strongest signal you have (a VOD already earning more views than that
-streamer's other recent ones had a moment worth watching), but also weigh
-duration (a 6+ hour VOD has more chances at a highlight than a 45-minute
-one) and, if the saved overview above names a type of moment or streamer
-pattern that's worked before, factor that in too. Don't just always pick
-the single highest view count without reasoning -- say why.
+Rank ALL {len(candidates)} candidates from most to least worth clipping today --
+list every index exactly once. View count is the strongest signal you have
+(a VOD already earning more views than that streamer's other recent ones
+had a moment worth watching), but also weigh duration (a 6+ hour VOD has
+more chances at a highlight than a 45-minute one) and, if the saved
+overview above names a type of moment or streamer pattern that's worked
+before, factor that in too. Don't just always rank by view count alone --
+say why the top two are ranked where they are.
 
 Answer in exactly this format, nothing else:
-PICK: <index number>
-WHY: <one or two sentences, grounded in this candidate's actual numbers above -- no generic filler>
-RUNNER_UP: <index number, or NONE if there's only one reasonable option>
-RUNNER_UP_WHY: <one sentence, or omit this line if RUNNER_UP is NONE>"""
+RANKING: <comma-separated index numbers, best to worst, every index 0-{len(candidates) - 1} exactly once>
+WHY_BEST: <one or two sentences on your #1 pick, grounded in its actual numbers above -- no generic filler>
+WHY_SECOND: <one sentence on your #2 pick>"""
 
 
 def recommend_vod(
@@ -375,14 +375,15 @@ def recommend_vod(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
 ) -> dict:
-    """Ask Claude to pick which of a short list of tracked streamers' recent
-    VODs is most worth downloading and clipping today. `candidates` is a
+    """Ask Claude to rank a short list of tracked streamers' recent VODs by
+    how worth downloading and clipping each is today. `candidates` is a
     list of dicts (from trending.CreatorEntry, each needs a "_published_ts"
     float added by the caller for age calculation). Returns
-    {"pick_index", "why", "runner_up_index", "runner_up_why"} -- indices
-    are None if Claude's response couldn't be parsed or it named an
-    out-of-range index, so the caller can fall back to the highest view
-    count instead of trusting a bad parse."""
+    {"ranking": [index, ...], "why_best", "why_second"} -- `ranking` always
+    contains every valid index exactly once (any index Claude's response
+    didn't parse or omitted is appended in its original order), so a caller
+    that needs to skip an unreachable VOD always has a next-best option to
+    fall back to instead of surfacing nothing."""
     import re
 
     import anthropic
@@ -402,25 +403,37 @@ def recommend_vod(
     )
     text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
 
-    def _index(pattern: str) -> Optional[int]:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if not m:
-            return None
-        try:
-            idx = int(m.group(1))
-        except ValueError:
-            return None
-        return idx if 0 <= idx < len(candidates) else None
-
     def _text_after(label: str) -> Optional[str]:
         m = re.search(rf"{label}:\s*(.+)", text, re.IGNORECASE)
         return m.group(1).strip() if m else None
 
+    ranking: list = []
+    seen: set = set()
+    raw_ranking = _text_after("RANKING") or ""
+    for part in raw_ranking.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            continue
+        idx = int(part)
+        if 0 <= idx < len(candidates) and idx not in seen:
+            ranking.append(idx)
+            seen.add(idx)
+    # Anything Claude's ranking missed or garbled still needs a place in
+    # line -- append the leftovers (by view count, since that's the
+    # fallback signal used when nothing parses at all) rather than losing
+    # them, so a skipped-for-being-inaccessible top pick always has
+    # somewhere to fall back to.
+    leftovers = sorted(
+        (i for i in range(len(candidates)) if i not in seen),
+        key=lambda i: candidates[i].get("view_count") or 0,
+        reverse=True,
+    )
+    ranking.extend(leftovers)
+
     return {
-        "pick_index": _index(r"PICK:\s*(\d+)"),
-        "why": _text_after("WHY"),
-        "runner_up_index": _index(r"RUNNER_UP:\s*(\d+)"),
-        "runner_up_why": _text_after("RUNNER_UP_WHY"),
+        "ranking": ranking,
+        "why_best": _text_after("WHY_BEST"),
+        "why_second": _text_after("WHY_SECOND"),
         "raw": text,
     }
 
