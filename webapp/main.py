@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from clipper.captions import build_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
-from clipper.long_vod import gather_candidates, is_long_vod, probe_source_accessible, select_and_map
+from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
     MAX_COCAM_TILES,
@@ -1306,7 +1306,7 @@ def search_creator_endpoint(q: str) -> dict:
     return {"results": [vars(e) for e in results]}
 
 
-_MAX_ACCESSIBILITY_PROBES = 6  # bound worst-case latency: stop checking further down the ranking
+_MAX_ACCESSIBILITY_PROBES = 4  # bound worst-case latency: stop checking further down the ranking
 
 
 @protected.post("/api/recommend-vod")
@@ -1320,10 +1320,15 @@ def recommend_vod_endpoint() -> dict:
     Twitch's video-list API can't tell us a VOD is subscriber-only,
     deleted-but-listed, or otherwise blocked -- that only shows up once
     something actually tries to download it. So before handing a pick back,
-    this probes it for real accessibility (the same check a job does before
-    committing to a full download) and walks down Claude's ranking past any
-    VOD that fails it, capped at _MAX_ACCESSIBILITY_PROBES candidates so one
-    bad streak of inaccessible VODs can't make this endpoint hang."""
+    this probes it for real accessibility and walks down Claude's ranking
+    past any VOD that fails it, capped at _MAX_ACCESSIBILITY_PROBES
+    candidates so one bad streak of inaccessible VODs can't make this
+    endpoint hang. Uses quick_probe_accessible (a single fast attempt on a
+    short window) rather than the job pipeline's careful multi-attempt
+    probe_source_accessible -- this is a button click a person is waiting
+    on, not a job already committed to one VOD, so speed matters more than
+    certainty here; a wrongly-skipped VOD just falls through to the next
+    ranked one instead of blocking the whole response."""
     import shutil
     import tempfile
     from datetime import datetime
@@ -1373,12 +1378,9 @@ def recommend_vod_endpoint() -> dict:
         for index in ranking[:_MAX_ACCESSIBILITY_PROBES]:
             c = candidates[index]
             duration_seconds = parse_twitch_duration(c.duration or "")
-            if duration_seconds:
-                try:
-                    probe_source_accessible(c.url, duration_seconds, probe_dir)
-                except RuntimeError:
-                    skipped_inaccessible += 1
-                    continue
+            if duration_seconds and not quick_probe_accessible(c.url, duration_seconds, probe_dir):
+                skipped_inaccessible += 1
+                continue
             # No parseable duration -- can't pick a probe point, so take it
             # on trust rather than blocking the recommendation on that.
             reason = reasons.get(index)
@@ -2293,7 +2295,7 @@ recommendVodBtn.addEventListener('click', async () => {
   recommendVodResults.style.display = 'none';
   recommendVodResults.innerHTML = '';
   recommendVodStatus.style.display = 'block';
-  recommendVodStatus.textContent = "Checking your tracked streamers' recent VODs...";
+  recommendVodStatus.textContent = "Checking your tracked streamers' recent VODs -- this can take up to a minute since it double-checks each one is actually downloadable...";
   try {
     const resp = await fetch('/api/recommend-vod', { method: 'POST' });
     const data = await resp.json();
