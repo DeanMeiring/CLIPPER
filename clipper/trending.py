@@ -10,6 +10,7 @@ returns no entries for it.
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional
@@ -27,6 +28,22 @@ class CreatorEntry:
     viewers: Optional[int] = None  # only set for the global trending-live row
     view_count: Optional[int] = None  # total views on a VOD, for ranking recommendation candidates
     duration: Optional[str] = None  # Twitch's own format, e.g. "3h20m10s"
+
+
+_TWITCH_DURATION_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def parse_twitch_duration(duration: str) -> Optional[float]:
+    """Twitch's own VOD duration format (e.g. "3h20m10s") to seconds, or
+    None if it doesn't parse -- used to probe a recommended VOD's
+    accessibility, which needs a real duration to pick a probe point."""
+    if not duration:
+        return None
+    m = _TWITCH_DURATION_RE.match(duration.strip())
+    if not m or not any(m.groups()):
+        return None
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return float(h * 3600 + mi * 60 + s)
 
 
 _twitch_token: Optional[str] = None
@@ -112,7 +129,7 @@ def get_twitch_vods(logins: List[str]) -> List[CreatorEntry]:
 
 
 def get_recommendation_candidates(
-    logins: List[str], per_streamer: int = 4, max_age_days: float = 4.0,
+    logins: List[str], per_streamer: int = 4, max_age_days: float = 6.0,
 ) -> List[CreatorEntry]:
     """Several recent VODs per configured login (not just the latest one),
     each carrying view_count and duration -- the raw pool a recommendation
