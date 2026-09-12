@@ -1103,7 +1103,7 @@ def cancel_job(job_id: str, save: bool = False) -> dict:
 
 
 @protected.get("/api/jobs/{job_id}/clips/{filename}")
-def get_clip(job_id: str, filename: str) -> FileResponse:
+def get_clip(job_id: str, filename: str, download: bool = False) -> FileResponse:
     # Reject any filename that isn't a plain name, so a crafted path can't
     # walk out of the job directory and serve an arbitrary file off disk.
     if Path(filename).name != filename or filename.startswith("."):
@@ -1115,7 +1115,15 @@ def get_clip(job_id: str, filename: str) -> FileResponse:
     # labelling that video/mp4 makes a browser download it instead of just
     # showing it -- which defeats the point of having a still at all.
     media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "video/mp4"
-    return FileResponse(path, media_type=media_type, filename=filename)
+    # Starlette only sends a Content-Disposition header at all when
+    # `filename` is passed, and it defaults that header to "attachment" --
+    # which some browsers take as a sign to refuse playing a <video src>
+    # pointed at it and force a save dialog instead. So plain playback (the
+    # in-page preview) omits `filename` entirely; only the explicit
+    # "Download" button asks for ?download=1 and gets the Save-As behavior.
+    if download:
+        return FileResponse(path, media_type=media_type, filename=filename)
+    return FileResponse(path, media_type=media_type)
 
 
 class YouTubeUploadRequest(BaseModel):
@@ -2099,6 +2107,7 @@ INDEX_HTML = """<!doctype html>
   <div class="modal">
     <p>Upload to YouTube</p>
     <p class="hint" id="youtube-upload-title-hint"></p>
+    <video id="youtube-upload-preview" controls preload="metadata" style="width:100%;border-radius:8px;background:var(--track);display:block"></video>
     <label class="privacy-option">
       <input type="radio" name="youtube-privacy" value="unlisted" checked>
       <span>
@@ -2121,14 +2130,17 @@ INDEX_HTML = """<!doctype html>
       </span>
     </label>
     <label style="margin-top:16px">Trim before uploading (optional)</label>
+    <p class="hint">Play the video above, pause where you want to cut, then use the buttons below -- or type seconds directly.</p>
     <div class="row">
       <div>
         <label style="margin-top:6px;font-size:0.7rem">Off the start (s)</label>
         <input id="youtube-upload-trim-start" type="number" value="0" min="0" step="0.5">
+        <button id="youtube-upload-set-start-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
       </div>
       <div>
         <label style="margin-top:6px;font-size:0.7rem">Off the end (s)</label>
         <input id="youtube-upload-trim-end" type="number" value="0" min="0" step="0.5">
+        <button id="youtube-upload-set-end-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
       </div>
     </div>
     <p class="hint" id="youtube-upload-trim-hint"></p>
@@ -2774,22 +2786,64 @@ facecamGoBtn.addEventListener('click', async () => {
 
 const youtubeUploadModal = document.getElementById('youtube-upload-modal-overlay');
 const youtubeUploadTitleHint = document.getElementById('youtube-upload-title-hint');
+const youtubeUploadPreview = document.getElementById('youtube-upload-preview');
 const youtubeUploadGoBtn = document.getElementById('youtube-upload-go-btn');
 const youtubeUploadTrimStart = document.getElementById('youtube-upload-trim-start');
 const youtubeUploadTrimEnd = document.getElementById('youtube-upload-trim-end');
 const youtubeUploadTrimHint = document.getElementById('youtube-upload-trim-hint');
+const youtubeUploadSetStartBtn = document.getElementById('youtube-upload-set-start-btn');
+const youtubeUploadSetEndBtn = document.getElementById('youtube-upload-set-end-btn');
 let youtubeUploadJobId = null;
 let youtubeUploadFilename = null;
+// Seeded from the clip's recorded duration so the hint has a number to
+// show immediately, then overwritten by the video element's own
+// loadedmetadata duration once the preview loads -- that's the ground
+// truth for what ffmpeg will actually trim against, not whatever got
+// rounded into the job's metadata at render time.
 let youtubeUploadDuration = 0;
+
+function refreshYoutubeUploadTrimHint() {
+  const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(youtubeUploadTrimEnd.value) || 0);
+  const resultSeconds = youtubeUploadDuration - trimStart - trimEnd;
+  if (resultSeconds < 1) {
+    youtubeUploadTrimHint.textContent =
+      `Clip is ${youtubeUploadDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.`;
+    youtubeUploadGoBtn.disabled = true;
+  } else {
+    youtubeUploadTrimHint.textContent =
+      `Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploading ${resultSeconds.toFixed(1)}s after this trim.`;
+    youtubeUploadGoBtn.disabled = false;
+  }
+}
+youtubeUploadTrimStart.addEventListener('input', refreshYoutubeUploadTrimHint);
+youtubeUploadTrimEnd.addEventListener('input', refreshYoutubeUploadTrimHint);
+
+youtubeUploadSetStartBtn.addEventListener('click', () => {
+  youtubeUploadTrimStart.value = youtubeUploadPreview.currentTime.toFixed(1);
+  refreshYoutubeUploadTrimHint();
+});
+youtubeUploadSetEndBtn.addEventListener('click', () => {
+  const remaining = Math.max(0, youtubeUploadDuration - youtubeUploadPreview.currentTime);
+  youtubeUploadTrimEnd.value = remaining.toFixed(1);
+  refreshYoutubeUploadTrimHint();
+});
 
 function openYoutubeUploadModal(jobId, clip) {
   youtubeUploadJobId = jobId;
   youtubeUploadFilename = clip.file;
   youtubeUploadDuration = clip.duration || 0;
   youtubeUploadTitleHint.textContent = `"${clip.upload_title || clip.title}"`;
-  youtubeUploadTrimHint.textContent = `Clip is ${youtubeUploadDuration}s long.`;
+  youtubeUploadPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+  youtubeUploadPreview.onloadedmetadata = () => {
+    if (youtubeUploadPreview.duration && isFinite(youtubeUploadPreview.duration)) {
+      youtubeUploadDuration = youtubeUploadPreview.duration;
+    }
+    refreshYoutubeUploadTrimHint();
+  };
   youtubeUploadTrimStart.value = '0';
   youtubeUploadTrimEnd.value = '0';
+  refreshYoutubeUploadTrimHint();
   document.querySelector('input[name="youtube-privacy"][value="unlisted"]').checked = true;
   youtubeUploadModal.classList.add('open');
 }
@@ -2798,6 +2852,9 @@ document.getElementById('youtube-upload-cancel-btn').addEventListener('click', (
   youtubeUploadModal.classList.remove('open');
   youtubeUploadJobId = null;
   youtubeUploadFilename = null;
+  youtubeUploadPreview.pause();
+  youtubeUploadPreview.removeAttribute('src');
+  youtubeUploadPreview.load();
 });
 
 youtubeUploadGoBtn.addEventListener('click', async () => {
@@ -2828,6 +2885,9 @@ youtubeUploadGoBtn.addEventListener('click', async () => {
     youtubeUploadModal.classList.remove('open');
     youtubeUploadJobId = null;
     youtubeUploadFilename = null;
+    youtubeUploadPreview.pause();
+    youtubeUploadPreview.removeAttribute('src');
+    youtubeUploadPreview.load();
     alert(`Uploaded -- ${data.url}`);
   } catch (e) {
     alert('Upload failed.');
@@ -2908,6 +2968,15 @@ async function poll(jobId) {
       div.appendChild(em);
     }
 
+    // Watchable right here -- downloading is now an extra, optional step
+    // (the button below), not the only way to see what got rendered.
+    const preview = document.createElement('video');
+    preview.controls = true;
+    preview.preload = 'metadata';
+    preview.style.cssText = 'width:100%;max-width:360px;border-radius:8px;background:var(--track);display:block;margin:8px 0';
+    preview.src = `/api/jobs/${jobId}/clips/${c.file}`;
+    div.appendChild(preview);
+
     const titleRow = document.createElement('div');
     titleRow.className = 'title-row';
     const titleInput = document.createElement('input');
@@ -2948,7 +3017,7 @@ async function poll(jobId) {
     }
 
     const link = document.createElement('a');
-    link.href = `/api/jobs/${jobId}/clips/${c.file}`;
+    link.href = `/api/jobs/${jobId}/clips/${c.file}?download=1`;
     link.setAttribute('download', '');
     link.textContent = `Download ${c.file}`;
     div.appendChild(link);
