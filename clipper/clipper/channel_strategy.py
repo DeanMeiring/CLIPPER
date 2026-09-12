@@ -334,6 +334,97 @@ Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block 
 thought -- if you're running long, cut detail, not sentences."""
 
 
+def _build_recommend_prompt(candidates: list, notes: Optional[str]) -> str:
+    lines = []
+    for i, c in enumerate(candidates):
+        age_days = max(0.0, (time.time() - c["_published_ts"]) / 86400) if c.get("_published_ts") else None
+        age = f"{age_days:.1f}d old" if age_days is not None else "age unknown"
+        views = f'{c.get("view_count")} views' if c.get("view_count") is not None else "views unknown"
+        duration = c.get("duration") or "duration unknown"
+        lines.append(f'[{i}] {c.get("name", "unknown streamer")} -- "{c.get("title", "")}" -- {views}, {duration}, {age}')
+    candidates_block = "\n".join(lines)
+
+    notes_block = f"\n\nWhat's worked on this creator's own channel so far (their saved AI overview):\n{notes}\n" if notes else ""
+
+    return f"""You're helping a YouTube Shorts clipper decide which Twitch VOD, out of a
+short list they're already tracking, is worth downloading and clipping
+today. Each candidate is a VOD from a streamer they clip regularly --
+this is not a discovery task, just triage of a small list.
+
+Candidates:
+{candidates_block}
+{notes_block}
+Pick the ONE candidate most worth clipping right now. View count is the
+strongest signal you have (a VOD already earning more views than that
+streamer's other recent ones had a moment worth watching), but also weigh
+duration (a 6+ hour VOD has more chances at a highlight than a 45-minute
+one) and, if the saved overview above names a type of moment or streamer
+pattern that's worked before, factor that in too. Don't just always pick
+the single highest view count without reasoning -- say why.
+
+Answer in exactly this format, nothing else:
+PICK: <index number>
+WHY: <one or two sentences, grounded in this candidate's actual numbers above -- no generic filler>
+RUNNER_UP: <index number, or NONE if there's only one reasonable option>
+RUNNER_UP_WHY: <one sentence, or omit this line if RUNNER_UP is NONE>"""
+
+
+def recommend_vod(
+    candidates: list,
+    notes: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model: str = DEFAULT_MODEL,
+) -> dict:
+    """Ask Claude to pick which of a short list of tracked streamers' recent
+    VODs is most worth downloading and clipping today. `candidates` is a
+    list of dicts (from trending.CreatorEntry, each needs a "_published_ts"
+    float added by the caller for age calculation). Returns
+    {"pick_index", "why", "runner_up_index", "runner_up_why"} -- indices
+    are None if Claude's response couldn't be parsed or it named an
+    out-of-range index, so the caller can fall back to the highest view
+    count instead of trusting a bad parse."""
+    import re
+
+    import anthropic
+
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    if not candidates:
+        raise ValueError("no candidates to recommend from")
+
+    prompt = _build_recommend_prompt(candidates, notes)
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
+
+    def _index(pattern: str) -> Optional[int]:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            idx = int(m.group(1))
+        except ValueError:
+            return None
+        return idx if 0 <= idx < len(candidates) else None
+
+    def _text_after(label: str) -> Optional[str]:
+        m = re.search(rf"{label}:\s*(.+)", text, re.IGNORECASE)
+        return m.group(1).strip() if m else None
+
+    return {
+        "pick_index": _index(r"PICK:\s*(\d+)"),
+        "why": _text_after("WHY"),
+        "runner_up_index": _index(r"RUNNER_UP:\s*(\d+)"),
+        "runner_up_why": _text_after("RUNNER_UP_WHY"),
+        "raw": text,
+    }
+
+
 def get_ai_overview(
     snapshot: dict,
     analytics: Optional[dict] = None,
