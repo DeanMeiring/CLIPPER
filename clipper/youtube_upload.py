@@ -11,6 +11,7 @@ or on a schedule.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
@@ -29,6 +30,30 @@ class UploadError(RuntimeError):
     callers shouldn't need to inspect this further, just display str(e)."""
 
 
+_YOUTUBE_DESCRIPTION_MAX = 5000
+
+
+def _with_shorts_tag(description: str, max_length: int = _YOUTUBE_DESCRIPTION_MAX) -> str:
+    """A vertical, <=3-minute video meets the technical bar for a Short,
+    but YouTube's classifier still won't reliably surface an API-uploaded
+    video in Shorts unless "#Shorts" actually appears in the title or
+    description -- confirmed by Google's own upload guidance, and the
+    reason a correctly-shaped clip uploaded through this button can still
+    land as a plain regular video. Appended here rather than left to
+    whatever Claude happened to write into the generated description.
+
+    Truncates the ORIGINAL description first, leaving room for the tag, so
+    a long description can never push the tag itself past max_length and
+    lose the one thing this function exists to guarantee."""
+    if re.search(r"#shorts\b", description, re.IGNORECASE):
+        return description[:max_length]
+    tag = "#Shorts"
+    if not description:
+        return tag
+    suffix = f"\n\n{tag}"
+    return description[: max_length - len(suffix)] + suffix
+
+
 def upload_video(
     access_token: str,
     video_path: Path,
@@ -45,6 +70,7 @@ def upload_video(
     if not video_path.exists():
         raise UploadError(f"{video_path.name} no longer exists on the server")
 
+    description = _with_shorts_tag(description)
     size = video_path.stat().st_size
 
     try:
@@ -62,7 +88,7 @@ def upload_video(
                 # generated title/description that happens to run long
                 # would otherwise fail the whole upload on a 400 instead
                 # of just being trimmed to fit.
-                "snippet": {"title": title[:100], "description": description[:5000], "categoryId": _GAMING_CATEGORY_ID},
+                "snippet": {"title": title[:100], "description": description, "categoryId": _GAMING_CATEGORY_ID},
                 "status": {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False},
             },
             timeout=30,
