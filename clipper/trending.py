@@ -25,6 +25,8 @@ class CreatorEntry:
     published_at: Optional[str]  # ISO timestamp, if known
     thumbnail: Optional[str]
     viewers: Optional[int] = None  # only set for the global trending-live row
+    view_count: Optional[int] = None  # total views on a VOD, for ranking recommendation candidates
+    duration: Optional[str] = None  # Twitch's own format, e.g. "3h20m10s"
 
 
 _twitch_token: Optional[str] = None
@@ -104,6 +106,76 @@ def get_twitch_vods(logins: List[str]) -> List[CreatorEntry]:
             ))
         except Exception as e:
             print(f"[trending] Twitch VOD lookup for {login!r} failed: {e}", flush=True)
+            continue
+
+    return entries
+
+
+def get_recommendation_candidates(
+    logins: List[str], per_streamer: int = 4, max_age_days: float = 4.0,
+) -> List[CreatorEntry]:
+    """Several recent VODs per configured login (not just the latest one),
+    each carrying view_count and duration -- the raw pool a recommendation
+    picks from. Only VODs within max_age_days are kept: a recommendation
+    is about what to clip *today*, and a month-old VOD scoring high on
+    views has already been picked over by every other clipper, this
+    creator included, if it was worth clipping."""
+    logins = [l.strip().lower() for l in logins if l.strip()]
+    if not logins:
+        return []
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    token = _get_twitch_token()
+    if not client_id or not token:
+        return []
+
+    import requests
+    from datetime import datetime, timezone
+
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    cutoff = time.time() - max_age_days * 86400
+    entries: List[CreatorEntry] = []
+    try:
+        users_resp = requests.get(
+            "https://api.twitch.tv/helix/users", params={"login": logins}, headers=headers, timeout=15,
+        )
+        users_resp.raise_for_status()
+        users = {u["login"]: u for u in users_resp.json().get("data") or []}
+    except Exception as e:
+        print(f"[trending] Twitch user lookup failed: {e}", flush=True)
+        return []
+
+    for login in logins:
+        user = users.get(login)
+        if not user:
+            print(f"[trending] Twitch login {login!r} not found -- skipping", flush=True)
+            continue
+        try:
+            videos_resp = requests.get(
+                "https://api.twitch.tv/helix/videos",
+                params={"user_id": user["id"], "type": "archive", "first": per_streamer},
+                headers=headers, timeout=15,
+            )
+            videos_resp.raise_for_status()
+            videos = videos_resp.json().get("data") or []
+            for v in videos:
+                published_at = v.get("published_at") or v.get("created_at")
+                if published_at:
+                    try:
+                        ts = datetime.fromisoformat(published_at.replace("Z", "+00:00")).timestamp()
+                        if ts < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                entries.append(CreatorEntry(
+                    platform="twitch", name=user.get("display_name", login),
+                    url=v["url"], title=v.get("title", ""), live=False,
+                    published_at=published_at,
+                    thumbnail=(v.get("thumbnail_url") or "").replace("%{width}", "320").replace("%{height}", "180"),
+                    view_count=v.get("view_count"),
+                    duration=v.get("duration"),
+                ))
+        except Exception as e:
+            print(f"[trending] Twitch recommendation-candidate lookup for {login!r} failed: {e}", flush=True)
             continue
 
     return entries
