@@ -1030,6 +1030,51 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
     return {"ok": True}
 
 
+@protected.post("/api/jobs/{job_id}/clips/{filename}/ensure-source-frame")
+def ensure_source_frame(job_id: str, filename: str) -> dict:
+    """Return the clip's source-frame filename for the facecam picker to
+    draw on, generating it on the spot if it's missing -- a clip rendered
+    before source frames were saved for every clip (not just uncertain
+    ones) has no source_frame in its stored metadata, but its downloaded
+    source video is usually still sitting right there, so there's no need
+    to make "Adjust facecam position" a dead end for it."""
+    if Path(filename).name != filename:
+        raise HTTPException(400, "bad filename")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        clips = job.get("clips") or []
+        clip = next((c for c in clips if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        existing = clip.get("source_frame")
+
+    out_dir = BASE_DIR / job_id
+    if existing and (out_dir / existing).is_file():
+        return {"source_frame": existing}
+
+    source_video = clip.get("source_video")
+    if not source_video:
+        raise HTTPException(409, "this clip predates manual facecam fixes -- try Generate more clips instead")
+    video_path = out_dir / "_source" / source_video
+    if not video_path.is_file():
+        raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+
+    source_frame_path = out_dir / f"{Path(filename).stem}_source_frame.jpg"
+    if not _save_source_still(video_path, clip.get("start", 0.0), clip.get("end", 0.0), source_frame_path):
+        raise HTTPException(500, "could not read a frame from the source video")
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            for c in job.get("clips") or []:
+                if c.get("file") == filename:
+                    c["source_frame"] = source_frame_path.name
+    _persist(job_id)
+    return {"source_frame": source_frame_path.name}
+
+
 @protected.post("/api/jobs/{job_id}/clips/{filename}/facecam-boxes")
 def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> dict:
     """Re-render one clip using facecam box(es) a human drew on its source
@@ -1060,16 +1105,14 @@ def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> d
             raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
         filenames = [filename]
         if req.apply_to_all_missing:
-            # Every other clip with no trusted automatic facecam and no
-            # manual placement of its own yet. Every clip now carries a
-            # source_frame (any facecam can be manually overridden, not
-            # just ones the pipeline flagged), so that alone can no longer
-            # be the filter here -- it would stamp this clip's box position
-            # onto clips that already have a perfectly good, differently
-            # positioned facecam.
+            # Every other clip with a downloaded source, no trusted
+            # automatic facecam, and no manual placement of its own yet.
+            # Doesn't require a saved source_frame -- the re-render itself
+            # only needs source_video, a preview still is only for showing
+            # this clip's own frame in the picker.
             filenames += [
                 c["file"] for c in (job.get("clips") or [])
-                if c.get("file") != filename and c.get("source_frame") and c.get("source_video")
+                if c.get("file") != filename and c.get("source_video")
                 and not c.get("facecam_trusted") and not c.get("facecam_manual")
             ]
         job["pending_manual_facecam"] = {
@@ -2621,15 +2664,16 @@ let lastFacecamSourceBoxes = null;    // the last placement submitted -- pre-fil
 const facecamPrompted = new Set();    // `${jobId}/${file}` already prompted for on this page load
 
 function facecamOthersMissing(job, clip) {
-  // Every clip now carries a source_frame (so any facecam can be manually
-  // overridden), but the batch "apply to others" option must still only
-  // ever target clips with no trusted placement yet -- otherwise it would
-  // offer to stamp this clip's box position onto clips that already have a
+  // Every clip with a downloaded source is eligible for the batch "apply
+  // to others" option (a saved source_frame isn't required -- one gets
+  // generated on demand if needed), but it must still only ever target
+  // clips with no trusted placement yet -- otherwise it would offer to
+  // stamp this clip's box position onto clips that already have a
   // perfectly good, differently-positioned facecam.
-  return (job.clips || []).filter(c => c.file !== clip.file && c.source_frame && !c.facecam_trusted && !c.facecam_manual).length;
+  return (job.clips || []).filter(c => c.file !== clip.file && c.source_video && !c.facecam_trusted && !c.facecam_manual).length;
 }
 
-function openFacecamModal(jobId, clip, othersMissing) {
+async function openFacecamModal(jobId, clip, othersMissing) {
   facecamJobId = jobId;
   facecamFilename = clip.file;
   facecamBoxes = [];
@@ -2642,6 +2686,9 @@ function openFacecamModal(jobId, clip, othersMissing) {
   } else if (clip.facecam_manual) {
     facecamModalTitle.textContent = `Adjust the facecam position -- "${clip.title}"`;
     why = 'This clip uses the boxes you placed earlier.';
+  } else if (clip.facecam_trusted) {
+    facecamModalTitle.textContent = `Adjust the facecam position -- "${clip.title}"`;
+    why = 'The automatic placement passed its check, but override it if it actually looks wrong.';
   } else {
     facecamModalTitle.textContent = `Add a facecam -- "${clip.title}"`;
     why = 'No facecam was detected in this clip.';
@@ -2652,7 +2699,27 @@ function openFacecamModal(jobId, clip, othersMissing) {
   facecamApplyAll.checked = othersMissing > 0;
   facecamModal.classList.add('open');
   renderFacecamBoxes();
-  facecamImg.src = `/api/jobs/${jobId}/clips/${clip.source_frame}`;
+  let sourceFrame = clip.source_frame;
+  if (!sourceFrame) {
+    // An older clip rendered before every clip saved its own source frame
+    // -- generate one now instead of leaving the picker with nothing to
+    // draw on, as long as its downloaded source is still on disk.
+    facecamModalHint.textContent = 'Loading the source frame...';
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/clips/${clip.file}/ensure-source-frame`, { method: 'POST' });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        facecamModalHint.textContent = data.detail || "Couldn't load a source frame for this clip.";
+        return;
+      }
+      sourceFrame = data.source_frame;
+      facecamModalHint.textContent = `${why} Click and drag on the frame to draw a box tightly around each facecam window (up to ${FACECAM_MAX_BOXES}), then re-render.`;
+    } catch (e) {
+      facecamModalHint.textContent = "Couldn't load a source frame for this clip -- try again.";
+      return;
+    }
+  }
+  facecamImg.src = `/api/jobs/${jobId}/clips/${sourceFrame}`;
   // A cached frame may already be complete before the load event queues
   // -- decode() resolves either way; if it rejects (the request changed
   // under it), the load listener below covers it.
@@ -3044,7 +3111,7 @@ async function poll(jobId) {
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
-      if (c.source_frame) {
+      if (c.source_frame || c.source_video) {
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
         fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
