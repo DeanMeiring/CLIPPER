@@ -29,7 +29,7 @@ _MIN_AGE_DAYS_TO_JUDGE = 2.0
 # Shorts-vs-Shorts, so a channel's occasional long-form upload is excluded
 # rather than silently diluting the "what's working" picture with a video
 # in a different format nobody here is posting.
-_MAX_SHORT_SECONDS = 180
+MAX_SHORT_SECONDS = 180
 
 _ISO8601_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
 
@@ -100,7 +100,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
             # average as actual Shorts despite competing in a completely
             # different format. A duration that couldn't be parsed is kept
             # rather than guessed at either way.
-            if duration_seconds is not None and duration_seconds > _MAX_SHORT_SECONDS:
+            if duration_seconds is not None and duration_seconds > MAX_SHORT_SECONDS:
                 long_form_skipped += 1
                 continue
             published_at = v["snippet"]["publishedAt"]
