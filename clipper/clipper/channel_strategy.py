@@ -282,6 +282,29 @@ that isn't backed by this data.
 {focus_line}
 {data_block}{competitor_section}{content_section}
 
+SHORTS RETENTION GROUND TRUTH (use these as the actual bar when judging a
+retention number above, not vague intuition -- these are the real signals
+that separate a Short that holds its audience from one that doesn't):
+- The hook is won or lost in the first 1-3 seconds -- roughly half of all
+  drop-off happens there. The open needs to already BE the moment (or
+  promise one immediately), never a slow lead-in or setup before anything
+  happens.
+- A visual change (a cut, zoom, camera angle, or text-overlay swap) roughly
+  every 1.5-4 seconds keeps attention; long static stretches with nothing
+  changing on screen are where retention bleeds out mid-clip.
+- Length vs. retention is a real tradeoff, not just "shorter is better":
+  15-30s clips typically hold 70-90%+ retention on a strong moment; 30-60s
+  needs tighter pacing to hold up; past ~90s retention drops off hard
+  unless the moment is genuinely exceptional. A weak retention number on a
+  clip pushing toward this app's 180s cap is itself a signal the clip may
+  simply be too long for its own content, not just weakly edited.
+- Burned-in captions measurably help retention (many viewers watch muted) --
+  worth flagging as a fix if a low-retention clip doesn't already have them.
+- As a rough retention bar for THIS content type: under ~40% average
+  view percentage is a real content problem worth digging into, 40-60% is
+  middling, 60%+ is strong and shouldn't be reframed as a problem just
+  because it's not higher.
+
 A common frustration this creator has: a clip they personally thought was
 weak takes off, while one they were proud of gets almost nothing. There
 are THREE different problems that can all just look like "few views" --
@@ -301,8 +324,11 @@ check them in this order:
   insight this creator can get, since it means fix the title/packaging,
   not the clip.
 - CONTENT problem: views came in but retention is weak (people bailed
-  early) -- the hook, pacing, or payoff itself isn't landing once someone's
-  actually watching.
+  early) -- diagnose WHICH lever from the ground truth above is most
+  likely the cause (a slow/no hook in the first few seconds, too little
+  visual change to hold attention, the clip simply running long for what
+  the moment can sustain, or missing captions) rather than a generic "the
+  hook, pacing, or payoff isn't landing."
 
 Do not give generic, boilerplate advice ("post more consistently",
 "engage with your audience", "use eye-catching thumbnails") unless you can
@@ -327,8 +353,10 @@ can't tell without retention data).
 CONTENT THAT WORKS: what type of clip and title/hook should they make
 more of, and what should they stop clipping?
 
-FORMAT NOTES: one concrete format or editing change from the
-retention/traffic signals (or general best practice if none given).
+FORMAT NOTES: one concrete format or editing change grounded in the
+retention/traffic signals and the ground truth above (e.g. tighten the
+hook, cut clip length down, add captions, increase cut frequency) --
+whichever one the actual numbers point to, not a generic tip.
 {competitor_patterns_section}{content_patterns_section}
 Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block else 0)} words total, and every section must be a complete
 thought -- if you're running long, cut detail, not sentences."""
