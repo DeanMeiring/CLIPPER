@@ -146,7 +146,7 @@ def build_recap_video(clip_paths: list, out_path: Path) -> None:
         raise RuntimeError(f"ffmpeg failed building the recap:\n{result.stderr[-2000:]}")
 
 
-def _display_name(entry: dict) -> str:
+def display_name(entry: dict) -> str:
     # Best-effort only -- the log stores a streamer's Twitch LOGIN (always
     # lowercase), not their real display-name casing, so a camelCase name
     # like "TheBurntPeanut" comes back as "Theburntpeanut" here. Fixing
@@ -161,7 +161,7 @@ def build_recap_metadata(lineup: list, week_label: str) -> dict:
     turns a description starting "0:00 ..." into clickable chapters) --
     no Claude call needed, this is just arithmetic over durations already
     known from each clip's own upload record."""
-    names = [_display_name(u) for u in lineup]
+    names = [display_name(u) for u in lineup]
     seen: set = set()
     ordered_names = [n for n in names if not (n in seen or seen.add(n))]
 
@@ -174,7 +174,7 @@ def build_recap_metadata(lineup: list, week_label: str) -> dict:
     t = 0.0
     for u in lineup:
         minutes, seconds = divmod(int(t), 60)
-        lines.append(f"{minutes}:{seconds:02d} {_display_name(u)} -- {u.get('title', '')}")
+        lines.append(f"{minutes}:{seconds:02d} {display_name(u)} -- {u.get('title', '')}")
         t += float(u.get("duration") or 0.0)
     description = "\n".join(lines)[:5000]
     return {"title": title, "description": description}

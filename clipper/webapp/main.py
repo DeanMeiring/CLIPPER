@@ -1344,6 +1344,22 @@ def _generate_weekly_recap_job() -> dict:
                        "(need at least 2). Upload a few Shorts this week and try again.",
         }
 
+    # The facecam check ran once already, when each clip was originally
+    # rendered as its own Short -- concatenating already-rendered files
+    # for the recap doesn't re-run it. Looked up live (from the source
+    # job's current clip metadata) rather than off the upload log, so a
+    # placement fixed by hand since the clip was posted is reflected
+    # correctly instead of repeating a now-stale warning.
+    facecam_warnings = []
+    with jobs_lock:
+        for u, _ in resolved:
+            source_job = jobs.get(u["job_id"])
+            source_clip = next(
+                (c for c in (source_job.get("clips") or []) if c.get("file") == u["filename"]), None,
+            ) if source_job else None
+            if source_clip and source_clip.get("facecam_uncertain"):
+                facecam_warnings.append(f"{weekly_recap.display_name(u)} -- \"{u.get('title', '')}\"")
+
     job_id = uuid.uuid4().hex[:12]
     out_dir = BASE_DIR / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1361,6 +1377,14 @@ def _generate_weekly_recap_job() -> dict:
     week_label = f"{now - datetime.timedelta(days=7):%b %d}-{now:%b %d}"
     meta = weekly_recap.build_recap_metadata(lineup_used, week_label)
 
+    message = f"Weekly recap ready -- {len(lineup_used)} clip(s) from {streamer_count} streamer(s)."
+    if facecam_warnings:
+        message += (
+            f" ⚠ {len(facecam_warnings)} clip(s) in this recap had an uncertain facecam placement "
+            f"when originally rendered (fix on the original clip, then regenerate the recap, if it matters "
+            f"for this compilation): " + "; ".join(facecam_warnings)
+        )
+
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
@@ -1368,10 +1392,11 @@ def _generate_weekly_recap_job() -> dict:
             "source_title": meta["title"],
             "created_at": time.time(),
             "state": "done",
-            "message": f"Weekly recap ready -- {len(lineup_used)} clip(s) from {streamer_count} streamer(s).",
+            "message": message,
             "progress": 1.0,
             "estimate_minutes": None,
             "pipeline": "weekly_recap",
+            "facecam_warnings": facecam_warnings,
             "clips": [{
                 "file": out_path.name,
                 "duration": total_duration,
@@ -1382,6 +1407,11 @@ def _generate_weekly_recap_job() -> dict:
                 "reason": None,
                 "window_index": None,
                 "source_video": None,
+                # Long-form on purpose -- a recap is a compilation of
+                # several already-Shorts-classified clips, not itself
+                # meant to be classified as one (see is_short=False on
+                # the upload endpoint below), so nothing here needs to
+                # fit the 60s Shorts cap.
                 "facecam_uncertain": False,
                 "facecam_trusted": False,
                 "source_frame": None,
@@ -1392,7 +1422,7 @@ def _generate_weekly_recap_job() -> dict:
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
-    return {"ok": True, "job_id": job_id}
+    return {"ok": True, "job_id": job_id, "facecam_warnings": facecam_warnings}
 
 
 @protected.post("/api/weekly-recap/generate")
@@ -2281,6 +2311,7 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
+<button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" hidden>📺 Go to this week's recap</button>
 <div class="hint">Concatenates the best-performing already-uploaded Short from each tracked
 streamer this week into one long-form draft -- top 2 each with 5 or fewer streamers
 posted this week, top 1 each above that. A fresh one also builds automatically every
@@ -3417,7 +3448,32 @@ document.getElementById('analytics-link-btn').addEventListener('click', () => {
 });
 
 const weeklyRecapBtn = document.getElementById('weekly-recap-btn');
+const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
 const weeklyRecapStatus = document.getElementById('weekly-recap-status');
+let latestWeeklyRecapJobId = null;
+
+// Finds the most recent weekly-recap draft (if any) and shows/updates the
+// "Go to this week's recap" button for it -- so it's reachable any time
+// the page is opened, not just right after clicking "Generate", including
+// the recap the Monday scheduler builds on its own with nobody watching.
+async function refreshWeeklyRecapViewBtn() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    const latest = jobs.find(j => j.pipeline === 'weekly_recap');
+    latestWeeklyRecapJobId = latest ? latest.id : null;
+    weeklyRecapViewBtn.hidden = !latest;
+  } catch (e) {
+    // leave the button as-is -- a failed check here shouldn't hide an
+    // already-known recap or spam an error for a background refresh
+  }
+}
+weeklyRecapViewBtn.addEventListener('click', () => {
+  if (latestWeeklyRecapJobId) attachToJob(latestWeeklyRecapJobId);
+});
+refreshWeeklyRecapViewBtn();
+
 weeklyRecapBtn.addEventListener('click', async () => {
   weeklyRecapBtn.disabled = true;
   weeklyRecapBtn.textContent = 'Building recap...';
@@ -3428,8 +3484,11 @@ weeklyRecapBtn.addEventListener('click', async () => {
     if (!resp.ok) {
       weeklyRecapStatus.textContent = data.detail || 'Could not build a recap.';
     } else {
-      weeklyRecapStatus.textContent = '✅ Recap draft ready -- opening it below.';
+      weeklyRecapStatus.textContent = (data.facecam_warnings || []).length
+        ? `✅ Recap draft ready -- opening it below. ⚠ ${data.facecam_warnings.length} clip(s) in it had an uncertain facecam placement when originally rendered.`
+        : '✅ Recap draft ready -- opening it below.';
       await loadJobsList();
+      await refreshWeeklyRecapViewBtn();
       attachToJob(data.job_id);
     }
   } catch (e) {
