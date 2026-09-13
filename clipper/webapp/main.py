@@ -5,6 +5,7 @@ at once.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import queue
@@ -49,6 +50,7 @@ from clipper import competitor_content
 from clipper import youtube_analytics
 from clipper import youtube_oauth
 from clipper import youtube_upload
+from clipper import weekly_recap
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,6 +63,8 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
+_recap_uploads_path = BASE_DIR / "_recap_uploads.json"
+_recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -383,6 +387,14 @@ def _run_job(job_id: str) -> None:
     if not render_items:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
+
+    # Best-effort attribution for the weekly recap (see weekly_recap.py) --
+    # probe_video() already resolved this for the long-VOD branch (it has
+    # to, to decide the pipeline), and for the short branch too whenever
+    # the initial probe above succeeded. None just means the recap won't
+    # be able to attribute this job's clips to a streamer later, not a
+    # failure of the render itself.
+    _set(job_id, source_broadcaster_login=(info.broadcaster_login if info else None))
 
     clips_meta = _render_all(job_id, out_dir, render_items, render_base, [])
     _progress(job_id, 1.0)
@@ -1270,12 +1282,14 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     else:
         upload_path = path
 
+    is_recap = bool(clip.get("is_recap"))
     try:
         video_id = youtube_upload.upload_video(
             access_token, upload_path,
             title=clip.get("upload_title") or clip.get("title") or filename,
             description=clip.get("description") or "",
             privacy_status=req.privacy_status,
+            is_short=not is_recap,
         )
     except (youtube_upload.UploadError, ValueError) as e:
         raise HTTPException(502, str(e)) from e
@@ -1283,7 +1297,156 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         if trimmed_path is not None:
             trimmed_path.unlink(missing_ok=True)
 
+    # Feeds the weekly cross-streamer recap (weekly_recap.py) -- it can
+    # only rank clips that have actually been posted, so every real
+    # upload through this button (a recap itself excluded -- it has no
+    # single streamer to attribute) gets logged here.
+    if not is_recap:
+        weekly_recap.record_upload(_recap_uploads_path, {
+            "video_id": video_id,
+            "job_id": job_id,
+            "filename": filename,
+            "streamer_login": job.get("source_broadcaster_login"),
+            "title": clip.get("upload_title") or clip.get("title") or filename,
+            "duration": clip.get("duration"),
+            "uploaded_at": time.time(),
+        })
+
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+
+
+def _generate_weekly_recap_job() -> dict:
+    """Build this week's cross-streamer recap as a new draft job -- same
+    review/trim/upload flow as any other clip in the UI, just flagged
+    is_recap so the upload button skips the Shorts tag and 60s framing.
+    Returns {"ok": False, "message": ...} rather than raising when there
+    isn't enough to work with yet (nobody's posted a Short this week, or
+    fewer than 2 of this week's uploads are still on disk) -- that's the
+    normal case most weeks, not a bug worth a 500."""
+    window = weekly_recap.uploads_in_window(_recap_uploads_path)
+    video_ids = [u["video_id"] for u in window if u.get("video_id")]
+    api_key = os.environ.get("YOUTUBE_API_KEY")
+    views = weekly_recap.get_video_view_counts(video_ids, api_key) if api_key else {}
+    lineup = weekly_recap.pick_weekly_lineup(window, views)
+
+    resolved = []
+    for u in lineup:
+        clip_path = BASE_DIR / u["job_id"] / u["filename"]
+        if clip_path.is_file():
+            resolved.append((u, clip_path))
+        else:
+            print(f"[weekly_recap] skipping {u.get('job_id')}/{u.get('filename')} -- no longer on disk", flush=True)
+
+    if len(resolved) < 2:
+        return {
+            "ok": False,
+            "message": "Not enough of this week's uploaded clips are still available to build a recap "
+                       "(need at least 2). Upload a few Shorts this week and try again.",
+        }
+
+    job_id = uuid.uuid4().hex[:12]
+    out_dir = BASE_DIR / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video([p for _, p in resolved], out_path)
+    except (RuntimeError, ValueError) as e:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return {"ok": False, "message": f"Could not build the recap: {e}"}
+
+    lineup_used = [u for u, _ in resolved]
+    total_duration = round(sum(float(u.get("duration") or 0.0) for u in lineup_used), 2)
+    streamer_count = len({u["streamer_login"] for u in lineup_used})
+    now = datetime.datetime.now(datetime.timezone.utc)
+    week_label = f"{now - datetime.timedelta(days=7):%b %d}-{now:%b %d}"
+    meta = weekly_recap.build_recap_metadata(lineup_used, week_label)
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "source_url": None,
+            "source_title": meta["title"],
+            "created_at": time.time(),
+            "state": "done",
+            "message": f"Weekly recap ready -- {len(lineup_used)} clip(s) from {streamer_count} streamer(s).",
+            "progress": 1.0,
+            "estimate_minutes": None,
+            "pipeline": "weekly_recap",
+            "clips": [{
+                "file": out_path.name,
+                "duration": total_duration,
+                "title": meta["title"],
+                "upload_title": meta["title"],
+                "description": meta["description"],
+                "hook_caption": None,
+                "reason": None,
+                "window_index": None,
+                "source_video": None,
+                "facecam_uncertain": False,
+                "facecam_trusted": False,
+                "source_frame": None,
+                "is_recap": True,
+            }],
+            "error": None,
+            "saved": True,
+        }
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    return {"ok": True, "job_id": job_id}
+
+
+@protected.post("/api/weekly-recap/generate")
+def generate_weekly_recap() -> dict:
+    """Manual "build this week's recap now" button -- also called on the
+    app's own weekly schedule (see _weekly_recap_scheduler_loop). Always
+    produces a draft for review, never uploads on its own."""
+    result = _generate_weekly_recap_job()
+    if not result["ok"]:
+        raise HTTPException(409, result["message"])
+    return result
+
+
+# How often the recap scheduler wakes up to check whether it's time --
+# hourly is frequent enough to land within an hour of the target time
+# without a dedicated cron mechanism, and cheap enough to just poll.
+_RECAP_SCHEDULER_CHECK_SECONDS = 3600
+_RECAP_SCHEDULE_WEEKDAY = 0  # Monday
+_RECAP_SCHEDULE_HOUR_UTC = 9
+
+
+def _weekly_recap_scheduler_loop() -> None:
+    """Builds the week's recap as a draft automatically once a week, so
+    it's just waiting for review rather than something the creator has to
+    remember to click. Never uploads by itself -- see _generate_weekly_recap_job.
+    A persisted "last run" ISO week (not just a sleep timer) survives a
+    Railway restart/redeploy without either skipping a week or firing
+    twice for the same one."""
+    while True:
+        time.sleep(_RECAP_SCHEDULER_CHECK_SECONDS)
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if now.weekday() != _RECAP_SCHEDULE_WEEKDAY or now.hour < _RECAP_SCHEDULE_HOUR_UTC:
+                continue
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+            state = {}
+            if _recap_scheduler_state_path.exists():
+                try:
+                    state = json.loads(_recap_scheduler_state_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    state = {}
+            if state.get("last_run_iso_week") == iso_week:
+                continue
+            result = _generate_weekly_recap_job()
+            print(f"[weekly_recap] scheduled run for {iso_week}: {result}", flush=True)
+            state["last_run_iso_week"] = iso_week
+            _recap_scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
+        except Exception as e:
+            # A missed or double-counted week is a minor annoyance; taking
+            # the whole scheduler thread down over one bad week is worse.
+            print(f"[weekly_recap] scheduler tick failed: {e}", flush=True)
+
+
+threading.Thread(target=_weekly_recap_scheduler_loop, daemon=True).start()
 
 
 @protected.delete("/api/jobs/{job_id}/clips/{filename}")
@@ -2117,6 +2280,13 @@ INDEX_HTML = """<!doctype html>
   <div id="jobs-list"></div>
 </div>
 
+<button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
+<div class="hint">Concatenates the best-performing already-uploaded Short from each tracked
+streamer this week into one long-form draft -- top 2 each with 5 or fewer streamers
+posted this week, top 1 each above that. A fresh one also builds automatically every
+Monday. Never uploads on its own -- review, trim, and hit Upload like any other clip.</div>
+<div id="weekly-recap-status" class="hint"></div>
+
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
 
 <button id="analytics-link-btn" type="button" style="margin-top:10px">📊 Analytics &amp; AI strategy</button>
@@ -2499,7 +2669,7 @@ async function loadJobsList() {
         viewBtn.addEventListener('click', () => attachToJob(job.id));
         row.appendChild(viewBtn);
       }
-      if (!running) {
+      if (!running && job.pipeline !== 'weekly_recap') {
         const regenBtn = document.createElement('button');
         regenBtn.type = 'button';
         regenBtn.textContent = 'Generate more clips';
@@ -3149,13 +3319,17 @@ async function poll(jobId) {
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
-      {
+      if (!c.is_recap) {
         // Always offered, even with neither field set -- a clip old
         // enough to predate source_video tracking entirely still has a
         // chance: ensure-source-frame can infer the source from the job's
         // download folder when there's only one candidate for it. If that
         // fails too, the modal says so instead of the button just not
         // being there with no explanation.
+        // A weekly-recap clip (is_recap) has no single source video to
+        // pull a facecam frame from -- it's a concatenation of several --
+        // so this button is skipped for it entirely rather than opening
+        // a modal that can only ever fail.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
         fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
@@ -3240,6 +3414,30 @@ deleteBtn.addEventListener('click', async () => {
 
 document.getElementById('analytics-link-btn').addEventListener('click', () => {
   window.location.href = '/analytics';
+});
+
+const weeklyRecapBtn = document.getElementById('weekly-recap-btn');
+const weeklyRecapStatus = document.getElementById('weekly-recap-status');
+weeklyRecapBtn.addEventListener('click', async () => {
+  weeklyRecapBtn.disabled = true;
+  weeklyRecapBtn.textContent = 'Building recap...';
+  weeklyRecapStatus.textContent = '';
+  try {
+    const resp = await fetch('/api/weekly-recap/generate', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      weeklyRecapStatus.textContent = data.detail || 'Could not build a recap.';
+    } else {
+      weeklyRecapStatus.textContent = '✅ Recap draft ready -- opening it below.';
+      await loadJobsList();
+      attachToJob(data.job_id);
+    }
+  } catch (e) {
+    weeklyRecapStatus.textContent = 'Could not reach the server.';
+  } finally {
+    weeklyRecapBtn.textContent = "🗓 Generate this week's recap";
+    weeklyRecapBtn.disabled = false;
+  }
 });
 
 const notifyTestBtn = document.getElementById('notify-test-btn');
