@@ -151,12 +151,83 @@ def _format_content_analysis_block(content_analyses: list) -> str:
     return "\n\n".join(blocks)
 
 
+def _format_long_form_block(snapshot: dict) -> str:
+    """Recent long-form (non-Shorts) uploads -- e.g. the weekly cross-
+    streamer recap -- reported the same way Shorts are (two ranked
+    groups plus retention where available) but kept as their own
+    section rather than mixed into the Shorts comparison above, since
+    the two formats compete for completely different things (a Short's
+    whole draw is its first few seconds; a long-form video's is holding
+    a session and earning the click via its thumbnail in the first
+    place). See channel_insights.get_channel_snapshot for how the split
+    is made."""
+    videos = snapshot.get("recent_long_form_videos") or []
+    if not videos:
+        return ""
+    too_new = [v for v in videos if v.get("too_new_to_judge")]
+    settled = [v for v in videos if not v.get("too_new_to_judge")]
+    ranked = sorted(settled, key=lambda v: v["views_per_day"], reverse=True)
+
+    def _fmt(v: dict) -> str:
+        weekday_name = _WEEKDAY_NAMES[v["weekday"]]
+        minutes = (v.get("duration_seconds") or 0) / 60
+        line = f'- "{v["title"]}" -- {minutes:.0f}min, {v["views"]} views, {v["views_per_day"]}/day, posted {weekday_name}'
+        duration = v.get("average_view_duration_seconds")
+        pct = v.get("average_view_percentage")
+        if duration is not None and pct is not None:
+            line += f", retention: {pct:.0f}% watched ({duration / 60:.1f}min avg)"
+        restriction = v.get("restriction")
+        if restriction:
+            line += f" -- ⚠ PLATFORM RESTRICTED: {restriction}"
+        return line
+
+    lines = []
+    if len(ranked) >= 2:
+        half = max(1, len(ranked) // 2)
+        lines.append("Higher-performing long-form uploads (top half by views/day since posted):")
+        lines.extend(_fmt(v) for v in ranked[:half])
+        lines.append("\nLower-performing long-form uploads (bottom half by views/day since posted):")
+        lines.extend(_fmt(v) for v in ranked[half:])
+    elif ranked:
+        lines.append("Recent long-form uploads (title -- length, views, views/day since posted, weekday posted):")
+        lines.extend(_fmt(v) for v in ranked)
+    if too_new:
+        lines.append("\nPosted too recently to judge (do not diagnose these as underperforming):")
+        lines.extend(f'- "{v["title"]}" -- {v["views"]} views, up {v.get("age_days", 0):.1f} days' for v in too_new)
+    return "\n".join(lines)
+
+
+def _select_thumbnail_images(snapshot: dict, max_images: int = 4) -> list:
+    """The top- and bottom-performing long-form videos with a usable
+    thumbnail URL -- few enough to keep the vision call cheap and fast,
+    but a real top-vs-bottom pair so Claude can compare a thumbnail that
+    worked against one that didn't instead of judging one in isolation.
+    Empty (no images, no vision call) whenever there's nothing settled
+    enough to rank yet."""
+    videos = snapshot.get("recent_long_form_videos") or []
+    settled = [v for v in videos if not v.get("too_new_to_judge") and v.get("thumbnail_url")]
+    ranked = sorted(settled, key=lambda v: v["views_per_day"], reverse=True)
+    if not ranked:
+        return []
+    half = max(1, max_images // 2)
+    chosen = ranked[:half] + ranked[-half:]
+    seen_ids: set = set()
+    result = []
+    for v in chosen:
+        if v["id"] in seen_ids:
+            continue
+        seen_ids.add(v["id"])
+        result.append(v)
+    return result[:max_images]
+
+
 def _build_prompt(
     snapshot: dict,
     analytics: Optional[dict],
     focus: Optional[str],
     competitors: Optional[list] = None,
     content_analyses: Optional[list] = None,
+    thumbnail_videos: Optional[list] = None,
 ) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
@@ -225,6 +296,11 @@ def _build_prompt(
                 for v in too_new
             )
 
+    long_form_block = _format_long_form_block(snapshot)
+    if long_form_block:
+        lines.append("\n-- Long-form uploads (NOT Shorts -- a separate format, judge separately) --")
+        lines.append(long_form_block)
+
     if analytics:
         lines.append(f"\nReal YouTube Analytics (last {analytics['lookback_days']} days, the channel's own authenticated data):")
         lines.append(f"Views by day of week: {analytics['views_by_day']}")
@@ -275,12 +351,35 @@ def _build_prompt(
         if content_block else ""
     )
 
+    thumbnail_videos = thumbnail_videos or []
+    thumbnails_note = ""
+    if thumbnail_videos:
+        labels = ", ".join(f'"{v["title"]}"' for v in thumbnail_videos)
+        thumbnails_note = (
+            f"\n\n{len(thumbnail_videos)} actual thumbnail image(s) are attached after this "
+            f"message (each preceded by a text label naming which video it's for): {labels}. "
+            f"Actually look at them for the LONG-FORM & THUMBNAILS section below -- don't guess "
+            f"at what they look like from the titles alone."
+        )
+    long_form_section = (
+        "\nLONG-FORM & THUMBNAILS: how are the long-form uploads doing relative to EACH\n"
+        "OTHER (not vs. Shorts -- different format, not a fair comparison)? Use the same\n"
+        "platform-restricted / reach / content framework above. If thumbnail images are\n"
+        "attached, actually compare the higher- and lower-performing ones: is there a real,\n"
+        "visible difference (a clear focal face/expression vs. a busy or dark frame, readable\n"
+        "text vs. none or too much, a strong contrast/color vs. blending into YouTube's own\n"
+        "UI)? Name the specific difference you see, not a generic \"make it more eye-catching\" --\n"
+        "if the thumbnails genuinely look about the same, say so instead of inventing a\n"
+        "difference.\n"
+        if (long_form_block or thumbnail_videos) else ""
+    )
+
     return f"""You're a short-form YouTube strategy advisor looking at one creator's own
 channel data below. Give concrete, specific advice grounded in what's
 actually there -- don't give generic "post consistently" filler advice
 that isn't backed by this data.
 {focus_line}
-{data_block}{competitor_section}{content_section}
+{data_block}{competitor_section}{content_section}{thumbnails_note}
 
 SHORTS RETENTION GROUND TRUTH (use these as the actual bar when judging a
 retention number above, not vague intuition -- these are the real signals
@@ -336,7 +435,7 @@ tie it to a specific number or title in the data above -- if a claim
 doesn't cite something concrete from this data, cut it instead of padding
 the answer with it.
 
-Based on this data, answer in exactly {4 + bool(competitor_block) + bool(content_block)} short sections (plain text, no
+Based on this data, answer in exactly {4 + bool(competitor_block) + bool(content_block) + bool(long_form_section)} short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-2 sentences --
 stay terse, this is a quick read not a report):
 
@@ -357,8 +456,8 @@ FORMAT NOTES: one concrete format or editing change grounded in the
 retention/traffic signals and the ground truth above (e.g. tighten the
 hook, cut clip length down, add captions, increase cut frequency) --
 whichever one the actual numbers point to, not a generic tip.
-{competitor_patterns_section}{content_patterns_section}
-Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block else 0)} words total, and every section must be a complete
+{competitor_patterns_section}{content_patterns_section}{long_form_section}
+Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block else 0) + (40 if long_form_section else 0)} words total, and every section must be a complete
 thought -- if you're running long, cut detail, not sentences."""
 
 
@@ -481,7 +580,19 @@ def get_ai_overview(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    prompt = _build_prompt(snapshot, analytics, focus, competitors, content_analyses)
+    # A top-vs-bottom pair of long-form thumbnails, if there's enough
+    # settled data to rank them -- passed to Claude as actual images (via
+    # the API's url-source image blocks, no download/base64 needed on our
+    # side) so the LONG-FORM & THUMBNAILS section can compare what a
+    # thumbnail actually looks like, not just its video's title.
+    thumbnail_videos = _select_thumbnail_images(snapshot)
+    prompt = _build_prompt(snapshot, analytics, focus, competitors, content_analyses, thumbnail_videos)
+
+    content: list = [{"type": "text", "text": prompt}]
+    for v in thumbnail_videos:
+        content.append({"type": "text", "text": f'Thumbnail for "{v["title"]}" ({v["views_per_day"]}/day):'})
+        content.append({"type": "image", "source": {"type": "url", "url": v["thumbnail_url"]}})
+
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,
@@ -492,7 +603,7 @@ def get_ai_overview(
         # cost reason to keep the budget tight; give it generous headroom
         # instead of chasing the exact number that happens to be enough.
         max_tokens=3000,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],
     )
     text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text").strip()
     if resp.stop_reason == "max_tokens":
