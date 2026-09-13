@@ -414,7 +414,10 @@ def _run_job(job_id: str) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
-def _render_atomic(video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path) -> None:
+def _render_atomic(
+    video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path,
+    out_w: int = 1080, out_h: int = 1920,
+) -> None:
     """Render to a temp file alongside the target, then move it into place
     in one step.
 
@@ -430,7 +433,7 @@ def _render_atomic(video_path: Path, start: float, end: float, layout, ass_path:
     new one, never a partial."""
     tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
     try:
-        render_clip(video_path, start, end, layout, ass_path, tmp_path)
+        render_clip(video_path, start, end, layout, ass_path, tmp_path, out_w=out_w, out_h=out_h)
         os.replace(tmp_path, out_path)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -1313,33 +1316,29 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
 
 
-def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list, out_path: Path) -> bool:
-    """Render one already-downloaded Twitch clip to the same vertical,
-    captioned, facecam-aware style as every other clip this app produces
-    -- a raw Twitch clip download is plain landscape footage with no
-    crop or captions of its own. Mirrors _render_all's per-clip logic;
-    there's no "pick" window to select within it since the whole
-    downloaded file already IS the highlight Twitch's clip button
-    captured, so this always renders the full 0..duration range. Returns
-    whether the facecam placement came back uncertain, the same signal
-    _render_all tracks, so the recap can warn about it the same way."""
-    layout = compute_layout(video_path, 0.0, duration, target_w=1080, target_h=1920)
-    ass_path = out_path.with_suffix(".ass")
-    build_ass(words, 0.0, ass_path)
-    _render_atomic(video_path, 0.0, duration, layout, ass_path, out_path)
+_RECAP_OUT_W = 1920
+_RECAP_OUT_H = 1080
 
-    facecam_uncertain = False
-    if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
-        verified = facecam_vision.verify_rendered_facecam(out_path)
-        if verified is False:
-            try:
-                fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
-                _render_atomic(video_path, 0.0, duration, fallback_layout, ass_path, out_path)
-            except Exception as e:
-                print(f"[weekly_recap] fallback re-render also failed, keeping the original render: {e}", flush=True)
-            facecam_uncertain = True
+
+def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list, out_path: Path) -> None:
+    """Render one already-downloaded Twitch clip to landscape (1920x1080)
+    with burned-in captions, for the recap's normal-video upload -- a raw
+    Twitch clip download has no captions of its own, so those still need
+    adding, but NOT the facecam-aware crop/split logic _render_all uses
+    for a vertical Short.
+
+    That logic exists specifically to carve a narrow vertical frame out
+    of a wide landscape broadcast without losing either the gameplay or
+    the facecam -- there's nothing to carve out here, since the target
+    IS landscape, the same shape the clip was actually broadcast in, so
+    a plain centered crop-to-16:9 (a no-op whenever the source is already
+    16:9, which a Twitch clip almost always is) already shows everything
+    the streamer's own layout composited, facecam included."""
+    layout = center_crop_layout(video_path, target_w=_RECAP_OUT_W, target_h=_RECAP_OUT_H)
+    ass_path = out_path.with_suffix(".ass")
+    build_ass(words, 0.0, ass_path, play_res=(_RECAP_OUT_W, _RECAP_OUT_H))
+    _render_atomic(video_path, 0.0, duration, layout, ass_path, out_path, out_w=_RECAP_OUT_W, out_h=_RECAP_OUT_H)
     ass_path.unlink(missing_ok=True)
-    return facecam_uncertain
 
 
 def _run_weekly_recap_job(job_id: str) -> None:
@@ -1358,10 +1357,11 @@ def _run_weekly_recap_job(job_id: str) -> None:
     own curated highlight moments (made from the Clip button, by the
     creator or a viewer), available immediately with no dependency on
     this app having already rendered and uploaded something for that
-    streamer first. Each chosen clip is downloaded and run through the
-    normal render pipeline (crop/facecam/captions -- see
-    _render_twitch_clip_for_recap) before being concatenated, since a raw
-    Twitch clip download has neither.
+    streamer first. Each chosen clip is downloaded and captioned (see
+    _render_twitch_clip_for_recap) before being concatenated as landscape
+    video -- normal-video shaped, not a Short, since a raw Twitch clip
+    download is already the streamer's own landscape broadcast frame
+    with no captions of its own.
 
     Ends in state "error" (not a raised exception) when there isn't
     enough to work with -- no tracked streamer had a clip this week, or
@@ -1395,7 +1395,6 @@ def _run_weekly_recap_job(job_id: str) -> None:
     # failure rather than dropping that streamer from the recap entirely
     # just because their single top clip happened to fail.
     rendered = []
-    facecam_warnings = []
     processed = 0
     for login, candidates in pools.items():
         successes = 0
@@ -1419,7 +1418,7 @@ def _run_weekly_recap_job(job_id: str) -> None:
                 words = []
             rendered_path = out_dir / f"src_{len(rendered):02d}.mp4"
             try:
-                facecam_uncertain = _render_twitch_clip_for_recap(dl.video_path, dl.duration, words, rendered_path)
+                _render_twitch_clip_for_recap(dl.video_path, dl.duration, words, rendered_path)
             except Exception as e:
                 print(f"[weekly_recap] render failed for clip {c.get('id')} ({login}): {e}", flush=True)
                 continue
@@ -1431,8 +1430,6 @@ def _run_weekly_recap_job(job_id: str) -> None:
                 "view_count": c.get("view_count") or 0,
                 "path": rendered_path,
             })
-            if facecam_uncertain:
-                facecam_warnings.append(f'{display} -- "{c.get("title", "")}"')
             successes += 1
 
     shutil.rmtree(raw_dir, ignore_errors=True)  # downloaded source no longer needed once rendered
@@ -1468,11 +1465,6 @@ def _run_weekly_recap_job(job_id: str) -> None:
     meta = weekly_recap.build_recap_metadata(rendered, week_label)
 
     message = f"Weekly recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
-    if facecam_warnings:
-        message += (
-            f" ⚠ {len(facecam_warnings)} clip(s) in this recap had an uncertain facecam placement: "
-            + "; ".join(facecam_warnings)
-        )
 
     _set(
         job_id,
@@ -1480,7 +1472,6 @@ def _run_weekly_recap_job(job_id: str) -> None:
         message=message,
         progress=1.0,
         source_title=meta["title"],
-        facecam_warnings=facecam_warnings,
         clips=[{
             "file": out_path.name,
             "duration": total_duration,
@@ -1491,11 +1482,11 @@ def _run_weekly_recap_job(job_id: str) -> None:
             "reason": None,
             "window_index": None,
             "source_video": None,
-            # Long-form on purpose -- a recap is a compilation of several
-            # already-Shorts-classified clips, not itself meant to be
-            # classified as one (see is_short=False on the upload
-            # endpoint below), so nothing here needs to fit the 60s
-            # Shorts cap.
+            # Landscape, not vertical -- see _render_twitch_clip_for_recap
+            # -- and long-form on purpose: a recap is a compilation of
+            # several clips, not itself meant to be classified as a Short
+            # (see is_short=False on the upload endpoint below), so
+            # nothing here needs to fit the 60s Shorts cap either.
             "facecam_uncertain": False,
             "facecam_trusted": False,
             "source_frame": None,
@@ -2421,10 +2412,11 @@ INDEX_HTML = """<!doctype html>
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
 <button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
 <div class="hint">Pulls each tracked streamer's own most-viewed Twitch clip from the past week,
-renders it in this channel's usual style (crop, facecam, captions), and concatenates
-them into one long-form draft -- top 2 per streamer with 5 or fewer streamers having
-a clip this week, top 1 each above that. A fresh one also builds automatically every
-Monday. Never uploads on its own -- review, trim, and hit Upload like any other clip.</div>
+adds captions, and concatenates them into one landscape long-form draft (a normal
+video, not a Short -- no 60s cap, no #Shorts tag) -- top 2 per streamer with 5 or
+fewer streamers having a clip this week, top 1 each above that. A fresh one also
+builds automatically every Monday. Never uploads on its own -- review, trim, and
+hit Upload like any other clip.</div>
 <div id="weekly-recap-status" class="hint"></div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
