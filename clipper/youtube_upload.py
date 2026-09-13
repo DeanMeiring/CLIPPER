@@ -60,9 +60,16 @@ def upload_video(
     title: str,
     description: str,
     privacy_status: str = "unlisted",
+    is_short: bool = True,
 ) -> str:
     """Upload video_path to the connected channel. Returns the new video's
-    id on success."""
+    id on success.
+
+    `is_short` appends the "#Shorts" tag this app's clips need to be
+    reliably classified as a Short (see _with_shorts_tag). Set it False
+    for a long-form upload (e.g. the weekly cross-streamer recap) -- that
+    tag on a multi-minute video would be actively misleading to viewers
+    and to YouTube's own classifier."""
     import requests
 
     if privacy_status not in _VALID_PRIVACY_STATUSES:
@@ -70,7 +77,10 @@ def upload_video(
     if not video_path.exists():
         raise UploadError(f"{video_path.name} no longer exists on the server")
 
-    description = _with_shorts_tag(description)
+    if is_short:
+        description = _with_shorts_tag(description)
+    else:
+        description = description[:_YOUTUBE_DESCRIPTION_MAX]
     size = video_path.stat().st_size
 
     try:
