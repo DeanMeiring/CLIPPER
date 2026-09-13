@@ -70,6 +70,7 @@ _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
+_reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -1443,26 +1444,48 @@ def _run_weekly_recap_job(job_id: str) -> None:
         return
 
     cancel()
-    _set(job_id, state="rendering", message="Combining clips into the recap...")
-    _progress(job_id, 0.95)
     # Biggest hit first -- a compilation's opening clip is what decides
     # whether someone keeps watching, same as any other Short.
     rendered.sort(key=lambda r: r["view_count"], reverse=True)
+    concat_paths = [r["path"] for r in rendered]
+
+    _set(job_id, state="rendering", message="Adding an outro...")
+    _progress(job_id, 0.92)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        # A missing outro is a cosmetic loss, not a reason to fail an
+        # otherwise-good recap -- ship it without one instead.
+        print(f"[weekly_recap] could not build the outro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.95)
     out_path = out_dir / "recap.mp4"
     try:
-        weekly_recap.build_recap_video([r["path"] for r in rendered], out_path)
+        weekly_recap.build_recap_video(concat_paths, out_path)
     except (RuntimeError, ValueError) as e:
         shutil.rmtree(out_dir, ignore_errors=True)
         _set(job_id, state="error", error=f"Could not build the recap: {e}")
         return
-    for r in rendered:
-        r["path"].unlink(missing_ok=True)
+    for p in concat_paths:
+        p.unlink(missing_ok=True)
 
-    total_duration = round(sum(r["duration"] for r in rendered), 2)
+    clips_duration = round(sum(r["duration"] for r in rendered), 2)
+    # The concat re-encode's actual output duration (outro included) is
+    # the real source of truth for what plays back -- summed per-clip
+    # durations are close but can drift slightly from re-encode rounding.
+    total_duration = _ffprobe_duration(out_path) or clips_duration
     streamer_count = len({r["streamer_login"] for r in rendered})
     now = datetime.datetime.now(datetime.timezone.utc)
     week_label = f"{now - datetime.timedelta(days=7):%b %d}-{now:%b %d}"
     meta = weekly_recap.build_recap_metadata(rendered, week_label)
+    if outro_added:
+        minutes, seconds = divmod(int(clips_duration), 60)
+        meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
 
     message = f"Weekly recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
 
@@ -1576,6 +1599,48 @@ def _weekly_recap_scheduler_loop() -> None:
 
 
 threading.Thread(target=_weekly_recap_scheduler_loop, daemon=True).start()
+
+
+# Sunday evening, UTC -- adjust _REMINDER_SCHEDULE_HOUR_UTC if this lands
+# at an inconvenient local time.
+_REMINDER_SCHEDULE_WEEKDAY = 6  # Sunday
+_REMINDER_SCHEDULE_HOUR_UTC = 18
+
+
+def _weekly_reminder_scheduler_loop() -> None:
+    """Sends a plain Telegram nudge every Sunday to upload the week's
+    clips -- independent of the recap (which sources its own clips
+    straight from Twitch's view counts and needs nothing uploaded first,
+    see weekly_recap.py), this is just a reminder for the creator's own
+    regular posting habit. Same persisted-ISO-week pattern as
+    _weekly_recap_scheduler_loop (see its docstring) so a restart/
+    redeploy can't skip a week or send the reminder twice. Independent of
+    whether a Telegram bot is actually configured -- send_telegram() is
+    itself silent/best-effort on a missing token, so this thread doesn't
+    need to check first."""
+    while True:
+        time.sleep(_RECAP_SCHEDULER_CHECK_SECONDS)
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if now.weekday() != _REMINDER_SCHEDULE_WEEKDAY or now.hour < _REMINDER_SCHEDULE_HOUR_UTC:
+                continue
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+            state = {}
+            if _reminder_scheduler_state_path.exists():
+                try:
+                    state = json.loads(_reminder_scheduler_state_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    state = {}
+            if state.get("last_sent_iso_week") == iso_week:
+                continue
+            send_telegram("\U0001F4C5 Sunday reminder -- remember to upload this week's clips!")
+            state["last_sent_iso_week"] = iso_week
+            _reminder_scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
+        except Exception as e:
+            print(f"[reminder] scheduler tick failed: {e}", flush=True)
+
+
+threading.Thread(target=_weekly_reminder_scheduler_loop, daemon=True).start()
 
 
 @protected.delete("/api/jobs/{job_id}/clips/{filename}")
