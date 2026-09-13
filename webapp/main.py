@@ -283,11 +283,15 @@ def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
         pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
+        pending_weekly_recap = jobs[job_id].pop("pending_weekly_recap", None)
     if pending_regenerate is not None:
         _run_regenerate(job_id, pending_regenerate)
         return
     if pending_manual_facecam is not None:
         _run_manual_facecam_render(job_id, pending_manual_facecam)
+        return
+    if pending_weekly_recap is not None:
+        _run_weekly_recap_job(job_id)
         return
 
     req: JobRequest = jobs[job_id]["request"]
@@ -1326,10 +1330,16 @@ def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list
     return facecam_uncertain
 
 
-def _generate_weekly_recap_job() -> dict:
-    """Build this week's cross-streamer recap as a new draft job -- same
-    review/trim/upload flow as any other clip in the UI, just flagged
-    is_recap so the upload button skips the Shorts tag and 60s framing.
+def _run_weekly_recap_job(job_id: str) -> None:
+    """Build this week's cross-streamer recap on the shared worker thread
+    -- same async, progress-reporting flow as a normal clip job (the
+    existing progress bar/poll UI just works for this job too), rather
+    than blocking the request handler for however long it takes to
+    download, transcribe, and render several Twitch clips back to back.
+    The first version of this feature did exactly that and reliably
+    outran the client/proxy's own timeout ("could not reach the server"
+    on a real attempt) despite the work succeeding server-side -- moving
+    it here is the actual fix, not just a nicer progress bar.
 
     Source material is each tracked streamer's own most-viewed Twitch
     clip(s) from the past week (trending.get_top_twitch_clips) -- Twitch's
@@ -1341,21 +1351,27 @@ def _generate_weekly_recap_job() -> dict:
     _render_twitch_clip_for_recap) before being concatenated, since a raw
     Twitch clip download has neither.
 
-    Returns {"ok": False, "message": ...} rather than raising when there
-    isn't enough to work with (no tracked streamer had a clip this week,
-    or fewer than 2 candidates could actually be downloaded and rendered)
-    -- that's a normal week, not a bug worth a 500."""
+    Ends in state "error" (not a raised exception) when there isn't
+    enough to work with -- no tracked streamer had a clip this week, or
+    fewer than 2 candidates could actually be downloaded and rendered --
+    since that's a normal week, not a pipeline bug."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_recap_source"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _set(job_id, state="checking", message="Looking up this week's top Twitch clips...")
+    _progress(job_id, 0.05)
+    cancel()
     twitch_logins = [l for l in os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",") if l.strip()]
     clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=5)
     pools = weekly_recap.group_clips_by_streamer(clips)
     if not pools:
-        return {"ok": False, "message": "No Twitch clips found for your tracked streamers in the past week."}
+        _set(job_id, state="error", error="No Twitch clips found for your tracked streamers in the past week.")
+        return
 
     per_streamer = weekly_recap.per_streamer_count(len(pools))
-    job_id = uuid.uuid4().hex[:12]
-    out_dir = BASE_DIR / job_id
-    raw_dir = out_dir / "_recap_source"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    total_candidates = sum(min(len(cs), per_streamer * 2) for cs in pools.values())  # rough, for the progress bar only
 
     # Each streamer's candidates are already ranked by view count -- walk
     # them in order and keep going past a download/transcription/render
@@ -1363,11 +1379,17 @@ def _generate_weekly_recap_job() -> dict:
     # just because their single top clip happened to fail.
     rendered = []
     facecam_warnings = []
+    processed = 0
     for login, candidates in pools.items():
         successes = 0
         for c in candidates:
             if successes >= per_streamer:
                 break
+            cancel()
+            processed += 1
+            display = weekly_recap.display_name({"streamer_login": login})
+            _set(job_id, state="rendering", message=f'Clip {processed}: {display} -- "{c.get("title", "")}"')
+            _progress(job_id, 0.05 + 0.85 * (processed / max(total_candidates, 1)))
             try:
                 dl = download_video(c["url"], raw_dir)
             except Exception as e:
@@ -1393,7 +1415,6 @@ def _generate_weekly_recap_job() -> dict:
                 "path": rendered_path,
             })
             if facecam_uncertain:
-                display = weekly_recap.display_name({"streamer_login": login})
                 facecam_warnings.append(f'{display} -- "{c.get("title", "")}"')
             successes += 1
 
@@ -1401,13 +1422,15 @@ def _generate_weekly_recap_job() -> dict:
 
     if len(rendered) < 2:
         shutil.rmtree(out_dir, ignore_errors=True)
-        return {
-            "ok": False,
-            "message": "Not enough of this week's Twitch clips could be downloaded and rendered to build "
-                       "a recap (need at least 2). Try again later, or check the deploy logs for why a "
-                       "specific clip failed.",
-        }
+        _set(job_id, state="error", error=(
+            "Not enough of this week's Twitch clips could be downloaded and rendered to build a recap "
+            "(need at least 2). Check the deploy logs for why a specific clip failed."
+        ))
+        return
 
+    cancel()
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.95)
     # Biggest hit first -- a compilation's opening clip is what decides
     # whether someone keeps watching, same as any other Short.
     rendered.sort(key=lambda r: r["view_count"], reverse=True)
@@ -1416,7 +1439,8 @@ def _generate_weekly_recap_job() -> dict:
         weekly_recap.build_recap_video([r["path"] for r in rendered], out_path)
     except (RuntimeError, ValueError) as e:
         shutil.rmtree(out_dir, ignore_errors=True)
-        return {"ok": False, "message": f"Could not build the recap: {e}"}
+        _set(job_id, state="error", error=f"Could not build the recap: {e}")
+        return
     for r in rendered:
         r["path"].unlink(missing_ok=True)
 
@@ -1433,55 +1457,74 @@ def _generate_weekly_recap_job() -> dict:
             + "; ".join(facecam_warnings)
         )
 
+    _set(
+        job_id,
+        state="done",
+        message=message,
+        progress=1.0,
+        source_title=meta["title"],
+        facecam_warnings=facecam_warnings,
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": meta["title"],
+            "upload_title": meta["title"],
+            "description": meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            # Long-form on purpose -- a recap is a compilation of several
+            # already-Shorts-classified clips, not itself meant to be
+            # classified as one (see is_short=False on the upload
+            # endpoint below), so nothing here needs to fit the 60s
+            # Shorts cap.
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+    )
+
+
+def _queue_weekly_recap_job() -> str:
+    """Creates and enqueues a weekly-recap job for the shared worker
+    thread to pick up (see _run_job's pending_weekly_recap dispatch and
+    _run_weekly_recap_job) -- shared by the manual button endpoint and
+    the Monday scheduler below, so both go through the exact same async,
+    progress-reporting path rather than one of them running the (multi-
+    minute) build inline."""
+    job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
             "source_url": None,
-            "source_title": meta["title"],
+            "source_title": "Weekly recap",
             "created_at": time.time(),
-            "state": "done",
-            "message": message,
-            "progress": 1.0,
+            "state": "queued",
+            "message": "Queued",
+            "progress": 0.0,
             "estimate_minutes": None,
             "pipeline": "weekly_recap",
-            "facecam_warnings": facecam_warnings,
-            "clips": [{
-                "file": out_path.name,
-                "duration": total_duration,
-                "title": meta["title"],
-                "upload_title": meta["title"],
-                "description": meta["description"],
-                "hook_caption": None,
-                "reason": None,
-                "window_index": None,
-                "source_video": None,
-                # Long-form on purpose -- a recap is a compilation of
-                # several already-Shorts-classified clips, not itself
-                # meant to be classified as one (see is_short=False on
-                # the upload endpoint below), so nothing here needs to
-                # fit the 60s Shorts cap.
-                "facecam_uncertain": False,
-                "facecam_trusted": False,
-                "source_frame": None,
-                "is_recap": True,
-            }],
+            "clips": [],
             "error": None,
             "saved": True,
+            "pending_weekly_recap": True,
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
-    return {"ok": True, "job_id": job_id, "facecam_warnings": facecam_warnings}
+    job_queue.put(job_id)
+    return job_id
 
 
 @protected.post("/api/weekly-recap/generate")
 def generate_weekly_recap() -> dict:
-    """Manual "build this week's recap now" button -- also called on the
-    app's own weekly schedule (see _weekly_recap_scheduler_loop). Always
+    """Queue this week's recap build as a background job -- the same
+    "submit and watch the progress bar" flow as generating regular clips,
+    since the actual build can take minutes (see _run_weekly_recap_job)
+    and blocking the request for that long isn't reliable. Always
     produces a draft for review, never uploads on its own."""
-    result = _generate_weekly_recap_job()
-    if not result["ok"]:
-        raise HTTPException(409, result["message"])
-    return result
+    return {"job_id": _queue_weekly_recap_job()}
 
 
 # How often the recap scheduler wakes up to check whether it's time --
@@ -1495,7 +1538,7 @@ _RECAP_SCHEDULE_HOUR_UTC = 9
 def _weekly_recap_scheduler_loop() -> None:
     """Builds the week's recap as a draft automatically once a week, so
     it's just waiting for review rather than something the creator has to
-    remember to click. Never uploads by itself -- see _generate_weekly_recap_job.
+    remember to click. Never uploads by itself -- see _run_weekly_recap_job.
     A persisted "last run" ISO week (not just a sleep timer) survives a
     Railway restart/redeploy without either skipping a week or firing
     twice for the same one."""
@@ -1514,8 +1557,8 @@ def _weekly_recap_scheduler_loop() -> None:
                     state = {}
             if state.get("last_run_iso_week") == iso_week:
                 continue
-            result = _generate_weekly_recap_job()
-            print(f"[weekly_recap] scheduled run for {iso_week}: {result}", flush=True)
+            job_id = _queue_weekly_recap_job()
+            print(f"[weekly_recap] scheduled run for {iso_week}: queued job {job_id}", flush=True)
             state["last_run_iso_week"] = iso_week
             _recap_scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
         except Exception as e:
@@ -3501,10 +3544,13 @@ const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
 const weeklyRecapStatus = document.getElementById('weekly-recap-status');
 let latestWeeklyRecapJobId = null;
 
-// Finds the most recent weekly-recap draft (if any) and enables the "Go
-// to this week's recap" button for it -- so it's reachable any time the
+// Finds the most recent weekly-recap job (if any) and updates the "Go to
+// this week's recap" button for it -- so it's reachable any time the
 // page is opened, not just right after clicking "Generate", including
-// the recap the Monday scheduler builds on its own with nobody watching.
+// the recap the Monday scheduler builds on its own with nobody watching,
+// and while one is still building (downloading/transcribing/rendering
+// several Twitch clips can take minutes -- see webapp/main.py's
+// _run_weekly_recap_job) so its live progress is always one click away.
 // Left visible-but-disabled rather than hidden when none exists yet, so
 // the feature itself is never invisible -- just says plainly there's
 // nothing to jump to.
@@ -3516,7 +3562,15 @@ async function refreshWeeklyRecapViewBtn() {
     const latest = jobs.find(j => j.pipeline === 'weekly_recap');
     latestWeeklyRecapJobId = latest ? latest.id : null;
     weeklyRecapViewBtn.disabled = !latest;
-    weeklyRecapViewBtn.textContent = latest ? "📺 Go to this week's recap" : '📺 No weekly recap yet';
+    if (!latest) {
+      weeklyRecapViewBtn.textContent = '📺 No weekly recap yet';
+    } else if (latest.state === 'error') {
+      weeklyRecapViewBtn.textContent = '⚠ Last recap attempt failed -- view details';
+    } else if (['done', 'cancelled'].includes(latest.state)) {
+      weeklyRecapViewBtn.textContent = "📺 Go to this week's recap";
+    } else {
+      weeklyRecapViewBtn.textContent = '⏳ Recap building -- view progress';
+    }
   } catch (e) {
     // leave the button as-is -- a failed check here shouldn't reset an
     // already-known recap or spam an error for a background refresh
@@ -3526,20 +3580,20 @@ weeklyRecapViewBtn.addEventListener('click', () => {
   if (latestWeeklyRecapJobId) attachToJob(latestWeeklyRecapJobId);
 });
 refreshWeeklyRecapViewBtn();
+setInterval(refreshWeeklyRecapViewBtn, 5000);
 
 weeklyRecapBtn.addEventListener('click', async () => {
   weeklyRecapBtn.disabled = true;
-  weeklyRecapBtn.textContent = 'Building recap...';
   weeklyRecapStatus.textContent = '';
   try {
     const resp = await fetch('/api/weekly-recap/generate', { method: 'POST' });
     const data = await resp.json();
     if (!resp.ok) {
-      weeklyRecapStatus.textContent = data.detail || 'Could not build a recap.';
+      weeklyRecapStatus.textContent = data.detail || 'Could not queue the recap.';
     } else {
-      weeklyRecapStatus.textContent = (data.facecam_warnings || []).length
-        ? `✅ Recap draft ready -- opening it below. ⚠ ${data.facecam_warnings.length} clip(s) in it had an uncertain facecam placement when originally rendered.`
-        : '✅ Recap draft ready -- opening it below.';
+      // Queuing is near-instant -- the actual build runs as a background
+      // job (same as a normal clip job), so jump straight to its live
+      // progress rather than waiting here for it to finish.
       await loadJobsList();
       await refreshWeeklyRecapViewBtn();
       attachToJob(data.job_id);
@@ -3547,7 +3601,6 @@ weeklyRecapBtn.addEventListener('click', async () => {
   } catch (e) {
     weeklyRecapStatus.textContent = 'Could not reach the server.';
   } finally {
-    weeklyRecapBtn.textContent = "🗓 Generate this week's recap";
     weeklyRecapBtn.disabled = false;
   }
 });
