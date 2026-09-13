@@ -198,6 +198,67 @@ def get_recommendation_candidates(
     return entries
 
 
+def get_top_twitch_clips(logins: List[str], days: float = 7.0, per_streamer: int = 5) -> List[dict]:
+    """Twitch's own most-viewed clips (the ones made from the Clip button
+    on a stream, by the creator or by a viewer) for each login over the
+    last `days` -- these are already curated highlight moments with a
+    real Twitch view count, usable the moment a stream ends rather than
+    only after this app has rendered and the creator has uploaded
+    something for that streamer. Used by the weekly recap as its source
+    material. Twitch's clips endpoint already returns each broadcaster's
+    clips sorted by view count when given a date range, so no separate
+    ranking call is needed here.
+
+    Returns raw Helix clip dicts (id, url, title, view_count, duration,
+    created_at, ...) plus a "streamer_login" key, up to `per_streamer`
+    per login. Skips a login cleanly on any per-login failure so one bad
+    name doesn't blank out the rest."""
+    logins = [l.strip().lower() for l in logins if l.strip()]
+    if not logins:
+        return []
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    token = _get_twitch_token()
+    if not client_id or not token:
+        return []
+
+    import requests
+    from datetime import datetime, timedelta, timezone
+
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    started_at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        users_resp = requests.get(
+            "https://api.twitch.tv/helix/users", params={"login": logins}, headers=headers, timeout=15,
+        )
+        users_resp.raise_for_status()
+        users = {u["login"]: u for u in users_resp.json().get("data") or []}
+    except Exception as e:
+        print(f"[trending] Twitch user lookup failed: {e}", flush=True)
+        return []
+
+    clips: List[dict] = []
+    for login in logins:
+        user = users.get(login)
+        if not user:
+            print(f"[trending] Twitch login {login!r} not found -- skipping", flush=True)
+            continue
+        try:
+            resp = requests.get(
+                "https://api.twitch.tv/helix/clips",
+                params={"broadcaster_id": user["id"], "started_at": started_at, "first": per_streamer},
+                headers=headers, timeout=15,
+            )
+            resp.raise_for_status()
+            for c in resp.json().get("data") or []:
+                clips.append({**c, "streamer_login": login})
+        except Exception as e:
+            print(f"[trending] Twitch clips lookup for {login!r} failed: {e}", flush=True)
+            continue
+
+    return clips
+
+
 def get_trending_live_streams(min_viewers: int = 100_000, limit: int = 12) -> List[CreatorEntry]:
     """The biggest live streams on Twitch right now, not limited to the
     configured creator list. Twitch's public API has no equivalent "top
