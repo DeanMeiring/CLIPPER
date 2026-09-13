@@ -2311,7 +2311,7 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
-<button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" hidden>📺 Go to this week's recap</button>
+<button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
 <div class="hint">Concatenates the best-performing already-uploaded Short from each tracked
 streamer this week into one long-form draft -- top 2 each with 5 or fewer streamers
 posted this week, top 1 each above that. A fresh one also builds automatically every
@@ -3452,10 +3452,13 @@ const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
 const weeklyRecapStatus = document.getElementById('weekly-recap-status');
 let latestWeeklyRecapJobId = null;
 
-// Finds the most recent weekly-recap draft (if any) and shows/updates the
-// "Go to this week's recap" button for it -- so it's reachable any time
-// the page is opened, not just right after clicking "Generate", including
+// Finds the most recent weekly-recap draft (if any) and enables the "Go
+// to this week's recap" button for it -- so it's reachable any time the
+// page is opened, not just right after clicking "Generate", including
 // the recap the Monday scheduler builds on its own with nobody watching.
+// Left visible-but-disabled rather than hidden when none exists yet, so
+// the feature itself is never invisible -- just says plainly there's
+// nothing to jump to.
 async function refreshWeeklyRecapViewBtn() {
   try {
     const resp = await fetch('/api/jobs');
@@ -3463,9 +3466,10 @@ async function refreshWeeklyRecapViewBtn() {
     const { jobs } = await resp.json();
     const latest = jobs.find(j => j.pipeline === 'weekly_recap');
     latestWeeklyRecapJobId = latest ? latest.id : null;
-    weeklyRecapViewBtn.hidden = !latest;
+    weeklyRecapViewBtn.disabled = !latest;
+    weeklyRecapViewBtn.textContent = latest ? "📺 Go to this week's recap" : '📺 No weekly recap yet';
   } catch (e) {
-    // leave the button as-is -- a failed check here shouldn't hide an
+    // leave the button as-is -- a failed check here shouldn't reset an
     // already-known recap or spam an error for a background refresh
   }
 }
