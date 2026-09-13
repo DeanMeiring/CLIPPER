@@ -1967,15 +1967,21 @@ def _gather_channel_insights_data() -> dict:
         # snapshot by id -- tells apart "nobody clicked it" (low views,
         # retention doesn't matter yet) from "people clicked but didn't
         # stick around" (decent views, weak retention), which raw view
-        # counts alone can't distinguish.
-        recent_videos = (result.get("heuristic") or {}).get("recent_videos")
-        if recent_videos:
+        # counts alone can't distinguish. get_video_retention isn't
+        # duration-filtered, so the same lookup covers long-form videos
+        # too -- arguably where retention matters most, since a long-form
+        # video's whole draw is holding attention past the first few
+        # seconds a Short lives or dies on.
+        heuristic = result.get("heuristic") or {}
+        recent_videos = heuristic.get("recent_videos")
+        recent_long_form = heuristic.get("recent_long_form_videos")
+        if recent_videos or recent_long_form:
             try:
                 retention_by_id = youtube_analytics.get_video_retention(access_token, channel_id)
             except Exception as e:
                 result["retention_error"] = str(e)
                 retention_by_id = {}
-            for v in recent_videos:
+            for v in (recent_videos or []) + (recent_long_form or []):
                 r = retention_by_id.get(v.get("id"))
                 if r:
                     v["average_view_duration_seconds"] = r["average_view_duration_seconds"]

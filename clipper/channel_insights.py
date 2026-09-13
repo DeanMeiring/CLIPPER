@@ -59,6 +59,20 @@ def _channel_lookup_params(channel_id_or_handle: str) -> dict:
     return {"forUsername": channel_id_or_handle}
 
 
+def _thumbnail_url(video: dict) -> Optional[str]:
+    """The best available thumbnail YouTube already generated for this
+    video (no extra API call -- it's part of the same snippet response),
+    highest resolution first. Used to let the AI overview actually look
+    at a video's thumbnail (via Claude's vision input) instead of only
+    reasoning about its title."""
+    thumbs = (video.get("snippet") or {}).get("thumbnails") or {}
+    for size in ("maxres", "standard", "high", "medium", "default"):
+        url = (thumbs.get(size) or {}).get("url")
+        if url:
+            return url
+    return None
+
+
 def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Optional[dict]:
     import requests
 
@@ -86,6 +100,7 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
     video_ids = [i["snippet"]["resourceId"]["videoId"] for i in pl_resp.json().get("items") or []]
 
     videos: List[dict] = []
+    long_form_videos: List[dict] = []
     if video_ids:
         v_resp = requests.get(
             "https://www.googleapis.com/youtube/v3/videos",
@@ -94,23 +109,13 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
         )
         v_resp.raise_for_status()
         now = datetime.datetime.now(datetime.timezone.utc)
-        long_form_skipped = 0
         for v in v_resp.json().get("items") or []:
             duration_seconds = _parse_iso8601_duration((v.get("contentDetails") or {}).get("duration", ""))
-            # Everything this app compares is meant to be Shorts-vs-Shorts --
-            # an occasional long-form upload mixed into a channel's recent
-            # videos would otherwise sit in the same ranking/best-day
-            # average as actual Shorts despite competing in a completely
-            # different format. A duration that couldn't be parsed is kept
-            # rather than guessed at either way.
-            if duration_seconds is not None and duration_seconds > MAX_SHORT_SECONDS:
-                long_form_skipped += 1
-                continue
             published_at = v["snippet"]["publishedAt"]
             published_dt = datetime.datetime.fromisoformat(published_at.replace("Z", "+00:00"))
             age_days = max(1.0, (now - published_dt).total_seconds() / 86400)
             views = int(v.get("statistics", {}).get("viewCount", 0))
-            videos.append({
+            entry = {
                 "id": v["id"],
                 "title": v["snippet"]["title"],
                 "published_at": published_at,
@@ -129,7 +134,20 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
                 "too_new_to_judge": age_days < _MIN_AGE_DAYS_TO_JUDGE,
                 "weekday": published_dt.weekday(),
                 "restriction": _restriction_note(v),
-            })
+                "thumbnail_url": _thumbnail_url(v),
+            }
+            # Everything in `videos` is meant to be Shorts-vs-Shorts -- an
+            # occasional long-form upload mixed into that ranking/best-day
+            # average would otherwise sit alongside actual Shorts despite
+            # competing in a completely different format. Long-form isn't
+            # thrown away though, just kept in its own list so the AI
+            # overview can analyze it as its own category (see
+            # channel_strategy.py). A duration that couldn't be parsed is
+            # treated as a Short rather than guessed at either way.
+            if duration_seconds is not None and duration_seconds > MAX_SHORT_SECONDS:
+                long_form_videos.append(entry)
+            else:
+                videos.append(entry)
 
     best_day, views_per_day_by_weekday = _best_day_heuristic(videos)
 
@@ -137,8 +155,8 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
     note = ("Heuristic from public view counts, normalized by video age -- "
             "noisy, especially with few videos. Connect your YouTube account "
             "for real Analytics-based day-of-week performance and retention.")
-    if long_form_skipped:
-        note += f" ({long_form_skipped} longer-than-Shorts upload(s) excluded from this list.)"
+    if long_form_videos:
+        note += f" ({len(long_form_videos)} longer-than-Shorts upload(s) reported separately.)"
     return {
         "channel_title": channel["snippet"]["title"],
         "subscriber_count": None if hidden_subs else int(stats.get("subscriberCount", 0)),
@@ -149,6 +167,12 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
         "avg_views_per_day_recent": round(sum(v["views_per_day"] for v in videos) / len(videos), 1) if videos else None,
         "best_day_heuristic": best_day,
         "views_per_day_by_weekday": views_per_day_by_weekday,
+        "long_form_videos_sampled": len(long_form_videos),
+        "recent_long_form_videos": long_form_videos,
+        "avg_views_per_day_long_form": (
+            round(sum(v["views_per_day"] for v in long_form_videos) / len(long_form_videos), 1)
+            if long_form_videos else None
+        ),
         "note": note,
     }
 
