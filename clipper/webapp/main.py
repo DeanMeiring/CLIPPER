@@ -279,6 +279,18 @@ def _estimate_long_vod_seconds(num_candidates: int, num_clips: int) -> float:
     return scan + candidates + select + render
 
 
+def _estimate_recap_seconds(num_candidates: int) -> float:
+    # Measured from real Railway logs on a live recap build: each Twitch-
+    # clip candidate (download + Whisper transcription + facecam vision +
+    # render) took roughly 20-35s end to end -- much less than a long-VOD
+    # candidate window since a Twitch clip is short (usually well under
+    # 60s) to begin with. 35s/candidate is the generous end of that.
+    lookup = 10.0
+    candidates = num_candidates * 35.0
+    concat = 15.0
+    return lookup + candidates + concat
+
+
 def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
@@ -1372,6 +1384,11 @@ def _run_weekly_recap_job(job_id: str) -> None:
 
     per_streamer = weekly_recap.per_streamer_count(len(pools))
     total_candidates = sum(min(len(cs), per_streamer * 2) for cs in pools.values())  # rough, for the progress bar only
+    # Reset created_at here (not when the job was queued) so the "time
+    # remaining" math in the UI counts from when real work starts, not
+    # from the brief Twitch-lookup step above -- same pattern _run_regenerate
+    # uses once it knows enough to estimate.
+    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(total_candidates) / 60, 1))
 
     # Each streamer's candidates are already ranked by view count -- walk
     # them in order and keep going past a download/transcription/render
