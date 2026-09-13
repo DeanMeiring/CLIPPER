@@ -40,7 +40,13 @@ from clipper.render import render_clip, trim_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
-from clipper.trending import get_trending_sections, search_creator, get_recommendation_candidates, parse_twitch_duration
+from clipper.trending import (
+    get_trending_sections,
+    search_creator,
+    get_recommendation_candidates,
+    get_top_twitch_clips,
+    parse_twitch_duration,
+)
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot, MAX_SHORT_SECONDS
 from clipper import channel_strategy
@@ -63,7 +69,6 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
-_recap_uploads_path = BASE_DIR / "_recap_uploads.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
 
 
@@ -387,14 +392,6 @@ def _run_job(job_id: str) -> None:
     if not render_items:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
-
-    # Best-effort attribution for the weekly recap (see weekly_recap.py) --
-    # probe_video() already resolved this for the long-VOD branch (it has
-    # to, to decide the pipeline), and for the short branch too whenever
-    # the initial probe above succeeded. None just means the recap won't
-    # be able to attribute this job's clips to a streamer later, not a
-    # failure of the render itself.
-    _set(job_id, source_broadcaster_login=(info.broadcaster_login if info else None))
 
     clips_meta = _render_all(job_id, out_dir, render_items, render_base, [])
     _progress(job_id, 1.0)
@@ -1297,92 +1294,143 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         if trimmed_path is not None:
             trimmed_path.unlink(missing_ok=True)
 
-    # Feeds the weekly cross-streamer recap (weekly_recap.py) -- it can
-    # only rank clips that have actually been posted, so every real
-    # upload through this button (a recap itself excluded -- it has no
-    # single streamer to attribute) gets logged here.
-    if not is_recap:
-        weekly_recap.record_upload(_recap_uploads_path, {
-            "video_id": video_id,
-            "job_id": job_id,
-            "filename": filename,
-            "streamer_login": job.get("source_broadcaster_login"),
-            "title": clip.get("upload_title") or clip.get("title") or filename,
-            "duration": clip.get("duration"),
-            "uploaded_at": time.time(),
-        })
-
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+
+
+def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list, out_path: Path) -> bool:
+    """Render one already-downloaded Twitch clip to the same vertical,
+    captioned, facecam-aware style as every other clip this app produces
+    -- a raw Twitch clip download is plain landscape footage with no
+    crop or captions of its own. Mirrors _render_all's per-clip logic;
+    there's no "pick" window to select within it since the whole
+    downloaded file already IS the highlight Twitch's clip button
+    captured, so this always renders the full 0..duration range. Returns
+    whether the facecam placement came back uncertain, the same signal
+    _render_all tracks, so the recap can warn about it the same way."""
+    layout = compute_layout(video_path, 0.0, duration, target_w=1080, target_h=1920)
+    ass_path = out_path.with_suffix(".ass")
+    build_ass(words, 0.0, ass_path)
+    _render_atomic(video_path, 0.0, duration, layout, ass_path, out_path)
+
+    facecam_uncertain = False
+    if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
+        verified = facecam_vision.verify_rendered_facecam(out_path)
+        if verified is False:
+            try:
+                fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
+                _render_atomic(video_path, 0.0, duration, fallback_layout, ass_path, out_path)
+            except Exception as e:
+                print(f"[weekly_recap] fallback re-render also failed, keeping the original render: {e}", flush=True)
+            facecam_uncertain = True
+    ass_path.unlink(missing_ok=True)
+    return facecam_uncertain
 
 
 def _generate_weekly_recap_job() -> dict:
     """Build this week's cross-streamer recap as a new draft job -- same
     review/trim/upload flow as any other clip in the UI, just flagged
     is_recap so the upload button skips the Shorts tag and 60s framing.
+
+    Source material is each tracked streamer's own most-viewed Twitch
+    clip(s) from the past week (trending.get_top_twitch_clips) -- Twitch's
+    own curated highlight moments (made from the Clip button, by the
+    creator or a viewer), available immediately with no dependency on
+    this app having already rendered and uploaded something for that
+    streamer first. Each chosen clip is downloaded and run through the
+    normal render pipeline (crop/facecam/captions -- see
+    _render_twitch_clip_for_recap) before being concatenated, since a raw
+    Twitch clip download has neither.
+
     Returns {"ok": False, "message": ...} rather than raising when there
-    isn't enough to work with yet (nobody's posted a Short this week, or
-    fewer than 2 of this week's uploads are still on disk) -- that's the
-    normal case most weeks, not a bug worth a 500."""
-    window = weekly_recap.uploads_in_window(_recap_uploads_path)
-    video_ids = [u["video_id"] for u in window if u.get("video_id")]
-    api_key = os.environ.get("YOUTUBE_API_KEY")
-    views = weekly_recap.get_video_view_counts(video_ids, api_key) if api_key else {}
-    lineup = weekly_recap.pick_weekly_lineup(window, views)
+    isn't enough to work with (no tracked streamer had a clip this week,
+    or fewer than 2 candidates could actually be downloaded and rendered)
+    -- that's a normal week, not a bug worth a 500."""
+    twitch_logins = [l for l in os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",") if l.strip()]
+    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=5)
+    pools = weekly_recap.group_clips_by_streamer(clips)
+    if not pools:
+        return {"ok": False, "message": "No Twitch clips found for your tracked streamers in the past week."}
 
-    resolved = []
-    for u in lineup:
-        clip_path = BASE_DIR / u["job_id"] / u["filename"]
-        if clip_path.is_file():
-            resolved.append((u, clip_path))
-        else:
-            print(f"[weekly_recap] skipping {u.get('job_id')}/{u.get('filename')} -- no longer on disk", flush=True)
-
-    if len(resolved) < 2:
-        return {
-            "ok": False,
-            "message": "Not enough of this week's uploaded clips are still available to build a recap "
-                       "(need at least 2). Upload a few Shorts this week and try again.",
-        }
-
-    # The facecam check ran once already, when each clip was originally
-    # rendered as its own Short -- concatenating already-rendered files
-    # for the recap doesn't re-run it. Looked up live (from the source
-    # job's current clip metadata) rather than off the upload log, so a
-    # placement fixed by hand since the clip was posted is reflected
-    # correctly instead of repeating a now-stale warning.
-    facecam_warnings = []
-    with jobs_lock:
-        for u, _ in resolved:
-            source_job = jobs.get(u["job_id"])
-            source_clip = next(
-                (c for c in (source_job.get("clips") or []) if c.get("file") == u["filename"]), None,
-            ) if source_job else None
-            if source_clip and source_clip.get("facecam_uncertain"):
-                facecam_warnings.append(f"{weekly_recap.display_name(u)} -- \"{u.get('title', '')}\"")
-
+    per_streamer = weekly_recap.per_streamer_count(len(pools))
     job_id = uuid.uuid4().hex[:12]
     out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_recap_source"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Each streamer's candidates are already ranked by view count -- walk
+    # them in order and keep going past a download/transcription/render
+    # failure rather than dropping that streamer from the recap entirely
+    # just because their single top clip happened to fail.
+    rendered = []
+    facecam_warnings = []
+    for login, candidates in pools.items():
+        successes = 0
+        for c in candidates:
+            if successes >= per_streamer:
+                break
+            try:
+                dl = download_video(c["url"], raw_dir)
+            except Exception as e:
+                print(f"[weekly_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
+                continue
+            try:
+                words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
+            except Exception as e:
+                print(f"[weekly_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
+                words = []
+            rendered_path = out_dir / f"src_{len(rendered):02d}.mp4"
+            try:
+                facecam_uncertain = _render_twitch_clip_for_recap(dl.video_path, dl.duration, words, rendered_path)
+            except Exception as e:
+                print(f"[weekly_recap] render failed for clip {c.get('id')} ({login}): {e}", flush=True)
+                continue
+            actual_duration = _ffprobe_duration(rendered_path) or dl.duration
+            rendered.append({
+                "streamer_login": login,
+                "title": c.get("title") or "",
+                "duration": actual_duration,
+                "view_count": c.get("view_count") or 0,
+                "path": rendered_path,
+            })
+            if facecam_uncertain:
+                display = weekly_recap.display_name({"streamer_login": login})
+                facecam_warnings.append(f'{display} -- "{c.get("title", "")}"')
+            successes += 1
+
+    shutil.rmtree(raw_dir, ignore_errors=True)  # downloaded source no longer needed once rendered
+
+    if len(rendered) < 2:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return {
+            "ok": False,
+            "message": "Not enough of this week's Twitch clips could be downloaded and rendered to build "
+                       "a recap (need at least 2). Try again later, or check the deploy logs for why a "
+                       "specific clip failed.",
+        }
+
+    # Biggest hit first -- a compilation's opening clip is what decides
+    # whether someone keeps watching, same as any other Short.
+    rendered.sort(key=lambda r: r["view_count"], reverse=True)
     out_path = out_dir / "recap.mp4"
     try:
-        weekly_recap.build_recap_video([p for _, p in resolved], out_path)
+        weekly_recap.build_recap_video([r["path"] for r in rendered], out_path)
     except (RuntimeError, ValueError) as e:
         shutil.rmtree(out_dir, ignore_errors=True)
         return {"ok": False, "message": f"Could not build the recap: {e}"}
+    for r in rendered:
+        r["path"].unlink(missing_ok=True)
 
-    lineup_used = [u for u, _ in resolved]
-    total_duration = round(sum(float(u.get("duration") or 0.0) for u in lineup_used), 2)
-    streamer_count = len({u["streamer_login"] for u in lineup_used})
+    total_duration = round(sum(r["duration"] for r in rendered), 2)
+    streamer_count = len({r["streamer_login"] for r in rendered})
     now = datetime.datetime.now(datetime.timezone.utc)
     week_label = f"{now - datetime.timedelta(days=7):%b %d}-{now:%b %d}"
-    meta = weekly_recap.build_recap_metadata(lineup_used, week_label)
+    meta = weekly_recap.build_recap_metadata(rendered, week_label)
 
-    message = f"Weekly recap ready -- {len(lineup_used)} clip(s) from {streamer_count} streamer(s)."
+    message = f"Weekly recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
     if facecam_warnings:
         message += (
-            f" ⚠ {len(facecam_warnings)} clip(s) in this recap had an uncertain facecam placement "
-            f"when originally rendered (fix on the original clip, then regenerate the recap, if it matters "
-            f"for this compilation): " + "; ".join(facecam_warnings)
+            f" ⚠ {len(facecam_warnings)} clip(s) in this recap had an uncertain facecam placement: "
+            + "; ".join(facecam_warnings)
         )
 
     with jobs_lock:
@@ -2312,9 +2360,10 @@ INDEX_HTML = """<!doctype html>
 
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
 <button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
-<div class="hint">Concatenates the best-performing already-uploaded Short from each tracked
-streamer this week into one long-form draft -- top 2 each with 5 or fewer streamers
-posted this week, top 1 each above that. A fresh one also builds automatically every
+<div class="hint">Pulls each tracked streamer's own most-viewed Twitch clip from the past week,
+renders it in this channel's usual style (crop, facecam, captions), and concatenates
+them into one long-form draft -- top 2 per streamer with 5 or fewer streamers having
+a clip this week, top 1 each above that. A fresh one also builds automatically every
 Monday. Never uploads on its own -- review, trim, and hit Upload like any other clip.</div>
 <div id="weekly-recap-status" class="hint"></div>
 
