@@ -282,11 +282,13 @@ def _run_job(job_id: str) -> None:
         return
 
     req: JobRequest = jobs[job_id]["request"]
-    # YouTube only classifies a video as a Short if it's 180s or under, full
-    # stop -- no title/description tag or anything else overrides that. A
-    # clip this app renders past that line can never actually become a
-    # Short no matter what "Upload to YouTube" sends, so clamp here rather
-    # than let a job silently produce something that was never eligible.
+    # YouTube's Shorts feed itself allows up to 3 minutes, but a video
+    # uploaded through the Data API only gets reliably auto-classified as a
+    # Short up to MAX_SHORT_SECONDS (60s) -- past that it can silently land
+    # as a regular video no matter what tag or aspect ratio it has. A clip
+    # this app renders past that line can never actually become a Short via
+    # the upload button, so clamp here rather than let a job silently
+    # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
@@ -2084,8 +2086,8 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div>
     <label>Max length (s)</label>
-    <input id="max_len" type="number" value="90" max="180">
-    <div class="hint">Capped at 180s -- YouTube won't count anything longer as a Short.</div>
+    <input id="max_len" type="number" value="60" max="60">
+    <div class="hint">Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.</div>
   </div>
 </div>
 

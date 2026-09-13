@@ -22,14 +22,17 @@ DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 # comparison and the best-day averages rather than counted as a flop.
 _MIN_AGE_DAYS_TO_JUDGE = 2.0
 
-# YouTube's own eligibility ceiling for a video to actually be treated as a
-# Short (feed placement, the Shorts shelf, etc.), not this app's guess --
-# raised from the original 60s in 2024. Everything this app renders is
-# comfortably under this, and every insight/comparison here is meant to be
-# Shorts-vs-Shorts, so a channel's occasional long-form upload is excluded
-# rather than silently diluting the "what's working" picture with a video
-# in a different format nobody here is posting.
-MAX_SHORT_SECONDS = 180
+# YouTube extended the Shorts feed's own length ceiling to 3 minutes in
+# 2024, but that's the limit for a video already recognized as a Short --
+# it is NOT the same as the duration YouTube's classifier reliably treats
+# an API-uploaded video as a Short in the first place. In practice (and
+# confirmed by this app's own creator: a vertical, correctly-tagged clip
+# past a minute still landed as a regular upload) videos posted through
+# the Data API only get auto-classified into Shorts consistently up to
+# 60s -- past that they can silently land as a normal video with no error,
+# tag or aspect ratio fix able to override it. 60s is therefore the real
+# ceiling this app renders and uploads to, not 180.
+MAX_SHORT_SECONDS = 60
 
 _ISO8601_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
 
