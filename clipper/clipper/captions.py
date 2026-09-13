@@ -2,20 +2,40 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 from .transcribe import Word
 
-ASS_HEADER = """[Script Info]
+# Every style value below (font size, outline, margins) was tuned by eye
+# for a 1080x1920 portrait Short. build_ass() scales them by the target
+# frame's height relative to this base, so a caption still reads as "the
+# same size" proportionally on a landscape recap (see PLAY_RES below)
+# instead of looking oversized/undersized just because the frame changed
+# shape.
+_BASE_PLAY_RES: Tuple[int, int] = (1080, 1920)
+_BASE_FONTSIZE = 72
+_BASE_OUTLINE = 6
+_BASE_MARGIN_LR = 60
+_BASE_MARGIN_V = 220
+
+
+def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
+    width, height = play_res
+    scale = height / _BASE_PLAY_RES[1]
+    fontsize = max(1, round(_BASE_FONTSIZE * scale))
+    outline = max(1, round(_BASE_OUTLINE * scale))
+    margin_lr = max(0, round(_BASE_MARGIN_LR * scale))
+    margin_v = max(0, round(_BASE_MARGIN_V * scale))
+    return f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {width}
+PlayResY: {height}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,Arial Black,72,&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,220,1
+Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -67,10 +87,21 @@ def _group_words(words: List[Word], max_words: int = 4, max_span: float = 2.2) -
     return groups
 
 
-def build_ass(clip_words: List[Word], clip_start: float, output_path: Path) -> Path:
+def build_ass(
+    clip_words: List[Word], clip_start: float, output_path: Path,
+    play_res: Tuple[int, int] = _BASE_PLAY_RES,
+) -> Path:
     """clip_words are absolute-time Word objects that fall within the clip;
-    clip_start is subtracted so the .ass timeline starts at 0 for this clip."""
-    lines = [ASS_HEADER]
+    clip_start is subtracted so the .ass timeline starts at 0 for this clip.
+
+    play_res should match the actual output frame size (width, height) --
+    it's both the coordinate system the Style/Dialogue margins below are
+    written in AND (via _ass_header's scaling) what decides how big those
+    margins and the font actually are. Defaults to the normal portrait
+    Short's 1080x1920; pass the real target for anything else (e.g. a
+    landscape recap) so captions land where the style values expect them
+    rather than however libass happens to stretch a mismatched canvas."""
+    lines = [_ass_header(play_res)]
     for group in _group_words(clip_words):
         g_start = group[0].start - clip_start
         g_end = group[-1].end - clip_start

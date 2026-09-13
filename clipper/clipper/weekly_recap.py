@@ -1,17 +1,19 @@
 """Weekly cross-streamer recap: concatenate each tracked streamer's most-
-viewed Twitch clip from the past week into one long-form compilation
-video, so the content gets a second life outside the Shorts feed.
+viewed Twitch clip from the past week into one landscape, long-form
+compilation video -- a normal upload, not a Short, for a second life
+outside the Shorts feed.
 
 Source material is Twitch's own "Clips" feature (the ones made from the
 Clip button on a stream, by the creator or by viewers) -- these are
 already curated highlight moments with a real Twitch view count,
 available immediately via trending.get_top_twitch_clips(), with no
 dependency on this app having already rendered and uploaded something
-for that streamer first. Each chosen clip still gets downloaded and run
-through this app's own render pipeline (crop/facecam/captions -- see
-webapp/main.py's _render_twitch_clip_for_recap) so the compilation looks
-consistent with the rest of the channel, since a raw Twitch clip is
-plain landscape footage with no captions of its own.
+for that streamer first. Each chosen clip still gets downloaded and
+captioned (see webapp/main.py's _render_twitch_clip_for_recap) before
+being concatenated, since a raw Twitch clip has no captions of its own
+-- but NOT run through this app's vertical facecam-crop pipeline, since
+a Twitch clip is already landscape (the streamer's own broadcast frame,
+facecam included) and the recap stays landscape too.
 """
 from __future__ import annotations
 
