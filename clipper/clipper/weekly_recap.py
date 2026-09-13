@@ -1,115 +1,50 @@
-"""Weekly cross-streamer recap: concatenate each tracked streamer's best-
-performing Short from the past week into one long-form compilation video,
-so the content gets a second life outside the Shorts feed.
+"""Weekly cross-streamer recap: concatenate each tracked streamer's most-
+viewed Twitch clip from the past week into one long-form compilation
+video, so the content gets a second life outside the Shorts feed.
 
-"Best-performing" can only be measured for a clip that's actually been
-posted to YouTube -- there's no view-count signal for a clip this app only
-ever rendered. So the recap draws from clips already uploaded through this
-app's own "Upload to YouTube" button that week, not from every clip
-generated. record_upload() is the write side of that log (called right
-after a real upload succeeds); everything else here reads it back to build
-the compilation.
+Source material is Twitch's own "Clips" feature (the ones made from the
+Clip button on a stream, by the creator or by viewers) -- these are
+already curated highlight moments with a real Twitch view count,
+available immediately via trending.get_top_twitch_clips(), with no
+dependency on this app having already rendered and uploaded something
+for that streamer first. Each chosen clip still gets downloaded and run
+through this app's own render pipeline (crop/facecam/captions -- see
+webapp/main.py's _render_twitch_clip_for_recap) so the compilation looks
+consistent with the rest of the channel, since a raw Twitch clip is
+plain landscape footage with no captions of its own.
 """
 from __future__ import annotations
 
-import json
-import time
 from pathlib import Path
-from typing import Optional
 
 # Keeps the compilation's length sane as more streamers get tracked -- 2
 # clips each stays a reasonable ~5-10 clip video up to 5 streamers; past
 # that, 1 each keeps a 10+ streamer roster from turning into a 20+ clip,
 # 20-minute video nobody asked for.
 _MAX_STREAMERS_FOR_TWO_EACH = 5
-_RECAP_WINDOW_DAYS = 7.0
-_MAX_LOG_ENTRIES = 1000
 
 
-def _load_raw(path: Path) -> list:
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (OSError, ValueError):
-        return []
+def per_streamer_count(num_streamers: int) -> int:
+    return 2 if num_streamers <= _MAX_STREAMERS_FOR_TWO_EACH else 1
 
 
-def record_upload(path: Path, entry: dict) -> None:
-    """Append one real upload to the log -- called right after a clip's
-    own "Upload to YouTube" click succeeds, so the log always reflects
-    what's actually live rather than what the pipeline merely rendered."""
-    entries = _load_raw(path)
-    entries.append(entry)
-    entries = entries[-_MAX_LOG_ENTRIES:]
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(entries), encoding="utf-8")
-    except OSError:
-        pass  # best-effort -- losing the log entry shouldn't fail the upload that produced it
-
-
-def uploads_in_window(path: Path, days: float = _RECAP_WINDOW_DAYS, now: Optional[float] = None) -> list:
-    now = now if now is not None else time.time()
-    cutoff = now - days * 86400
-    return [e for e in _load_raw(path) if (e.get("uploaded_at") or 0) >= cutoff]
-
-
-def pick_weekly_lineup(window_uploads: list, views_by_video_id: dict) -> list:
-    """Group this week's uploads by streamer, rank each streamer's own
-    clips by view count, and take the top N per streamer -- N scaled down
-    as the number of streamers with an upload this week grows, so the
-    compilation doesn't get longer just because more streamers are
-    tracked. An upload with no known streamer (the source VOD's
-    broadcaster login couldn't be determined) is left out entirely rather
-    than lumped into one fake "unknown streamer" group."""
+def group_clips_by_streamer(clips: list) -> dict:
+    """Groups Twitch clips by streamer, each group sorted by view count
+    descending. Returns {login: [clip, clip, ...]} rather than an already
+    top-N-truncated list, so a caller can walk each streamer's list in
+    view-count order and fall through to the next one if a candidate
+    fails to download or render -- one broken clip shouldn't silently
+    drop that streamer from the recap entirely. A clip with no streamer
+    login is left out rather than lumped into a fake "unknown" group."""
     by_streamer: dict = {}
-    for u in window_uploads:
-        login = (u.get("streamer_login") or "").strip().lower()
+    for c in clips:
+        login = (c.get("streamer_login") or "").strip().lower()
         if not login:
             continue
-        by_streamer.setdefault(login, []).append(u)
-
-    per_streamer = 2 if len(by_streamer) <= _MAX_STREAMERS_FOR_TWO_EACH else 1
-
-    lineup = []
-    for login, uploads in by_streamer.items():
-        ranked = sorted(uploads, key=lambda u: views_by_video_id.get(u.get("video_id"), 0), reverse=True)
-        for u in ranked[:per_streamer]:
-            lineup.append({**u, "streamer_login": login, "views": views_by_video_id.get(u.get("video_id"), 0)})
-
-    # Biggest hit first -- a compilation's opening clip is what decides
-    # whether someone keeps watching, same as any other Short.
-    lineup.sort(key=lambda u: u["views"], reverse=True)
-    return lineup
-
-
-def get_video_view_counts(video_ids: list, api_key: str) -> dict:
-    """Current view count for each id, via the public Data API (no OAuth
-    needed -- these are the creator's own already-public uploads). An id
-    that fails to resolve (deleted, or the lookup errored) is simply
-    absent from the result rather than defaulted to 0, so a lookup hiccup
-    doesn't make a clip look like it flopped."""
-    import requests
-
-    result: dict = {}
-    if not video_ids or not api_key:
-        return result
-    for i in range(0, len(video_ids), 50):  # videos.list caps at 50 ids/call
-        batch = video_ids[i:i + 50]
-        try:
-            resp = requests.get(
-                "https://www.googleapis.com/youtube/v3/videos",
-                params={"part": "statistics", "id": ",".join(batch), "key": api_key},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            for v in resp.json().get("items") or []:
-                result[v["id"]] = int(v.get("statistics", {}).get("viewCount", 0))
-        except Exception as e:
-            print(f"[weekly_recap] view-count lookup failed for a batch: {e}", flush=True)
-    return result
+        by_streamer.setdefault(login, []).append(c)
+    for login in by_streamer:
+        by_streamer[login].sort(key=lambda c: c.get("view_count") or 0, reverse=True)
+    return by_streamer
 
 
 def build_recap_video(clip_paths: list, out_path: Path) -> None:
@@ -147,11 +82,11 @@ def build_recap_video(clip_paths: list, out_path: Path) -> None:
 
 
 def display_name(entry: dict) -> str:
-    # Best-effort only -- the log stores a streamer's Twitch LOGIN (always
-    # lowercase), not their real display-name casing, so a camelCase name
-    # like "TheBurntPeanut" comes back as "Theburntpeanut" here. Fixing
-    # that would mean an extra Twitch API call per streamer just for
-    # cosmetics; not worth it for a chapters list.
+    # Best-effort only -- Twitch's clips API gives us the broadcaster's
+    # LOGIN (always lowercase), not their real display-name casing, so a
+    # camelCase name like "TheBurntPeanut" comes back as "Theburntpeanut"
+    # here. Fixing that would mean an extra Twitch users lookup per
+    # streamer just for cosmetics; not worth it for a chapters list.
     login = entry.get("streamer_login") or ""
     return login.replace("_", " ").title()
 
@@ -160,7 +95,7 @@ def build_recap_metadata(lineup: list, week_label: str) -> dict:
     """A deterministic title + a chapter-formatted description (YouTube
     turns a description starting "0:00 ..." into clickable chapters) --
     no Claude call needed, this is just arithmetic over durations already
-    known from each clip's own upload record."""
+    known from each clip's own render."""
     names = [display_name(u) for u in lineup]
     seen: set = set()
     ordered_names = [n for n in names if not (n in seen or seen.add(n))]
