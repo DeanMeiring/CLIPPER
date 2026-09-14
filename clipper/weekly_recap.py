@@ -315,7 +315,17 @@ def build_outro_clip(out_path: Path, text: str, duration: float = 4.0, out_w: in
     Needs a silent audio track (not just video) -- build_recap_video's
     concat step re-encodes assuming every input has the same stream
     layout as the real clips (video + audio); a video-only input breaks
-    that assumption."""
+    that assumption.
+
+    Trims audio to `duration` with its own `atrim` filter rather than
+    relying on `-shortest` to stop it wherever the video happens to end
+    -- video and audio hit EOF at different, codec-specific granularities
+    (a video frame vs. an AAC sample block), so "-shortest" alone can
+    leave them a few tens of milliseconds apart. Imperceptible on the
+    outro alone (nothing plays after it), but the same gap on a clip
+    earlier in the concat order (see build_intro_clip) shifts audio out
+    of sync for the entire rest of the video -- fixed here too so the
+    outro can't reintroduce the same drift if its position ever changes."""
     import subprocess
 
     from .captions import _ass_header, _escape_ass_text, _fmt_ts
@@ -336,8 +346,8 @@ def build_outro_clip(out_path: Path, text: str, duration: float = 4.0, out_w: in
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", f"color=c=black:s={out_w}x{out_h}:d={duration}:r=30",
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-        "-shortest",
-        "-vf", f"ass='{ass_escaped}'",
+        "-filter_complex", f"[0:v]ass='{ass_escaped}'[v];[1:a]atrim=duration={duration}[a]",
+        "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
@@ -376,7 +386,19 @@ def build_intro_clip(
     same reason build_outro_clip does -- build_recap_video's concat step
     re-encodes assuming every input has a matching video+audio layout,
     and playing the source's real (sped-down, pitch-shifted) audio under
-    a title card would also just sound wrong."""
+    a title card would also just sound wrong.
+
+    Trims video and audio to `duration` with each stream's own filter
+    (`trim`/`atrim`) rather than relying on `-shortest` to stop whichever
+    stream happens to run out first -- video and audio hit their EOF at
+    different, codec-specific granularities (a video frame vs. an AAC
+    sample block), so "-shortest" alone can leave the two streams a few
+    tens of milliseconds apart. That's invisible in this one clip, but
+    concat's re-encode has no per-file resync point: a prepended clip
+    (like this intro, first in line) with even a small mismatch shifts
+    audio out of sync with video for the ENTIRE rest of the recap, not
+    just itself -- confirmed live (this is the fix for exactly that bug,
+    reported after the intro card first shipped)."""
     import subprocess
 
     from .captions import _ass_header, _escape_ass_text, _fmt_ts
@@ -391,10 +413,13 @@ def build_intro_clip(
         "ffmpeg", "-y",
         "-i", str(source_video),
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-        "-t", f"{duration}",
         "-filter_complex",
-        f"[0:v]trim=0:{source_seconds},setpts={slow_factor}*PTS,eq=brightness=-0.35,ass='{ass_escaped}'[v]",
-        "-map", "[v]", "-map", "1:a", "-shortest",
+        (
+            f"[0:v]trim=0:{source_seconds},setpts={slow_factor}*(PTS-STARTPTS),"
+            f"eq=brightness=-0.35,ass='{ass_escaped}',fps=30,trim=duration={duration}[v];"
+            f"[1:a]atrim=duration={duration}[a]"
+        ),
+        "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
