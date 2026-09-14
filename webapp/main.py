@@ -45,6 +45,7 @@ from clipper.trending import (
     search_creator,
     get_recommendation_candidates,
     get_top_twitch_clips,
+    get_top_clips_for_game,
     parse_twitch_duration,
 )
 from clipper.notify import send_telegram
@@ -57,6 +58,7 @@ from clipper import youtube_analytics
 from clipper import youtube_oauth
 from clipper import youtube_upload
 from clipper import weekly_recap
+from clipper import game_recap
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,6 +74,7 @@ _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
 _reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
 _recap_episode_path = BASE_DIR / "_recap_episode_number.json"
+_game_recap_episode_path = BASE_DIR / "_game_recap_episode_numbers.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -298,6 +301,7 @@ def _run_job(job_id: str) -> None:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
         pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
         pending_weekly_recap = jobs[job_id].pop("pending_weekly_recap", None)
+        pending_game_recap = jobs[job_id].pop("pending_game_recap", None)
     if pending_regenerate is not None:
         _run_regenerate(job_id, pending_regenerate)
         return
@@ -306,6 +310,9 @@ def _run_job(job_id: str) -> None:
         return
     if pending_weekly_recap is not None:
         _run_weekly_recap_job(job_id, week_ending=pending_weekly_recap.get("week_ending"))
+        return
+    if pending_game_recap is not None:
+        _run_game_recap_job(job_id, game=pending_game_recap["game"], week_ending=pending_game_recap.get("week_ending"))
         return
 
     req: JobRequest = jobs[job_id]["request"]
@@ -970,17 +977,17 @@ def _worker() -> None:
 
 
 def _cleanup_empty_recap_stubs() -> None:
-    """One-time startup sweep for weekly-recap job husks left behind by a
-    clip deletion that predates delete_clip's own cleanup (see
-    delete_clip) -- an empty "0 clip(s), Done" entry with nothing useful
-    left to do with it, stuck in the jobs list until removed by hand.
-    Runs once after _load_persisted_jobs so any stub already on disk
+    """One-time startup sweep for weekly-recap (and game-recap) job husks
+    left behind by a clip deletion that predates delete_clip's own cleanup
+    (see delete_clip) -- an empty "0 clip(s), Done" entry with nothing
+    useful left to do with it, stuck in the jobs list until removed by
+    hand. Runs once after _load_persisted_jobs so any stub already on disk
     clears itself on the next deploy instead of needing a manual
     "I've downloaded these" click per stub."""
     with jobs_lock:
         stale_ids = [
             job_id for job_id, job in jobs.items()
-            if job.get("pipeline") == "weekly_recap"
+            if job.get("pipeline") in ("weekly_recap", "game_recap")
             and job.get("state") in TERMINAL_STATES
             and not (job.get("clips") or [])
         ]
@@ -1832,6 +1839,277 @@ def generate_weekly_recap(req: WeeklyRecapGenerateRequest) -> dict:
     return {"job_id": _queue_weekly_recap_job(week_ending=req.week_ending)}
 
 
+def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = None) -> None:
+    """Build a cross-streamer recap for ONE GAME on the shared worker
+    thread -- same async, progress-reporting flow _run_weekly_recap_job
+    uses, and it reuses nearly all of that function's machinery verbatim
+    (the AI quality gate, the per-streamer cap, AUDIO_ENCODE_ARGS-pinned
+    intro/outro/render/concat, _render_twitch_clip_for_recap). Only
+    discovery and the title differ: source material here is
+    trending.get_top_clips_for_game (every streamer playing `game` this
+    week, English-language, not just the tracked roster
+    TRENDING_TWITCH_LOGINS get_top_twitch_clips reads from), and the
+    target/title come from clipper/game_recap.py's own constants instead
+    of weekly_recap's fixed SERIES_TITLE.
+
+    Kept as its own job function/pipeline ("game_recap") rather than a
+    branch inside _run_weekly_recap_job -- the two features are meant to
+    stay independently reachable and manageable (separate page, separate
+    endpoint, separate jobs-list entries), not merged into one flow.
+
+    See _run_weekly_recap_job's own docstring for the reasoning behind the
+    week_ending/ended_at handling and the "fewer than 2 candidates" /
+    "fewer than 2 rendered" failure modes -- identical here, just phrased
+    around one game instead of the whole tracked roster."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_recap_source"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ended_at = None
+    if week_ending:
+        try:
+            ended_at = (
+                datetime.datetime.strptime(week_ending, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                + datetime.timedelta(days=1)
+            )
+        except ValueError:
+            print(f"[game_recap] could not parse week_ending {week_ending!r}, using this week instead", flush=True)
+            ended_at = None
+
+    _set(
+        job_id, state="checking",
+        message=f"Looking up top {game} Twitch clips for the week of {week_ending}..." if ended_at
+        else f"Looking up this week's top {game} Twitch clips...",
+    )
+    _progress(job_id, 0.05)
+    cancel()
+    clips = get_top_clips_for_game(game, days=7.0, limit=100, ended_at=ended_at)
+    pool = weekly_recap.build_candidate_pool(clips)
+    if not pool:
+        _set(job_id, state="error", error=f"No English-language Twitch clips found for {game!r} in that week.")
+        return
+
+    target_total = game_recap.TARGET_CLIP_COUNT
+    considered = min(len(pool), target_total * 3)
+    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(considered) / 60, 1))
+
+    selected = []
+    per_streamer_picks: dict = {}
+    processed = 0
+    for c in pool:
+        if len(selected) >= target_total:
+            break
+        cancel()
+        processed += 1
+        login = (c.get("streamer_login") or "").strip().lower()
+        display = weekly_recap.display_name({"streamer_login": login})
+        _set(job_id, state="checking", message=f'Checking clip {processed}: {display} -- "{c.get("title", "")}"')
+        _progress(job_id, 0.05 + 0.55 * (processed / max(considered, 1)))
+        if per_streamer_picks.get(login, 0) >= weekly_recap.MAX_CLIPS_PER_STREAMER:
+            continue
+        try:
+            dl = download_video(c["url"], raw_dir)
+        except Exception as e:
+            print(f"[game_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
+            continue
+        try:
+            words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
+        except Exception as e:
+            print(f"[game_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
+            words = []
+        transcript_text = " ".join(w.text for w in words)
+        verdict = weekly_recap.judge_clip_quality(c.get("title") or "", display, c.get("view_count") or 0, transcript_text)
+        if not verdict["keep"]:
+            print(f"[game_recap] skipping clip {c.get('id')} ({login}): {verdict['reason']}", flush=True)
+            continue
+        render_duration = usable_render_duration(dl.video_path, dl.duration)
+        selected.append({
+            "streamer_login": login,
+            "title": c.get("title") or "",
+            "view_count": c.get("view_count") or 0,
+            "video_path": dl.video_path,
+            "duration": render_duration,
+            "words": words,
+        })
+        per_streamer_picks[login] = per_streamer_picks.get(login, 0) + 1
+
+    if len(selected) < 2:
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            f"Not enough of this week's {game} Twitch clips passed the quality check and could be "
+            "downloaded to build a recap (need at least 2). Check the deploy logs for why specific clips were skipped."
+        ))
+        return
+
+    cancel()
+    selected.sort(key=lambda s: s["view_count"], reverse=True)
+    for i, s in enumerate(selected):
+        s["rank"] = i + 1
+    concat_order = list(reversed(selected))
+
+    rendered = []
+    total_render = len(concat_order)
+    for i, s in enumerate(concat_order):
+        cancel()
+        display = weekly_recap.display_name(s)
+        _set(job_id, state="rendering", message=f'Rendering clip {i + 1}/{total_render}: #{s["rank"]} {display}')
+        _progress(job_id, 0.6 + 0.3 * ((i + 1) / max(total_render, 1)))
+        rendered_path = out_dir / f"src_{i:02d}.mp4"
+        badge_text = weekly_recap.rank_badge_text(s["rank"], s)
+        try:
+            _render_twitch_clip_for_recap(s["video_path"], s["duration"], s["words"], rendered_path, badge_text=badge_text)
+        except Exception as e:
+            print(f"[game_recap] render failed for #{s['rank']} ({s['streamer_login']}): {e}", flush=True)
+            continue
+        actual_duration = _ffprobe_duration(rendered_path) or s["duration"]
+        rendered.append({
+            "streamer_login": s["streamer_login"],
+            "title": s["title"],
+            "duration": actual_duration,
+            "view_count": s["view_count"],
+            "rank": s["rank"],
+            "path": rendered_path,
+        })
+
+    shutil.rmtree(raw_dir, ignore_errors=True)
+
+    if len(rendered) < 2:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            f"Rendering failed for too many of this week's selected {game} clips to build a recap "
+            "(need at least 2). Check the deploy logs for why a specific clip failed."
+        ))
+        return
+
+    cancel()
+    concat_paths = [r["path"] for r in rendered]
+
+    episode = game_recap.next_episode_number(_game_recap_episode_path, game)
+    title_text = f"{game_recap.SERIES_TITLE_TEMPLATE.format(game=game)} #{episode}"
+
+    _set(job_id, state="rendering", message="Adding an intro...")
+    _progress(job_id, 0.88)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        print(f"[game_recap] could not build the intro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Adding an outro...")
+    _progress(job_id, 0.92)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        print(f"[game_recap] could not build the outro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.95)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video(concat_paths, out_path)
+    except (RuntimeError, ValueError) as e:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=f"Could not build the recap: {e}")
+        return
+    _log_recap_av_sync(out_path)
+    for p in concat_paths:
+        p.unlink(missing_ok=True)
+
+    clips_duration = round(sum(r["duration"] for r in rendered), 2)
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
+    streamer_count = len({r["streamer_login"] for r in rendered})
+    week_end = ended_at - datetime.timedelta(days=1) if ended_at else datetime.datetime.now(datetime.timezone.utc)
+    week_label = f"{week_end - datetime.timedelta(days=7):%b %d}-{week_end:%b %d}"
+    meta = game_recap.build_recap_metadata(rendered, week_label, game, episode, intro_offset=intro_duration)
+    if outro_added:
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
+        meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
+
+    message = f"{game} recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
+
+    _set(
+        job_id,
+        state="done",
+        message=message,
+        progress=1.0,
+        source_title=meta["title"],
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": meta["title"],
+            "upload_title": meta["title"],
+            "description": meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+    )
+
+
+def _queue_game_recap_job(game: str, week_ending: Optional[str] = None) -> str:
+    """Creates and enqueues a game-recap job for the shared worker thread
+    -- see _queue_weekly_recap_job for the shared reasoning (async worker
+    thread, not an inline multi-minute request). Kept as its own
+    function/pipeline value ("game_recap") rather than reusing
+    _queue_weekly_recap_job with a branch, so the two features' jobs stay
+    independently listable/trackable in the jobs panel and each has its
+    own "go to latest" affordance on its own page."""
+    job_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "source_url": None,
+            "source_title": f"{game} recap (week of {week_ending})" if week_ending else f"{game} recap",
+            "created_at": time.time(),
+            "state": "queued",
+            "message": "Queued",
+            "progress": 0.0,
+            "estimate_minutes": None,
+            "pipeline": "game_recap",
+            "clips": [],
+            "error": None,
+            "saved": True,
+            "pending_game_recap": {"game": game, "week_ending": week_ending},
+        }
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return job_id
+
+
+class GameRecapGenerateRequest(BaseModel):
+    game: str
+    week_ending: Optional[str] = None
+
+
+@protected.post("/api/game-recap/generate")
+def generate_game_recap(req: GameRecapGenerateRequest) -> dict:
+    """Queue a build of the "best <game> Twitch clips this week" recap as a
+    background job -- same "submit and watch the progress bar" flow as the
+    streamer-based weekly recap (see generate_weekly_recap), just sourced
+    by game (trending.get_top_clips_for_game, every streamer playing it)
+    instead of the tracked streamer roster. Always produces a draft for
+    review, never uploads on its own."""
+    game = (req.game or "").strip()
+    if not game:
+        raise HTTPException(400, "Enter a game name first.")
+    return {"job_id": _queue_game_recap_job(game, week_ending=req.week_ending)}
+
+
 # How often the recap scheduler wakes up to check whether it's time --
 # hourly is frequent enough to land within an hour of the target time
 # without a dedicated cron mechanism, and cheap enough to just poll.
@@ -1933,11 +2211,11 @@ def delete_clip(job_id: str, filename: str) -> dict:
     anymore -- exactly the moment most likely to actually match a new
     focus, permanently locked out.
 
-    A weekly-recap job has exactly one "clip" -- the whole compilation --
-    so deleting it leaves nothing else in that job worth keeping (there's
-    no source video or request to regenerate from, unlike a normal job).
-    Removes the whole job in that case instead of leaving an empty
-    "0 clip(s), Done" husk behind in the jobs list forever."""
+    A weekly-recap or game-recap job has exactly one "clip" -- the whole
+    compilation -- so deleting it leaves nothing else in that job worth
+    keeping (there's no source video or request to regenerate from, unlike
+    a normal job). Removes the whole job in that case instead of leaving
+    an empty "0 clip(s), Done" husk behind in the jobs list forever."""
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
@@ -1950,7 +2228,7 @@ def delete_clip(job_id: str, filename: str) -> dict:
             raise HTTPException(404, "clip not found")
         remaining = [c for c in clips if c.get("file") != filename]
 
-        if not remaining and job.get("pipeline") == "weekly_recap":
+        if not remaining and job.get("pipeline") in ("weekly_recap", "game_recap"):
             jobs.pop(job_id, None)
             cancel_events.pop(job_id, None)
             job_deleted = True
@@ -2491,6 +2769,11 @@ def analytics_page() -> str:
     return ANALYTICS_HTML
 
 
+@protected.get("/game-recap", response_class=HTMLResponse)
+def game_recap_page() -> str:
+    return GAME_RECAP_HTML
+
+
 app.include_router(protected)
 
 
@@ -2790,6 +3073,8 @@ hit Upload like any other clip.</div>
 <div id="weekly-recap-status" class="hint"></div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
+
+<button id="game-recap-link-btn" type="button" style="margin-top:10px">🎮 Best game clips this week</button>
 
 <button id="analytics-link-btn" type="button" style="margin-top:10px">📊 Analytics &amp; AI strategy</button>
 
@@ -3931,6 +4216,10 @@ document.getElementById('analytics-link-btn').addEventListener('click', () => {
   window.location.href = '/analytics';
 });
 
+document.getElementById('game-recap-link-btn').addEventListener('click', () => {
+  window.location.href = '/game-recap';
+});
+
 const weeklyRecapBtn = document.getElementById('weekly-recap-btn');
 const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
 const weeklyRecapStatus = document.getElementById('weekly-recap-status');
@@ -4645,6 +4934,357 @@ competitorSearchBtn.addEventListener('click', runCompetitorSearch);
 competitorSearchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') runCompetitorSearch();
 });
+</script>
+</body>
+</html>
+"""
+
+GAME_RECAP_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — game clips recap</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .back-link { display: inline-block; margin-bottom: 4px; color: var(--muted); font-size: 0.85rem; text-decoration: none; }
+  .back-link:hover { color: var(--accent); }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  #status-block { margin-top: 20px; display: none; }
+  #status-msg { font-size: 0.88rem; margin-bottom: 8px; }
+  #progress-track { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: linear-gradient(135deg, var(--accent), var(--accent2)); transition: width 0.3s; }
+  #error-msg { color: var(--danger); font-size: 0.88rem; margin-top: 10px; }
+  #result-block { margin-top: 16px; display: none; }
+  #result-block video { width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
+  #result-title { font-weight: 700; font-size: 0.95rem; margin-top: 10px; }
+  #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #result-actions button, #result-actions a { margin-top: 0; }
+  #result-actions a.dl-link {
+    display: inline-flex; align-items: center; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  #recent-list > div {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  #recent-list .meta { color: var(--muted); font-size: 0.75rem; }
+</style>
+</head>
+<body>
+<div class="page">
+  <a class="back-link" href="/">&larr; Back to clipper</a>
+  <div class="card">
+    <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
+    <div class="subtitle">
+      Pulls the top English-language Twitch clips for ONE GAME this week, across every streamer
+      playing it -- not just your tracked roster -- AI-screens them the same way the regular
+      weekly recap does, then compiles up to 20 into one landscape long-form countdown video
+      with an intro, a "#N StreamerName: Title" badge on each clip, and captions. Never uploads
+      on its own -- review, then hit Upload here like any other clip.
+    </div>
+
+    <label for="game-input">Game name</label>
+    <input id="game-input" type="text" placeholder="e.g. Watch Dogs: Legion" autocomplete="off">
+    <div class="hint">Must match Twitch's own game name (as it appears in a Twitch category/directory search).</div>
+
+    <label for="week-input">Specific week ending (optional)</label>
+    <input id="week-input" type="date">
+    <div class="hint">Leave blank for the trailing 7 days from now.</div>
+
+    <button id="generate-btn" type="button">Generate recap</button>
+    <div id="form-error" class="hint" style="color:var(--danger)"></div>
+
+    <div id="status-block">
+      <div id="status-msg"></div>
+      <div id="progress-track"><div id="progress-bar"></div></div>
+      <button id="cancel-btn" type="button" class="secondary">Cancel</button>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="result-block">
+      <div id="result-title"></div>
+      <video id="result-video" controls></video>
+      <div id="result-actions">
+        <a id="result-download" class="dl-link" download>Download</a>
+        <select id="upload-privacy">
+          <option value="unlisted" selected>Unlisted</option>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+        <button id="upload-btn" type="button">📤 Upload to YouTube</button>
+        <button id="delete-btn" type="button" class="secondary">🗑 Delete from server</button>
+      </div>
+      <div id="upload-status" class="hint"></div>
+    </div>
+
+    <div class="section">
+      <label style="margin-top:0">Recent game recaps</label>
+      <div id="recent-list"></div>
+      <div id="recent-empty" class="hint">None yet.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const gameInput = document.getElementById('game-input');
+const weekInput = document.getElementById('week-input');
+const generateBtn = document.getElementById('generate-btn');
+const formError = document.getElementById('form-error');
+const statusBlock = document.getElementById('status-block');
+const statusMsg = document.getElementById('status-msg');
+const progressBar = document.getElementById('progress-bar');
+const cancelBtn = document.getElementById('cancel-btn');
+const errorMsg = document.getElementById('error-msg');
+const resultBlock = document.getElementById('result-block');
+const resultTitle = document.getElementById('result-title');
+const resultVideo = document.getElementById('result-video');
+const resultDownload = document.getElementById('result-download');
+const uploadPrivacy = document.getElementById('upload-privacy');
+const uploadBtn = document.getElementById('upload-btn');
+const deleteBtn = document.getElementById('delete-btn');
+const uploadStatus = document.getElementById('upload-status');
+const recentList = document.getElementById('recent-list');
+const recentEmpty = document.getElementById('recent-empty');
+
+let currentJobId = null;
+let pollTimer = null;
+
+function resetView() {
+  statusBlock.style.display = 'none';
+  errorMsg.textContent = '';
+  resultBlock.style.display = 'none';
+  uploadStatus.textContent = '';
+}
+
+async function poll(jobId) {
+  let job;
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}`);
+    if (!resp.ok) return;
+    job = await resp.json();
+  } catch (e) {
+    return;
+  }
+  currentJobId = jobId;
+  statusBlock.style.display = 'block';
+  statusMsg.textContent = job.message || job.state;
+  progressBar.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+
+  if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    generateBtn.disabled = false;
+    cancelBtn.disabled = true;
+
+    if (job.error) {
+      errorMsg.textContent = job.error;
+    }
+    const clip = (job.clips || [])[0];
+    if (job.state === 'done' && clip) {
+      resultBlock.style.display = 'block';
+      resultTitle.textContent = clip.upload_title || clip.title || '';
+      resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+      resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
+    }
+    loadRecent();
+  }
+}
+
+function attachToJob(jobId) {
+  resetView();
+  if (pollTimer) clearInterval(pollTimer);
+  poll(jobId);
+  pollTimer = setInterval(() => poll(jobId), 2000);
+  generateBtn.disabled = true;
+  cancelBtn.disabled = false;
+}
+
+generateBtn.addEventListener('click', async () => {
+  const game = gameInput.value.trim();
+  formError.textContent = '';
+  if (!game) {
+    formError.textContent = 'Enter a game name first.';
+    return;
+  }
+  generateBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/game-recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game, week_ending: weekInput.value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      formError.textContent = data.detail || 'Could not queue the recap.';
+      generateBtn.disabled = false;
+      return;
+    }
+    attachToJob(data.job_id);
+  } catch (e) {
+    formError.textContent = 'Could not reach the server.';
+    generateBtn.disabled = false;
+  }
+});
+
+cancelBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  cancelBtn.disabled = true;
+  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+  const job = await resp0.json().catch(() => ({}));
+  const clip = (job.clips || [])[0];
+  if (!clip) return;
+  uploadBtn.disabled = true;
+  uploadStatus.textContent = 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: uploadPrivacy.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      uploadStatus.textContent = data.detail || 'Upload failed.';
+    } else {
+      uploadStatus.textContent = `Uploaded: ${data.url}`;
+    }
+  } catch (e) {
+    uploadStatus.textContent = 'Upload failed -- could not reach the server.';
+  } finally {
+    uploadBtn.disabled = false;
+  }
+});
+
+deleteBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if (!confirm("Delete this recap from the server? This can't be undone.")) return;
+  deleteBtn.disabled = true;
+  try {
+    const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+    const job = await resp0.json().catch(() => ({}));
+    const clip = (job.clips || [])[0];
+    if (clip) {
+      await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}`, { method: 'DELETE' });
+    }
+    resetView();
+    currentJobId = null;
+    loadRecent();
+  } finally {
+    deleteBtn.disabled = false;
+  }
+});
+
+async function loadRecent() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    const items = jobs.filter(j => j.pipeline === 'game_recap');
+    recentList.innerHTML = '';
+    recentEmpty.style.display = items.length ? 'none' : 'block';
+    items.forEach(j => {
+      const row = document.createElement('div');
+      const left = document.createElement('div');
+      left.textContent = j.source_title || j.id;
+      const right = document.createElement('div');
+      right.className = 'meta';
+      right.textContent = j.state === 'error' ? '⚠ failed'
+        : ['done', 'cancelled'].includes(j.state) ? '✅ done' : '⏳ ' + j.state;
+      row.appendChild(left);
+      row.appendChild(right);
+      row.addEventListener('click', () => attachToJob(j.id));
+      recentList.appendChild(row);
+    });
+  } catch (e) {
+    // leave the list as-is on a failed background refresh
+  }
+}
+loadRecent();
+setInterval(loadRecent, 8000);
 </script>
 </body>
 </html>
