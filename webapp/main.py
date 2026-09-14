@@ -1364,15 +1364,92 @@ def _render_twitch_clip_for_recap(
     `badge_text` (e.g. "#7 Jynxzi: Insane 1v5 clutch") burns a persistent
     top-left rank badge into this clip for the whole clip's duration --
     appended into the same .ass file as the spoken captions so both
-    render in one ffmpeg pass, rather than a second overlay pass."""
+    render in one ffmpeg pass, rather than a second overlay pass.
+
+    Renders directly rather than going through render_clip/_render_atomic's
+    shared -ss(input-side)/-t(output-side) trim. That mechanism is the
+    right choice for a normal Short, which often trims a short window out
+    of a multi-hour source VOD -- -ss's fast keyframe seek matters a lot
+    there. But real downloaded Twitch-clip footage can have its video and
+    audio streams start at slightly different native PTS offsets (routine
+    when they were captured/encoded separately), and an output-level -t
+    cap doesn't reliably normalize that away -- it can leave the rendered
+    clip's own audio track a little longer than its video, which then
+    compounds across every clip after it once concatenated (confirmed
+    live even after capping the requested duration at the shorter of the
+    two source streams' own lengths -- that alone wasn't the whole
+    story). Since a recap clip always starts at 0 anyway, there's no
+    seek-speed benefit to lose here, so explicit trim/atrim with a
+    setpts/asetpts reset to zero -- the same technique already used for
+    the intro/outro cards -- costs nothing extra and removes the
+    ambiguity entirely.
+
+    Two more subtleties beyond the reset, both confirmed by direct
+    testing, not just theory:
+
+    - The reset has to happen BEFORE the trim, not after. trim/atrim cut
+      against the stream's ORIGINAL clock, so trim-then-reset on a stream
+      whose real content starts at a non-zero native offset silently
+      drops that many seconds (captures [offset, duration] of the
+      original clock, which is only (duration - offset) seconds once
+      renumbered from zero) -- reset-then-trim uses the stream's own
+      first real frame as the zero point first, so the requested
+      duration is measured from where the content actually starts.
+    - Video can only be cut on frame boundaries (~33ms steps at 30fps);
+      audio can be cut at sample precision. Asking trim for an exact
+      duration that lands between two frame starts is a no-op for that
+      frame -- trim keeps a frame if its own start PTS is before the
+      cutoff, so a cutoff a hair under an existing frame's start doesn't
+      remove it, and the video comes out effectively untrimmed while
+      audio (which isn't quantized to frame boundaries) trims correctly,
+      opening exactly the kind of video/audio length mismatch this whole
+      function exists to avoid. Rounding the requested duration to a
+      whole frame first, and using that same rounded value for both
+      trim and atrim, keeps both streams cutting at a boundary video can
+      actually hit."""
+    import subprocess
+
     layout = center_crop_layout(video_path, target_w=_RECAP_OUT_W, target_h=_RECAP_OUT_H)
     ass_path = out_path.with_suffix(".ass")
     build_ass(words, 0.0, ass_path, play_res=(_RECAP_OUT_W, _RECAP_OUT_H))
     if badge_text:
         with ass_path.open("a", encoding="utf-8") as f:
             f.write("\n" + rank_badge_dialogue(badge_text, duration))
-    _render_atomic(video_path, 0.0, duration, layout, ass_path, out_path, out_w=_RECAP_OUT_W, out_h=_RECAP_OUT_H)
-    ass_path.unlink(missing_ok=True)
+    ass_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
+
+    out_fps = 30
+    quantized_duration = round(duration * out_fps) / out_fps
+
+    tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
+    filter_complex = (
+        f"[0:v]setpts=PTS-STARTPTS,trim=0:{quantized_duration},"
+        f"crop={layout.w}:{layout.h}:{layout.x}:{layout.y},"
+        f"scale={_RECAP_OUT_W}:{_RECAP_OUT_H},fps={out_fps},ass='{ass_escaped}'[outv];"
+        f"[0:a]asetpts=PTS-STARTPTS,atrim=0:{quantized_duration}[outa]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(tmp_path),
+    ]
+    try:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"ffmpeg timed out after {e.timeout:.0f}s rendering {out_path.name}"
+            ) from e
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed rendering {out_path.name}:\n{result.stderr[-2000:]}")
+        os.replace(tmp_path, out_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        ass_path.unlink(missing_ok=True)
 
 
 def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> None:
