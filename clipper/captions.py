@@ -18,6 +18,15 @@ _BASE_OUTLINE = 6
 _BASE_MARGIN_LR = 60
 _BASE_MARGIN_V = 220
 
+# The rank-badge overlay (see rank_badge_dialogue) is a small persistent
+# top-left label, not a spoken caption -- tuned much smaller than the
+# karaoke captions above so it reads as a corner badge, not competing
+# text. Scaled by the same height ratio as the caption style so it stays
+# proportionally sized on any output resolution.
+_BASE_BADGE_FONTSIZE = 44
+_BASE_BADGE_OUTLINE = 14  # box padding, via BorderStyle 3 below
+_BASE_BADGE_MARGIN = 40
+
 
 def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     width, height = play_res
@@ -26,6 +35,9 @@ def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     outline = max(1, round(_BASE_OUTLINE * scale))
     margin_lr = max(0, round(_BASE_MARGIN_LR * scale))
     margin_v = max(0, round(_BASE_MARGIN_V * scale))
+    badge_fontsize = max(1, round(_BASE_BADGE_FONTSIZE * scale))
+    badge_outline = max(1, round(_BASE_BADGE_OUTLINE * scale))
+    badge_margin = max(0, round(_BASE_BADGE_MARGIN * scale))
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -36,6 +48,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
+Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -68,6 +81,15 @@ def _escape_ass_text(text: str) -> str:
     for bad, safe in _ASS_UNSAFE_CHARS.items():
         text = text.replace(bad, safe)
     return text
+
+
+def rank_badge_dialogue(text: str, duration: float) -> str:
+    """One static top-left-anchored Dialogue line spanning a clip's whole
+    duration, using the RankBadge style from _ass_header. Meant to be
+    appended into the same .ass file as the clip's own word-by-word
+    captions (see build_ass) rather than written to a separate file, so
+    both burn in during the same ffmpeg pass."""
+    return f"Dialogue: 0,{_fmt_ts(0)},{_fmt_ts(duration)},RankBadge,,0,0,0,,{_escape_ass_text(text)}"
 
 
 def _group_words(words: List[Word], max_words: int = 4, max_span: float = 2.2) -> List[List[Word]]:
