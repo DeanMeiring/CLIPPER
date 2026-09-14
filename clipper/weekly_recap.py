@@ -63,13 +63,34 @@ def build_candidate_pool(clips: list) -> list:
     return pool
 
 
+# Every segment of a recap -- intro card, each clip, outro card -- must be
+# encoded with this exact audio layout, because build_recap_video joins them
+# with ffmpeg's concat demuxer and that demuxer does NOT resample. It sets the
+# decode/encode pipeline up from the FIRST input and then reinterprets every
+# later file's samples at that rate. The intro card used to generate 44100 Hz
+# silence while real Twitch clips render at their native 48 kHz, so every
+# clip's audio after it was replayed ~8.8% slow (48000/44100) and fell further
+# behind the video the longer the recap ran -- a delay measured at 1.9s across
+# only 21s of test footage, growing without bound over a real recap.
+#
+# Normalizing every segment (not just the generated cards) is deliberate: a
+# source clip that happens to be 44.1 kHz would otherwise reintroduce exactly
+# the same mismatch from the other direction.
+AUDIO_RATE = 48000
+AUDIO_CHANNELS = 2
+AUDIO_ENCODE_ARGS = ["-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CHANNELS)]
+
+
 def build_recap_video(clip_paths: list, out_path: Path) -> None:
     """Concatenate clips back to back into one long-form video. Re-encodes
     rather than using the much faster stream-copy concat mode, because
     every input isn't guaranteed to share identical encoder parameters
     (e.g. a clip rendered before some past render.py change) -- concat
     demuxer's stream-copy mode fails hard, or silently produces broken
-    output, the moment any input disagrees with the first one."""
+    output, the moment any input disagrees with the first one.
+
+    Pins the output's audio layout to AUDIO_ENCODE_ARGS for the same
+    reason every input is pinned to it -- see that constant."""
     import subprocess
 
     if len(clip_paths) < 2:
@@ -83,7 +104,7 @@ def build_recap_video(clip_paths: list, out_path: Path) -> None:
     cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k",
+        "-c:a", "aac", "-b:a", "160k", *AUDIO_ENCODE_ARGS,
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -345,11 +366,11 @@ def build_outro_clip(out_path: Path, text: str, duration: float = 4.0, out_w: in
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", f"color=c=black:s={out_w}x{out_h}:d={duration}:r=30",
-        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
         "-filter_complex", f"[0:v]ass='{ass_escaped}'[v];[1:a]atrim=duration={duration}[a]",
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k",
+        "-c:a", "aac", "-b:a", "160k", *AUDIO_ENCODE_ARGS,
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -419,7 +440,7 @@ def build_intro_clip(
     cmd = [
         "ffmpeg", "-y",
         "-i", str(source_video),
-        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo",
         "-filter_complex",
         (
             f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,"
@@ -428,7 +449,7 @@ def build_intro_clip(
         ),
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k",
+        "-c:a", "aac", "-b:a", "160k", *AUDIO_ENCODE_ARGS,
         "-movflags", "+faststart",
         str(out_path),
     ]
