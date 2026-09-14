@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass
+from clipper.captions import build_ass, rank_badge_dialogue
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -968,7 +968,29 @@ def _worker() -> None:
             job_queue.task_done()
 
 
+def _cleanup_empty_recap_stubs() -> None:
+    """One-time startup sweep for weekly-recap job husks left behind by a
+    clip deletion that predates delete_clip's own cleanup (see
+    delete_clip) -- an empty "0 clip(s), Done" entry with nothing useful
+    left to do with it, stuck in the jobs list until removed by hand.
+    Runs once after _load_persisted_jobs so any stub already on disk
+    clears itself on the next deploy instead of needing a manual
+    "I've downloaded these" click per stub."""
+    with jobs_lock:
+        stale_ids = [
+            job_id for job_id, job in jobs.items()
+            if job.get("pipeline") == "weekly_recap"
+            and job.get("state") in TERMINAL_STATES
+            and not (job.get("clips") or [])
+        ]
+        for job_id in stale_ids:
+            jobs.pop(job_id, None)
+    for job_id in stale_ids:
+        shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+
+
 _load_persisted_jobs()
+_cleanup_empty_recap_stubs()
 threading.Thread(target=_worker, daemon=True).start()
 
 
@@ -1321,7 +1343,9 @@ _RECAP_OUT_W = 1920
 _RECAP_OUT_H = 1080
 
 
-def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list, out_path: Path) -> None:
+def _render_twitch_clip_for_recap(
+    video_path: Path, duration: float, words: list, out_path: Path, badge_text: Optional[str] = None,
+) -> None:
     """Render one already-downloaded Twitch clip to landscape (1920x1080)
     with burned-in captions, for the recap's normal-video upload -- a raw
     Twitch clip download has no captions of its own, so those still need
@@ -1334,10 +1358,18 @@ def _render_twitch_clip_for_recap(video_path: Path, duration: float, words: list
     IS landscape, the same shape the clip was actually broadcast in, so
     a plain centered crop-to-16:9 (a no-op whenever the source is already
     16:9, which a Twitch clip almost always is) already shows everything
-    the streamer's own layout composited, facecam included."""
+    the streamer's own layout composited, facecam included.
+
+    `badge_text` (e.g. "#7 Jynxzi: Insane 1v5 clutch") burns a persistent
+    top-left rank badge into this clip for the whole clip's duration --
+    appended into the same .ass file as the spoken captions so both
+    render in one ffmpeg pass, rather than a second overlay pass."""
     layout = center_crop_layout(video_path, target_w=_RECAP_OUT_W, target_h=_RECAP_OUT_H)
     ass_path = out_path.with_suffix(".ass")
     build_ass(words, 0.0, ass_path, play_res=(_RECAP_OUT_W, _RECAP_OUT_H))
+    if badge_text:
+        with ass_path.open("a", encoding="utf-8") as f:
+            f.write("\n" + rank_badge_dialogue(badge_text, duration))
     _render_atomic(video_path, 0.0, duration, layout, ass_path, out_path, out_w=_RECAP_OUT_W, out_h=_RECAP_OUT_H)
     ass_path.unlink(missing_ok=True)
 
@@ -1353,21 +1385,28 @@ def _run_weekly_recap_job(job_id: str) -> None:
     on a real attempt) despite the work succeeding server-side -- moving
     it here is the actual fix, not just a nicer progress bar.
 
-    Source material is each tracked streamer's own most-viewed Twitch
-    clip(s) from the past week (trending.get_top_twitch_clips) -- Twitch's
-    own curated highlight moments (made from the Clip button, by the
-    creator or a viewer), available immediately with no dependency on
-    this app having already rendered and uploaded something for that
-    streamer first. Each chosen clip is downloaded and captioned (see
-    _render_twitch_clip_for_recap) before being concatenated as landscape
-    video -- normal-video shaped, not a Short, since a raw Twitch clip
-    download is already the streamer's own landscape broadcast frame
-    with no captions of its own.
+    Source material is this week's Twitch clips (trending.get_top_twitch_clips)
+    across all tracked streamers -- Twitch's own curated highlight moments
+    (made from the Clip button, by the creator or a viewer), available
+    immediately with no dependency on this app having already rendered
+    and uploaded something for that streamer first. Twitch view count
+    alone is a noisy quality signal though (a clip can rack up views just
+    for who's in it while being mostly the streamer talking with no real
+    moment), so each candidate is screened by weekly_recap.judge_clip_quality
+    on its own transcript before it's counted as a pick, walked in
+    view-count order with weekly_recap.MAX_CLIPS_PER_STREAMER capping how
+    many any one streamer can contribute -- falling through to the next
+    candidate whenever one is quality-skipped or capped, up to
+    weekly_recap.TARGET_CLIP_COUNT picks. The final video counts down from
+    the weakest of the picks to the biggest hit, which plays last, with a
+    "#N streamer: title" badge burned into each clip's top-left corner
+    (see _render_twitch_clip_for_recap).
 
     Ends in state "error" (not a raised exception) when there isn't
     enough to work with -- no tracked streamer had a clip this week, or
-    fewer than 2 candidates could actually be downloaded and rendered --
-    since that's a normal week, not a pipeline bug."""
+    fewer than 2 candidates actually passed the quality gate and could be
+    downloaded and rendered -- since that's a normal week, not a pipeline
+    bug."""
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_recap_source"
@@ -1377,76 +1416,126 @@ def _run_weekly_recap_job(job_id: str) -> None:
     _progress(job_id, 0.05)
     cancel()
     twitch_logins = [l for l in os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",") if l.strip()]
-    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=5)
-    pools = weekly_recap.group_clips_by_streamer(clips)
-    if not pools:
+    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=8)
+    pool = weekly_recap.build_candidate_pool(clips)
+    if not pool:
         _set(job_id, state="error", error="No Twitch clips found for your tracked streamers in the past week.")
         return
 
-    per_streamer = weekly_recap.per_streamer_count(len(pools))
-    total_candidates = sum(min(len(cs), per_streamer * 2) for cs in pools.values())  # rough, for the progress bar only
+    target_total = weekly_recap.TARGET_CLIP_COUNT
+    # Rough denominator for the progress bar only -- the real stopping
+    # point is target_total *good* picks, which can mean walking further
+    # into the pool than this if the quality gate skips several.
+    considered = min(len(pool), target_total * 3)
     # Reset created_at here (not when the job was queued) so the "time
     # remaining" math in the UI counts from when real work starts, not
     # from the brief Twitch-lookup step above -- same pattern _run_regenerate
     # uses once it knows enough to estimate.
-    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(total_candidates) / 60, 1))
+    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(considered) / 60, 1))
 
-    # Each streamer's candidates are already ranked by view count -- walk
-    # them in order and keep going past a download/transcription/render
-    # failure rather than dropping that streamer from the recap entirely
-    # just because their single top clip happened to fail.
-    rendered = []
+    # Walk the whole-roster pool in view-count order, downloading,
+    # transcribing, and quality-checking each candidate before counting
+    # it as a pick -- a per-streamer cap keeps one viral streamer from
+    # crowding out the rest, and a quality-skip or a download/
+    # transcription failure just falls through to the next candidate
+    # instead of giving up on that streamer (or the whole recap).
+    selected = []
+    per_streamer_picks: dict = {}
     processed = 0
-    for login, candidates in pools.items():
-        successes = 0
-        for c in candidates:
-            if successes >= per_streamer:
-                break
-            cancel()
-            processed += 1
-            display = weekly_recap.display_name({"streamer_login": login})
-            _set(job_id, state="rendering", message=f'Clip {processed}: {display} -- "{c.get("title", "")}"')
-            _progress(job_id, 0.05 + 0.85 * (processed / max(total_candidates, 1)))
-            try:
-                dl = download_video(c["url"], raw_dir)
-            except Exception as e:
-                print(f"[weekly_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
-                continue
-            try:
-                words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
-            except Exception as e:
-                print(f"[weekly_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
-                words = []
-            rendered_path = out_dir / f"src_{len(rendered):02d}.mp4"
-            try:
-                _render_twitch_clip_for_recap(dl.video_path, dl.duration, words, rendered_path)
-            except Exception as e:
-                print(f"[weekly_recap] render failed for clip {c.get('id')} ({login}): {e}", flush=True)
-                continue
-            actual_duration = _ffprobe_duration(rendered_path) or dl.duration
-            rendered.append({
-                "streamer_login": login,
-                "title": c.get("title") or "",
-                "duration": actual_duration,
-                "view_count": c.get("view_count") or 0,
-                "path": rendered_path,
-            })
-            successes += 1
+    for c in pool:
+        if len(selected) >= target_total:
+            break
+        cancel()
+        processed += 1
+        login = (c.get("streamer_login") or "").strip().lower()
+        display = weekly_recap.display_name({"streamer_login": login})
+        _set(job_id, state="checking", message=f'Checking clip {processed}: {display} -- "{c.get("title", "")}"')
+        _progress(job_id, 0.05 + 0.55 * (processed / max(considered, 1)))
+        if per_streamer_picks.get(login, 0) >= weekly_recap.MAX_CLIPS_PER_STREAMER:
+            continue
+        try:
+            dl = download_video(c["url"], raw_dir)
+        except Exception as e:
+            print(f"[weekly_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
+            continue
+        try:
+            words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
+        except Exception as e:
+            print(f"[weekly_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
+            words = []
+        transcript_text = " ".join(w.text for w in words)
+        verdict = weekly_recap.judge_clip_quality(c.get("title") or "", display, c.get("view_count") or 0, transcript_text)
+        if not verdict["keep"]:
+            print(f"[weekly_recap] skipping clip {c.get('id')} ({login}): {verdict['reason']}", flush=True)
+            continue
+        selected.append({
+            "streamer_login": login,
+            "title": c.get("title") or "",
+            "view_count": c.get("view_count") or 0,
+            "video_path": dl.video_path,
+            "duration": dl.duration,
+            "words": words,
+        })
+        per_streamer_picks[login] = per_streamer_picks.get(login, 0) + 1
+
+    if len(selected) < 2:
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            "Not enough of this week's Twitch clips passed the quality check and could be downloaded "
+            "to build a recap (need at least 2). Check the deploy logs for why specific clips were skipped."
+        ))
+        return
+
+    cancel()
+    # Rank purely by Twitch view count -- the quality gate above already
+    # filtered for whether a clip belongs in the recap at all; view count
+    # decides where within it. Rank 1 is this week's biggest hit.
+    selected.sort(key=lambda s: s["view_count"], reverse=True)
+    for i, s in enumerate(selected):
+        s["rank"] = i + 1
+    # Countdown order for the actual video: the weakest of the picks
+    # plays first, the biggest hit plays last as the payoff.
+    concat_order = list(reversed(selected))
+
+    rendered = []
+    total_render = len(concat_order)
+    for i, s in enumerate(concat_order):
+        cancel()
+        display = weekly_recap.display_name(s)
+        _set(job_id, state="rendering", message=f'Rendering clip {i + 1}/{total_render}: #{s["rank"]} {display}')
+        _progress(job_id, 0.6 + 0.3 * ((i + 1) / max(total_render, 1)))
+        rendered_path = out_dir / f"src_{i:02d}.mp4"
+        badge_text = weekly_recap.rank_badge_text(s["rank"], s)
+        try:
+            _render_twitch_clip_for_recap(s["video_path"], s["duration"], s["words"], rendered_path, badge_text=badge_text)
+        except Exception as e:
+            print(f"[weekly_recap] render failed for #{s['rank']} ({s['streamer_login']}): {e}", flush=True)
+            continue
+        actual_duration = _ffprobe_duration(rendered_path) or s["duration"]
+        rendered.append({
+            "streamer_login": s["streamer_login"],
+            "title": s["title"],
+            "duration": actual_duration,
+            "view_count": s["view_count"],
+            "rank": s["rank"],
+            "path": rendered_path,
+        })
 
     shutil.rmtree(raw_dir, ignore_errors=True)  # downloaded source no longer needed once rendered
 
     if len(rendered) < 2:
         shutil.rmtree(out_dir, ignore_errors=True)
         _set(job_id, state="error", error=(
-            "Not enough of this week's Twitch clips could be downloaded and rendered to build a recap "
+            "Rendering failed for too many of this week's selected clips to build a recap "
             "(need at least 2). Check the deploy logs for why a specific clip failed."
         ))
         return
 
     cancel()
-    # Biggest hit first -- a compilation's opening clip is what decides
-    # whether someone keeps watching, same as any other Short.
-    rendered.sort(key=lambda r: r["view_count"], reverse=True)
+    # `rendered` is already in countdown (on-screen) order from the
+    # render loop above -- do NOT re-sort by view count here, that would
+    # undo the countdown.
     concat_paths = [r["path"] for r in rendered]
 
     _set(job_id, state="rendering", message="Adding an outro...")
@@ -2497,12 +2586,14 @@ INDEX_HTML = """<!doctype html>
 
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
 <button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
-<div class="hint">Pulls each tracked streamer's own most-viewed Twitch clip from the past week,
-adds captions, and concatenates them into one landscape long-form draft (a normal
-video, not a Short -- no 60s cap, no #Shorts tag) -- top 2 per streamer with 5 or
-fewer streamers having a clip this week, top 1 each above that. A fresh one also
-builds automatically every Monday. Never uploads on its own -- review, trim, and
-hit Upload like any other clip.</div>
+<div class="hint">Counts down this week's best Twitch clips across all tracked streamers (up to
+10), ranked by view count but AI-screened first so a highly-viewed clip that's
+mostly rambling gets skipped in favor of the next one -- max 3 picks per streamer
+so no single streamer crowds out the rest. Adds captions and a "#N streamer: title"
+badge to each clip, then concatenates them into one landscape long-form draft (a
+normal video, not a Short -- no 60s cap, no #Shorts tag), weakest pick first,
+biggest hit last. A fresh one also builds automatically every Monday. Never
+uploads on its own -- review, trim, and hit Upload like any other clip.</div>
 <div id="weekly-recap-status" class="hint"></div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
