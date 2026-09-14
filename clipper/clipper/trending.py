@@ -198,16 +198,24 @@ def get_recommendation_candidates(
     return entries
 
 
-def get_top_twitch_clips(logins: List[str], days: float = 7.0, per_streamer: int = 5) -> List[dict]:
+def get_top_twitch_clips(
+    logins: List[str], days: float = 7.0, per_streamer: int = 5, ended_at: Optional[datetime] = None,
+) -> List[dict]:
     """Twitch's own most-viewed clips (the ones made from the Clip button
-    on a stream, by the creator or by a viewer) for each login over the
-    last `days` -- these are already curated highlight moments with a
-    real Twitch view count, usable the moment a stream ends rather than
-    only after this app has rendered and the creator has uploaded
-    something for that streamer. Used by the weekly recap as its source
-    material. Twitch's clips endpoint already returns each broadcaster's
-    clips sorted by view count when given a date range, so no separate
-    ranking call is needed here.
+    on a stream, by the creator or by a viewer) for each login over a
+    `days`-long window -- these are already curated highlight moments
+    with a real Twitch view count, usable the moment a stream ends
+    rather than only after this app has rendered and the creator has
+    uploaded something for that streamer. Used by the weekly recap as
+    its source material. Twitch's clips endpoint already returns each
+    broadcaster's clips sorted by view count when given a date range, so
+    no separate ranking call is needed here.
+
+    `ended_at` (a timezone-aware datetime) anchors the window to end at
+    a specific point instead of now -- lets the weekly recap build an
+    older week's video (e.g. one that was missed) instead of always
+    pulling the trailing `days` from the moment it's clicked. Omit it
+    for the normal "this week" behavior.
 
     Returns raw Helix clip dicts (id, url, title, view_count, duration,
     created_at, ...) plus a "streamer_login" key, up to `per_streamer`
@@ -224,8 +232,16 @@ def get_top_twitch_clips(logins: List[str], days: float = 7.0, per_streamer: int
     import requests
     from datetime import datetime, timedelta, timezone
 
+    end = ended_at or datetime.now(timezone.utc)
+    started_at = (end - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
-    started_at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    clip_params = {"started_at": started_at, "first": per_streamer}
+    # Twitch's clips endpoint treats a request with no ended_at as "up to
+    # now" -- only pin it down explicitly when the caller actually asked
+    # for a bounded-in-the-past window, so the default "this week" case
+    # behaves exactly as it always has.
+    if ended_at is not None:
+        clip_params["ended_at"] = end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         users_resp = requests.get(
@@ -246,7 +262,7 @@ def get_top_twitch_clips(logins: List[str], days: float = 7.0, per_streamer: int
         try:
             resp = requests.get(
                 "https://api.twitch.tv/helix/clips",
-                params={"broadcaster_id": user["id"], "started_at": started_at, "first": per_streamer},
+                params={"broadcaster_id": user["id"], **clip_params},
                 headers=headers, timeout=15,
             )
             resp.raise_for_status()

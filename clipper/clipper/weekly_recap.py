@@ -25,11 +25,19 @@ facecam included) and the recap stays landscape too.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
 
 DEFAULT_MODEL = os.environ.get("CLIPPER_MODEL", "claude-sonnet-4-5")
+
+# The recap's fixed series title -- "Top 10 Twitch Clips of the Week
+# #{episode}" -- rather than a fresh AI-guessed headline every time.
+# A recurring series someone is posting on a regular cadence benefits
+# from a stable, predictable name viewers (and YouTube's own recs) come
+# to recognize, more than novelty each week.
+SERIES_TITLE = "Top 10 Twitch Clips of the Week"
 
 # How many clips the countdown aims for, if the tracked roster and the
 # quality gate leave enough good candidates to reach it -- "top ten" as
@@ -176,14 +184,36 @@ def judge_clip_quality(
         return default
 
 
+def next_episode_number(path: Path) -> int:
+    """Reads and increments a persisted counter for the recap's fixed
+    series title ("Top 10 Twitch Clips of the Week #N", see SERIES_TITLE)
+    -- starts at 1 the first time this is ever called, and survives
+    restarts since `path` lives on the same persistent volume as
+    everything else in BASE_DIR. Best-effort: a write failure just means
+    the same episode number could repeat next time, which is a cosmetic
+    problem, not a reason to fail an otherwise-good recap."""
+    n = 1
+    try:
+        if path.exists():
+            n = int(json.loads(path.read_text(encoding="utf-8")).get("next", 1))
+    except (OSError, ValueError, TypeError):
+        n = 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"next": n + 1}), encoding="utf-8")
+    except OSError:
+        pass
+    return n
+
+
 def _build_hook_prompt(lineup: list, week_label: str) -> str:
     lines = [
         f'- {display_name(u)}: "{u.get("title", "")}" ({u.get("view_count", 0)} views on Twitch)'
         for u in lineup
     ]
     clips_block = "\n".join(lines)
-    return f"""You're writing the title and description opener for a YouTube compilation
-video that stitches together this week's best Twitch clips from {len(lineup)} clip(s)
+    return f"""You're writing the description opener for a YouTube compilation video
+that stitches together this week's best Twitch clips from {len(lineup)} clip(s)
 across multiple streamers this creator clips regularly. Every clip here is a real,
 audience-tested highlight -- picked by Twitch view count AND a pass for whether it
 actually has a moment in it, not a guess -- so you can lean on that instead of
@@ -194,28 +224,25 @@ LAST, so the clips below are listed in the order they actually appear on screen
 Clips in this compilation, in on-screen order ({week_label}):
 {clips_block}
 
-Write:
-TITLE: a punchy, clickable YouTube title, under 100 characters. Naming the biggest
-streamer(s) usually helps; use a hook (a number, a strong verb, "insane"/"wild" etc.)
-only where it actually fits what's in the clips above -- never oversell something
-the description doesn't back up.
-HOOK: 1-2 sentences for the very top of the description that make someone want to
-keep watching. Specific to what's actually in these clips (name a streamer or a
-moment), not a generic "check out this week's craziest moments!".
+Write 1-2 sentences for the very top of the video description that make someone
+want to keep watching. Specific to what's actually in these clips (name a
+streamer or a moment), not a generic "check out this week's craziest moments!".
 
-Answer in exactly this format, nothing else, no markdown:
-TITLE: <title>
-HOOK: <hook>"""
+Answer with just that text, nothing else -- no label, no markdown, no quotes
+around it."""
 
 
-def generate_recap_hook(lineup: list, week_label: str, api_key: Optional[str] = None, model: str = DEFAULT_MODEL) -> Optional[dict]:
-    """A punchier, Claude-written title + opening hook than the plain
-    deterministic one below -- best-effort: returns None on any failure
-    (no ANTHROPIC_API_KEY, a network error, an unparseable response) so
-    the recap can still ship with the deterministic fallback rather than
-    blocking the whole build on this one call."""
-    import re
-
+def generate_recap_hook(lineup: list, week_label: str, api_key: Optional[str] = None, model: str = DEFAULT_MODEL) -> Optional[str]:
+    """A punchier, Claude-written opening line for the description than
+    the plain deterministic one below -- best-effort: returns None on
+    any failure (no ANTHROPIC_API_KEY, a network error, an empty
+    response) so the recap can still ship with the deterministic
+    fallback rather than blocking the whole build on this one call.
+    Only the description's opening hook is AI-written -- the video's
+    actual title is always the fixed, numbered SERIES_TITLE (see
+    build_recap_metadata), since a series someone posts on a regular
+    cadence needs a stable, predictable name, not a fresh guess every
+    week."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key or not lineup:
         return None
@@ -224,56 +251,49 @@ def generate_recap_hook(lineup: list, week_label: str, api_key: Optional[str] = 
 
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
-            model=model, max_tokens=300,
+            model=model, max_tokens=200,
             messages=[{"role": "user", "content": _build_hook_prompt(lineup, week_label)}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-        title_match = re.search(r"TITLE:\s*(.+)", text)
-        hook_match = re.search(r"HOOK:\s*(.+)", text, re.S)
-        if not title_match or not hook_match:
-            return None
-        title = title_match.group(1).strip().splitlines()[0][:100]
-        hook = hook_match.group(1).strip()
-        if not title or not hook:
-            return None
-        return {"title": title, "hook": hook}
+        return text or None
     except Exception as e:
-        print(f"[weekly_recap] AI title/hook generation failed, using the deterministic fallback: {e}", flush=True)
+        print(f"[weekly_recap] AI hook generation failed, using the deterministic fallback: {e}", flush=True)
         return None
 
 
 def build_recap_metadata(
-    lineup: list, week_label: str, api_key: Optional[str] = None, model: str = DEFAULT_MODEL,
+    lineup: list, week_label: str, episode: int, api_key: Optional[str] = None, model: str = DEFAULT_MODEL,
+    intro_offset: float = 0.0,
 ) -> dict:
-    """A title + a chapter-formatted description (YouTube turns a
-    description starting "0:00 ..." into clickable chapters). Tries a
-    punchier Claude-written title/hook first (generate_recap_hook); the
-    chapters themselves are always the same plain arithmetic over
-    durations already known from each clip's own render, Claude or not,
-    since those need to stay accurate, not "captivating".
+    """A fixed, numbered title (see SERIES_TITLE) + a chapter-formatted
+    description (YouTube turns a description starting "0:00 ..." into
+    clickable chapters). Tries a punchier Claude-written opening line
+    first (generate_recap_hook); the chapters themselves are always the
+    same plain arithmetic over durations already known from each clip's
+    own render, Claude or not, since those need to stay accurate, not
+    "captivating".
 
     `lineup` arrives in actual on-screen (countdown) order -- weakest of
     the picks first, biggest hit last -- since the chapters below have to
-    match the real video. The deterministic fallback title should still
-    lead with the biggest names though, so it re-ranks a copy by view
-    count rather than naming whoever happens to be picked #10."""
-    names = [display_name(u) for u in sorted(lineup, key=lambda u: u.get("view_count", 0), reverse=True)]
-    seen: set = set()
-    ordered_names = [n for n in names if not (n in seen or seen.add(n))]
+    match the real video. `intro_offset` shifts every chapter timestamp
+    by the intro card's duration (see build_intro_clip) when one was
+    prepended to the video, so the chapters still line up with what's
+    actually on screen."""
+    title = f"{SERIES_TITLE} #{episode}"[:100]
 
-    ai = generate_recap_hook(lineup, week_label, api_key, model)
-    if ai:
-        title = ai["title"]
-        intro = ai["hook"]
+    hook = generate_recap_hook(lineup, week_label, api_key, model)
+    if hook:
+        intro = hook
     else:
-        title = f"Best Clips of the Week: {', '.join(ordered_names[:4])}"
-        if len(ordered_names) > 4:
-            title += " & more"
-        title = title[:100]
+        names = [display_name(u) for u in sorted(lineup, key=lambda u: u.get("view_count", 0), reverse=True)]
+        seen: set = set()
+        ordered_names = [n for n in names if not (n in seen or seen.add(n))]
         intro = f"This week's best clips from {', '.join(ordered_names)} ({week_label})."
 
     lines = [intro, ""]
-    t = 0.0
+    t = intro_offset
+    if intro_offset:
+        lines.append(f"0:00 Intro -- {title}")
     for u in lineup:
         minutes, seconds = divmod(int(t), 60)
         lines.append(f"{minutes}:{seconds:02d} {display_name(u)} -- {u.get('title', '')}")
@@ -331,3 +351,60 @@ def build_outro_clip(out_path: Path, text: str, duration: float = 4.0, out_w: in
     ass_path.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed building the outro:\n{result.stderr[-2000:]}")
+
+
+def build_intro_clip(
+    source_video: Path, out_path: Path, title_text: str,
+    duration: float = 3.5, slow_factor: float = 1.8, out_w: int = 1920, out_h: int = 1080,
+) -> None:
+    """A short intro card prepended before the countdown starts: a
+    dimmed, slow-motion peek at the first (weakest-ranked) clip with the
+    series title burned in over it, so the video announces itself before
+    diving straight into clip #10's own captions. Reuses the exact
+    libass caption-rendering path build_outro_clip does for its text --
+    same \\an5-centered override on the shared Caption style -- just
+    layered over slowed/darkened footage instead of a blank background.
+
+    `source_video` should already be this recap's own landscape
+    (out_w x out_h) output -- this doesn't crop or reframe it, only
+    trims, slows, darkens, and captions it. Slowing stretches
+    `duration / slow_factor` seconds of real footage into `duration`
+    seconds of intro, so even the shortest clip this app renders has
+    comfortably enough source to draw from.
+
+    Needs a silent audio track (not the source clip's own audio) for the
+    same reason build_outro_clip does -- build_recap_video's concat step
+    re-encodes assuming every input has a matching video+audio layout,
+    and playing the source's real (sped-down, pitch-shifted) audio under
+    a title card would also just sound wrong."""
+    import subprocess
+
+    from .captions import _ass_header, _escape_ass_text, _fmt_ts
+
+    ass_path = out_path.with_suffix(".ass")
+    dialogue = f"Dialogue: 0,{_fmt_ts(0)},{_fmt_ts(duration)},Caption,,0,0,0,,{{\\an5}}{_escape_ass_text(title_text)}"
+    ass_path.write_text(_ass_header((out_w, out_h)) + dialogue + "\n", encoding="utf-8")
+    ass_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
+
+    source_seconds = duration / slow_factor
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(source_video),
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-t", f"{duration}",
+        "-filter_complex",
+        f"[0:v]trim=0:{source_seconds},setpts={slow_factor}*PTS,eq=brightness=-0.35,ass='{ass_escaped}'[v]",
+        "-map", "[v]", "-map", "1:a", "-shortest",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as e:
+        ass_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s building the intro") from e
+    ass_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed building the intro:\n{result.stderr[-2000:]}")

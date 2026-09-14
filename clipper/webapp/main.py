@@ -71,6 +71,7 @@ _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
 _reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
+_recap_episode_path = BASE_DIR / "_recap_episode_number.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -304,7 +305,7 @@ def _run_job(job_id: str) -> None:
         _run_manual_facecam_render(job_id, pending_manual_facecam)
         return
     if pending_weekly_recap is not None:
-        _run_weekly_recap_job(job_id)
+        _run_weekly_recap_job(job_id, week_ending=pending_weekly_recap.get("week_ending"))
         return
 
     req: JobRequest = jobs[job_id]["request"]
@@ -1374,18 +1375,26 @@ def _render_twitch_clip_for_recap(
     ass_path.unlink(missing_ok=True)
 
 
-def _run_weekly_recap_job(job_id: str) -> None:
-    """Build this week's cross-streamer recap on the shared worker thread
-    -- same async, progress-reporting flow as a normal clip job (the
-    existing progress bar/poll UI just works for this job too), rather
-    than blocking the request handler for however long it takes to
-    download, transcribe, and render several Twitch clips back to back.
-    The first version of this feature did exactly that and reliably
-    outran the client/proxy's own timeout ("could not reach the server"
-    on a real attempt) despite the work succeeding server-side -- moving
-    it here is the actual fix, not just a nicer progress bar.
+def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> None:
+    """Build a cross-streamer recap on the shared worker thread -- same
+    async, progress-reporting flow as a normal clip job (the existing
+    progress bar/poll UI just works for this job too), rather than
+    blocking the request handler for however long it takes to download,
+    transcribe, and render several Twitch clips back to back. The first
+    version of this feature did exactly that and reliably outran the
+    client/proxy's own timeout ("could not reach the server" on a real
+    attempt) despite the work succeeding server-side -- moving it here
+    is the actual fix, not just a nicer progress bar.
 
-    Source material is this week's Twitch clips (trending.get_top_twitch_clips)
+    `week_ending` (an ISO "YYYY-MM-DD" date, or None) anchors the source
+    window: None means the normal trailing-7-days-from-now behavior,
+    while a date builds the 7 days ending on it instead -- for catching
+    up on an older week rather than always getting whatever's aired
+    since now. An unparseable date is treated the same as None rather
+    than failing the job, since it can only ever come from the date
+    picker's own <input type="date">.
+
+    Source material is that week's Twitch clips (trending.get_top_twitch_clips)
     across all tracked streamers -- Twitch's own curated highlight moments
     (made from the Clip button, by the creator or a viewer), available
     immediately with no dependency on this app having already rendered
@@ -1397,13 +1406,14 @@ def _run_weekly_recap_job(job_id: str) -> None:
     view-count order with weekly_recap.MAX_CLIPS_PER_STREAMER capping how
     many any one streamer can contribute -- falling through to the next
     candidate whenever one is quality-skipped or capped, up to
-    weekly_recap.TARGET_CLIP_COUNT picks. The final video counts down from
+    weekly_recap.TARGET_CLIP_COUNT picks. The final video opens with an
+    intro card (see weekly_recap.build_intro_clip), then counts down from
     the weakest of the picks to the biggest hit, which plays last, with a
     "#N streamer: title" badge burned into each clip's top-left corner
     (see _render_twitch_clip_for_recap).
 
     Ends in state "error" (not a raised exception) when there isn't
-    enough to work with -- no tracked streamer had a clip this week, or
+    enough to work with -- no tracked streamer had a clip that week, or
     fewer than 2 candidates actually passed the quality gate and could be
     downloaded and rendered -- since that's a normal week, not a pipeline
     bug."""
@@ -1412,14 +1422,29 @@ def _run_weekly_recap_job(job_id: str) -> None:
     raw_dir = out_dir / "_recap_source"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    _set(job_id, state="checking", message="Looking up this week's top Twitch clips...")
+    ended_at = None
+    if week_ending:
+        try:
+            ended_at = (
+                datetime.datetime.strptime(week_ending, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                + datetime.timedelta(days=1)
+            )
+        except ValueError:
+            print(f"[weekly_recap] could not parse week_ending {week_ending!r}, using this week instead", flush=True)
+            ended_at = None
+
+    _set(
+        job_id, state="checking",
+        message=f"Looking up top Twitch clips for the week of {week_ending}..." if ended_at
+        else "Looking up this week's top Twitch clips...",
+    )
     _progress(job_id, 0.05)
     cancel()
     twitch_logins = [l for l in os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",") if l.strip()]
-    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=8)
+    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=8, ended_at=ended_at)
     pool = weekly_recap.build_candidate_pool(clips)
     if not pool:
-        _set(job_id, state="error", error="No Twitch clips found for your tracked streamers in the past week.")
+        _set(job_id, state="error", error="No Twitch clips found for your tracked streamers in that week.")
         return
 
     target_total = weekly_recap.TARGET_CLIP_COUNT
@@ -1538,6 +1563,25 @@ def _run_weekly_recap_job(job_id: str) -> None:
     # undo the countdown.
     concat_paths = [r["path"] for r in rendered]
 
+    # Reserved now, not earlier -- only once a video is actually going to
+    # finish, so a failed attempt (too few clips passed the quality gate,
+    # a render blew up) doesn't burn an episode number nothing ever used.
+    episode = weekly_recap.next_episode_number(_recap_episode_path)
+    title_text = f"{weekly_recap.SERIES_TITLE} #{episode}"
+
+    _set(job_id, state="rendering", message="Adding an intro...")
+    _progress(job_id, 0.88)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        # A missing intro is a cosmetic loss, not a reason to fail an
+        # otherwise-good recap -- ship it without one instead.
+        print(f"[weekly_recap] could not build the intro, skipping it: {e}", flush=True)
+
     _set(job_id, state="rendering", message="Adding an outro...")
     _progress(job_id, 0.92)
     outro_path = out_dir / "outro.mp4"
@@ -1564,16 +1608,17 @@ def _run_weekly_recap_job(job_id: str) -> None:
         p.unlink(missing_ok=True)
 
     clips_duration = round(sum(r["duration"] for r in rendered), 2)
-    # The concat re-encode's actual output duration (outro included) is
-    # the real source of truth for what plays back -- summed per-clip
-    # durations are close but can drift slightly from re-encode rounding.
-    total_duration = _ffprobe_duration(out_path) or clips_duration
+    # The concat re-encode's actual output duration (intro+outro
+    # included) is the real source of truth for what plays back --
+    # summed per-clip durations are close but can drift slightly from
+    # re-encode rounding.
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
     streamer_count = len({r["streamer_login"] for r in rendered})
-    now = datetime.datetime.now(datetime.timezone.utc)
-    week_label = f"{now - datetime.timedelta(days=7):%b %d}-{now:%b %d}"
-    meta = weekly_recap.build_recap_metadata(rendered, week_label)
+    week_end = ended_at - datetime.timedelta(days=1) if ended_at else datetime.datetime.now(datetime.timezone.utc)
+    week_label = f"{week_end - datetime.timedelta(days=7):%b %d}-{week_end:%b %d}"
+    meta = weekly_recap.build_recap_metadata(rendered, week_label, episode, intro_offset=intro_duration)
     if outro_added:
-        minutes, seconds = divmod(int(clips_duration), 60)
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
         meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
 
     message = f"Weekly recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
@@ -1607,19 +1652,25 @@ def _run_weekly_recap_job(job_id: str) -> None:
     )
 
 
-def _queue_weekly_recap_job() -> str:
+def _queue_weekly_recap_job(week_ending: Optional[str] = None) -> str:
     """Creates and enqueues a weekly-recap job for the shared worker
     thread to pick up (see _run_job's pending_weekly_recap dispatch and
-    _run_weekly_recap_job) -- shared by the manual button endpoint and
-    the Monday scheduler below, so both go through the exact same async,
+    _run_weekly_recap_job) -- shared by the manual button endpoint, the
+    "generate a specific week" date-picker flow, and the Monday
+    scheduler below, so all three go through the exact same async,
     progress-reporting path rather than one of them running the (multi-
-    minute) build inline."""
+    minute) build inline.
+
+    `week_ending` (an ISO "YYYY-MM-DD" date, or None for the normal
+    trailing-7-days-from-now behavior) lets a creator catch up on an
+    older week instead of always getting whatever's aired in the last
+    7 days -- see _run_weekly_recap_job."""
     job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
             "source_url": None,
-            "source_title": "Weekly recap",
+            "source_title": f"Weekly recap (week of {week_ending})" if week_ending else "Weekly recap",
             "created_at": time.time(),
             "state": "queued",
             "message": "Queued",
@@ -1629,7 +1680,7 @@ def _queue_weekly_recap_job() -> str:
             "clips": [],
             "error": None,
             "saved": True,
-            "pending_weekly_recap": True,
+            "pending_weekly_recap": {"week_ending": week_ending},
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
@@ -1637,14 +1688,21 @@ def _queue_weekly_recap_job() -> str:
     return job_id
 
 
+class WeeklyRecapGenerateRequest(BaseModel):
+    week_ending: Optional[str] = None
+
+
 @protected.post("/api/weekly-recap/generate")
-def generate_weekly_recap() -> dict:
-    """Queue this week's recap build as a background job -- the same
-    "submit and watch the progress bar" flow as generating regular clips,
-    since the actual build can take minutes (see _run_weekly_recap_job)
-    and blocking the request for that long isn't reliable. Always
-    produces a draft for review, never uploads on its own."""
-    return {"job_id": _queue_weekly_recap_job()}
+def generate_weekly_recap(req: WeeklyRecapGenerateRequest) -> dict:
+    """Queue a recap build as a background job -- the same "submit and
+    watch the progress bar" flow as generating regular clips, since the
+    actual build can take minutes (see _run_weekly_recap_job) and
+    blocking the request for that long isn't reliable. Defaults to this
+    week's clips; pass week_ending (an ISO "YYYY-MM-DD" date) to build an
+    older week's recap instead -- e.g. to catch up on a week that was
+    missed. Always produces a draft for review, never uploads on its
+    own."""
+    return {"job_id": _queue_weekly_recap_job(week_ending=req.week_ending)}
 
 
 # How often the recap scheduler wakes up to check whether it's time --
@@ -2586,14 +2644,22 @@ INDEX_HTML = """<!doctype html>
 
 <button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
 <button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
-<div class="hint">Counts down this week's best Twitch clips across all tracked streamers (up to
+<button id="weekly-recap-pick-week-btn" type="button" style="margin-top:10px;margin-left:8px">📅 Generate a specific week...</button>
+<div id="weekly-recap-date-picker" hidden style="margin-top:10px;padding:10px;border:1px solid #333;border-radius:6px">
+  <div class="hint" id="weekly-recap-date-hint" style="margin-bottom:6px"></div>
+  <input type="date" id="weekly-recap-date-input">
+  <button id="weekly-recap-date-generate-btn" type="button">Generate</button>
+  <button id="weekly-recap-date-cancel-btn" type="button">Cancel</button>
+</div>
+<div class="hint">Counts down that week's best Twitch clips across all tracked streamers (up to
 10), ranked by view count but AI-screened first so a highly-viewed clip that's
 mostly rambling gets skipped in favor of the next one -- max 3 picks per streamer
-so no single streamer crowds out the rest. Adds captions and a "#N streamer: title"
-badge to each clip, then concatenates them into one landscape long-form draft (a
-normal video, not a Short -- no 60s cap, no #Shorts tag), weakest pick first,
-biggest hit last. A fresh one also builds automatically every Monday. Never
-uploads on its own -- review, trim, and hit Upload like any other clip.</div>
+so no single streamer crowds out the rest. Opens with an intro card, adds captions
+and a "#N streamer: title" badge to each clip, then concatenates them into one
+landscape long-form draft (a normal video, not a Short -- no 60s cap, no #Shorts
+tag), weakest pick first, biggest hit last. A fresh one for the current week also
+builds automatically every Monday. Never uploads on its own -- review, trim, and
+hit Upload like any other clip.</div>
 <div id="weekly-recap-status" class="hint"></div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
@@ -3741,6 +3807,12 @@ document.getElementById('analytics-link-btn').addEventListener('click', () => {
 const weeklyRecapBtn = document.getElementById('weekly-recap-btn');
 const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
 const weeklyRecapStatus = document.getElementById('weekly-recap-status');
+const weeklyRecapPickWeekBtn = document.getElementById('weekly-recap-pick-week-btn');
+const weeklyRecapDatePicker = document.getElementById('weekly-recap-date-picker');
+const weeklyRecapDateHint = document.getElementById('weekly-recap-date-hint');
+const weeklyRecapDateInput = document.getElementById('weekly-recap-date-input');
+const weeklyRecapDateGenerateBtn = document.getElementById('weekly-recap-date-generate-btn');
+const weeklyRecapDateCancelBtn = document.getElementById('weekly-recap-date-cancel-btn');
 let latestWeeklyRecapJobId = null;
 
 // Finds the most recent weekly-recap job (if any) and updates the "Go to
@@ -3781,11 +3853,18 @@ weeklyRecapViewBtn.addEventListener('click', () => {
 refreshWeeklyRecapViewBtn();
 setInterval(refreshWeeklyRecapViewBtn, 5000);
 
-weeklyRecapBtn.addEventListener('click', async () => {
-  weeklyRecapBtn.disabled = true;
+// Shared by the "this week" button and the date-picker's "Generate"
+// button below -- both just queue the same background job with a
+// different (or absent) week_ending, then jump to its live progress.
+async function queueWeeklyRecap(weekEnding, triggerBtn) {
+  triggerBtn.disabled = true;
   weeklyRecapStatus.textContent = '';
   try {
-    const resp = await fetch('/api/weekly-recap/generate', { method: 'POST' });
+    const resp = await fetch('/api/weekly-recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ week_ending: weekEnding || null }),
+    });
     const data = await resp.json();
     if (!resp.ok) {
       weeklyRecapStatus.textContent = data.detail || 'Could not queue the recap.';
@@ -3800,8 +3879,42 @@ weeklyRecapBtn.addEventListener('click', async () => {
   } catch (e) {
     weeklyRecapStatus.textContent = 'Could not reach the server.';
   } finally {
-    weeklyRecapBtn.disabled = false;
+    triggerBtn.disabled = false;
   }
+}
+
+weeklyRecapBtn.addEventListener('click', () => queueWeeklyRecap(null, weeklyRecapBtn));
+
+// yyyy-mm-dd in LOCAL time (not toISOString, which is UTC and can land
+// on the wrong day depending on the viewer's timezone) -- matches what
+// <input type="date"> both displays and expects back.
+function localDateInputValue(date) {
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+weeklyRecapPickWeekBtn.addEventListener('click', () => {
+  const isHidden = weeklyRecapDatePicker.hidden;
+  weeklyRecapDatePicker.hidden = !isHidden;
+  if (!isHidden) return;
+  const today = new Date();
+  const lastWeek = new Date(today.getTime() - 7 * 86400000);
+  weeklyRecapDateInput.max = localDateInputValue(today);
+  weeklyRecapDateInput.value = localDateInputValue(lastWeek);
+  weeklyRecapDateHint.textContent =
+    `Today: ${today.toDateString()} -- defaulted to last week, ending ${lastWeek.toDateString()}. `
+    + `Pick any past date; the recap covers the 7 days ending on it.`;
+});
+weeklyRecapDateCancelBtn.addEventListener('click', () => {
+  weeklyRecapDatePicker.hidden = true;
+});
+weeklyRecapDateGenerateBtn.addEventListener('click', () => {
+  if (!weeklyRecapDateInput.value) {
+    weeklyRecapStatus.textContent = 'Pick a date first.';
+    return;
+  }
+  weeklyRecapDatePicker.hidden = true;
+  queueWeeklyRecap(weeklyRecapDateInput.value, weeklyRecapDateGenerateBtn);
 });
 
 const notifyTestBtn = document.getElementById('notify-test-btn');
