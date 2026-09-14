@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import queue
+import random
 import secrets
 import shutil
 import threading
@@ -1947,7 +1948,14 @@ def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = Non
     selected.sort(key=lambda s: s["view_count"], reverse=True)
     for i, s in enumerate(selected):
         s["rank"] = i + 1
-    concat_order = list(reversed(selected))
+    # Hook viewers with the week's biggest hit right away instead of making
+    # them wait through a countdown for it (unlike the streamer recap's
+    # weakest-first build to a payoff) -- rank 1 plays first, then the rest
+    # of the picks play in a shuffled (not rank-ordered) mix, so the video
+    # doesn't taper off predictably after the opener either.
+    most_viewed, rest = selected[0], selected[1:]
+    random.shuffle(rest)
+    concat_order = [most_viewed] + rest
 
     rendered = []
     total_render = len(concat_order)
