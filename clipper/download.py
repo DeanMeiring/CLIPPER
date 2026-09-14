@@ -395,3 +395,44 @@ def _ffprobe_duration(video_path: Path) -> float:
         capture_output=True, text=True, check=True, timeout=30,
     )
     return float(result.stdout.strip())
+
+
+def usable_render_duration(video_path: Path, fallback: float) -> float:
+    """The longest duration a render can safely request without asking
+    for more video than actually exists -- the container-level duration
+    _ffprobe_duration reads reflects whichever of the video/audio
+    streams happens to be longer, not the video specifically. That's
+    silently wrong whenever the two were sourced and encoded separately
+    and merged into one file (routine for a yt-dlp video+audio download):
+    if audio runs a beat longer than video, requesting the container's
+    reported duration renders a clip whose audio track outlives its
+    video -- invisible in one clip played alone, but concatenating
+    several such clips back to back (see weekly_recap.build_recap_video)
+    pushes each next clip's audio a little later than its video, and
+    that overhang compounds with every clip after it into a large,
+    obvious delay by the end.
+
+    Returns the shorter of the video and audio streams' own individually
+    probed durations, so a render is never asked to produce video frames
+    that aren't there. Falls back to `fallback` (the caller's already-
+    known container-level duration) if either stream can't be probed,
+    rather than failing the render over a best-effort correction."""
+    import subprocess
+
+    durations = []
+    for stream in ("v:0", "a:0"):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-select_streams", stream,
+                    "-show_entries", "stream=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
+                ],
+                capture_output=True, text=True, check=True, timeout=30,
+            )
+            text = result.stdout.strip()
+            if text:
+                durations.append(float(text))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            continue
+    return min(durations) if durations else fallback
