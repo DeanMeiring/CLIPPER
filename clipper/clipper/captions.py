@@ -18,13 +18,16 @@ _BASE_OUTLINE = 6
 _BASE_MARGIN_LR = 60
 _BASE_MARGIN_V = 220
 
-# The rank-badge overlay (see rank_badge_dialogue) is a small persistent
-# top-left label, not a spoken caption -- tuned much smaller than the
-# karaoke captions above so it reads as a corner badge, not competing
-# text. Scaled by the same height ratio as the caption style so it stays
-# proportionally sized on any output resolution.
-_BASE_BADGE_FONTSIZE = 44
-_BASE_BADGE_OUTLINE = 14  # box padding, via BorderStyle 3 below
+# The rank-badge overlay (see rank_badge_dialogue) is a persistent
+# top-left label, not a spoken caption -- still noticeably smaller than
+# the karaoke captions above so it reads as a corner badge, not competing
+# text, but sized (and boxed -- see the near-opaque BackColour on the
+# RankBadge style below) to actually read clearly over busy gameplay
+# footage rather than blend into it. Scaled by the same height ratio as
+# the caption style so it stays proportionally sized on any output
+# resolution.
+_BASE_BADGE_FONTSIZE = 62
+_BASE_BADGE_OUTLINE = 22  # box padding, via BorderStyle 3 below
 _BASE_BADGE_MARGIN = 40
 
 
@@ -48,7 +51,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
-Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
+Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
