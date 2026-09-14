@@ -1433,7 +1433,7 @@ def _render_twitch_clip_for_recap(
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-map", "[outa]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k",
+        "-c:a", "aac", "-b:a", "160k", *weekly_recap.AUDIO_ENCODE_ARGS,
         "-movflags", "+faststart",
         str(tmp_path),
     ]
@@ -1450,6 +1450,43 @@ def _render_twitch_clip_for_recap(
     finally:
         tmp_path.unlink(missing_ok=True)
         ass_path.unlink(missing_ok=True)
+
+
+def _log_recap_av_sync(recap_path: Path) -> None:
+    """Log the finished recap's video vs. audio stream length.
+
+    Audio drifting behind the video has been this feature's most
+    persistent bug, and every round of it was reported by ear ("still
+    delayed") with no way to tell from the server whether a given build
+    was actually better. The two stream durations are the measurement
+    that answers it: they should end within a few ms of each other, and
+    a drift that scales with the recap's length means the streams are
+    running at different effective rates rather than merely being cut at
+    slightly different points. Never raises -- a diagnostic that can
+    fail a finished render would be worse than no diagnostic."""
+    import subprocess
+
+    def _stream_duration(selector: str) -> Optional[float]:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", selector,
+                 "-show_entries", "stream=duration", "-of", "default=nk=1:nw=1", "-i", str(recap_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            return float(result.stdout.strip().splitlines()[0])
+        except (subprocess.SubprocessError, ValueError, IndexError):
+            return None
+
+    video, audio = _stream_duration("v:0"), _stream_duration("a:0")
+    if not video or audio is None:
+        print(f"[weekly_recap] could not probe {recap_path.name} for a/v sync", flush=True)
+        return
+    drift = audio - video
+    print(
+        f"[weekly_recap] {recap_path.name} a/v sync: video={video:.3f}s "
+        f"audio={audio:.3f}s drift={drift:+.3f}s ({drift / video * 100:+.2f}%)",
+        flush=True,
+    )
 
 
 def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> None:
@@ -1693,6 +1730,7 @@ def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> Non
         shutil.rmtree(out_dir, ignore_errors=True)
         _set(job_id, state="error", error=f"Could not build the recap: {e}")
         return
+    _log_recap_av_sync(out_path)
     for p in concat_paths:
         p.unlink(missing_ok=True)
 
