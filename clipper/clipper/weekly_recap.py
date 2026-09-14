@@ -365,28 +365,37 @@ def build_outro_clip(out_path: Path, text: str, duration: float = 4.0, out_w: in
 
 def build_intro_clip(
     source_video: Path, out_path: Path, title_text: str,
-    duration: float = 3.5, slow_factor: float = 1.8, out_w: int = 1920, out_h: int = 1080,
+    duration: float = 3.5, out_w: int = 1920, out_h: int = 1080,
 ) -> None:
     """A short intro card prepended before the countdown starts: a
-    dimmed, slow-motion peek at the first (weakest-ranked) clip with the
-    series title burned in over it, so the video announces itself before
-    diving straight into clip #10's own captions. Reuses the exact
-    libass caption-rendering path build_outro_clip does for its text --
-    same \\an5-centered override on the shared Caption style -- just
-    layered over slowed/darkened footage instead of a blank background.
+    dimmed peek at the first (weakest-ranked) clip, played at normal
+    speed, with the series title burned in over it, so the video
+    announces itself before diving straight into clip #10's own
+    captions. Reuses the exact libass caption-rendering path
+    build_outro_clip does for its text -- same \\an5-centered override
+    on the shared Caption style -- just layered over darkened footage
+    instead of a blank background.
+
+    Played at normal (1x) speed on purpose, not slow motion -- an
+    earlier version stretched it via `setpts`, which turned out to be
+    exactly what caused a much bigger, user-reported audio delay than a
+    quick local test with clean, constant-frame-rate test footage ever
+    showed: real Twitch-clip footage can have irregular native frame
+    timing, and rescaling THAT through setpts before resampling to a
+    fixed fps is a much less predictable operation than a plain trim.
+    Removing the rescale removes that whole class of risk, not just
+    patches around one measurement of it.
 
     `source_video` should already be this recap's own landscape
     (out_w x out_h) output -- this doesn't crop or reframe it, only
-    trims, slows, darkens, and captions it. Slowing stretches
-    `duration / slow_factor` seconds of real footage into `duration`
-    seconds of intro, so even the shortest clip this app renders has
-    comfortably enough source to draw from.
+    trims, darkens, and captions it.
 
     Needs a silent audio track (not the source clip's own audio) for the
     same reason build_outro_clip does -- build_recap_video's concat step
     re-encodes assuming every input has a matching video+audio layout,
-    and playing the source's real (sped-down, pitch-shifted) audio under
-    a title card would also just sound wrong.
+    and playing the source clip's own audio under a title card that
+    isn't showing that clip's own caption timing would also just be
+    confusing.
 
     Trims video and audio to `duration` with each stream's own filter
     (`trim`/`atrim`) rather than relying on `-shortest` to stop whichever
@@ -397,8 +406,7 @@ def build_intro_clip(
     concat's re-encode has no per-file resync point: a prepended clip
     (like this intro, first in line) with even a small mismatch shifts
     audio out of sync with video for the ENTIRE rest of the recap, not
-    just itself -- confirmed live (this is the fix for exactly that bug,
-    reported after the intro card first shipped)."""
+    just itself."""
     import subprocess
 
     from .captions import _ass_header, _escape_ass_text, _fmt_ts
@@ -408,14 +416,13 @@ def build_intro_clip(
     ass_path.write_text(_ass_header((out_w, out_h)) + dialogue + "\n", encoding="utf-8")
     ass_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
 
-    source_seconds = duration / slow_factor
     cmd = [
         "ffmpeg", "-y",
         "-i", str(source_video),
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
         "-filter_complex",
         (
-            f"[0:v]trim=0:{source_seconds},setpts={slow_factor}*(PTS-STARTPTS),"
+            f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,"
             f"eq=brightness=-0.35,ass='{ass_escaped}',fps=30,trim=duration={duration}[v];"
             f"[1:a]atrim=duration={duration}[a]"
         ),
