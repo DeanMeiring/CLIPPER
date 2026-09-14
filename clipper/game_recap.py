@@ -19,6 +19,7 @@ picking a game being a different creator decision than picking a week.
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,35 @@ from . import weekly_recap
 TARGET_CLIP_COUNT = 20
 
 SERIES_TITLE_TEMPLATE = "Best {game} Twitch Clips"
+
+# How much of the video's front end counts as "the hook" -- the window a
+# viewer decides whether to keep watching in, so it's filled with the
+# most-viewed picks in descending order rather than left to chance.
+DEFAULT_HOOK_SECONDS = 120.0
+
+
+def order_for_hook(clips: list, hook_seconds: float = DEFAULT_HOOK_SECONDS) -> list:
+    """Order picks so the first ~hook_seconds of the compiled video is
+    filled with the most-viewed clips, biggest first -- a strong opening
+    instead of a slow countdown build -- then the rest of the picks play
+    in a shuffled (not rank-ordered) mix, so the video doesn't taper off
+    predictably once the hook window ends either.
+
+    Each entry in `clips` needs "view_count" and "duration"; the input
+    order doesn't matter, this re-sorts by view_count itself. Returns a
+    NEW list in actual on-screen order -- doesn't mutate `clips`."""
+    ranked = sorted(clips, key=lambda c: c.get("view_count") or 0, reverse=True)
+    hook, rest = [], []
+    hook_total = 0.0
+    for c in ranked:
+        if hook_total < hook_seconds:
+            hook.append(c)
+            hook_total += float(c.get("duration") or 0.0)
+        else:
+            rest.append(c)
+    rest = list(rest)
+    random.shuffle(rest)
+    return hook + rest
 
 
 def _episode_key(game_name: str) -> str:

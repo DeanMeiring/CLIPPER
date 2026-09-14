@@ -302,6 +302,7 @@ def _run_job(job_id: str) -> None:
         pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
         pending_weekly_recap = jobs[job_id].pop("pending_weekly_recap", None)
         pending_game_recap = jobs[job_id].pop("pending_game_recap", None)
+        pending_game_recap_remix = jobs[job_id].pop("pending_game_recap_remix", None)
     if pending_regenerate is not None:
         _run_regenerate(job_id, pending_regenerate)
         return
@@ -313,6 +314,9 @@ def _run_job(job_id: str) -> None:
         return
     if pending_game_recap is not None:
         _run_game_recap_job(job_id, game=pending_game_recap["game"], week_ending=pending_game_recap.get("week_ending"))
+        return
+    if pending_game_recap_remix is not None:
+        _run_game_recap_remix(job_id, hook_seconds=pending_game_recap_remix.get("hook_seconds"))
         return
 
     req: JobRequest = jobs[job_id]["request"]
@@ -1947,7 +1951,10 @@ def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = Non
     selected.sort(key=lambda s: s["view_count"], reverse=True)
     for i, s in enumerate(selected):
         s["rank"] = i + 1
-    concat_order = list(reversed(selected))
+    # Front-load the biggest hits as the hook instead of making viewers
+    # wait through a countdown for them (unlike the streamer recap's
+    # weakest-first build to a payoff) -- see game_recap.order_for_hook.
+    concat_order = game_recap.order_for_hook(selected)
 
     rendered = []
     total_render = len(concat_order)
@@ -2021,8 +2028,16 @@ def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = Non
         _set(job_id, state="error", error=f"Could not build the recap: {e}")
         return
     _log_recap_av_sync(out_path)
-    for p in concat_paths:
-        p.unlink(missing_ok=True)
+    # Only the intro/outro cards are thrown away -- they're cheap to
+    # regenerate and the intro's darkened background depends on whichever
+    # clip is first, which a remix can change. Each per-clip render
+    # (src_NN.mp4, already badged/captioned) is kept on disk so
+    # /game-recap/remix (see _run_game_recap_remix) can re-cut the recap in
+    # a new order without re-downloading or re-transcribing anything --
+    # cleaned up together with the rest of the job's files whenever the
+    # job itself is deleted.
+    intro_path.unlink(missing_ok=True)
+    outro_path.unlink(missing_ok=True)
 
     clips_duration = round(sum(r["duration"] for r in rendered), 2)
     total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
@@ -2057,6 +2072,25 @@ def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = Non
             "source_frame": None,
             "is_recap": True,
         }],
+        # Everything /game-recap/remix needs to re-cut this recap in a
+        # different clip order without touching Twitch, downloads, or the
+        # AI quality gate again -- see _run_game_recap_remix.
+        game_recap_meta={
+            "game": game,
+            "episode": episode,
+            "week_label": week_label,
+            "picks": [
+                {
+                    "file": r["path"].name,
+                    "streamer_login": r["streamer_login"],
+                    "title": r["title"],
+                    "view_count": r["view_count"],
+                    "duration": r["duration"],
+                    "rank": r["rank"],
+                }
+                for r in rendered
+            ],
+        },
     )
 
 
@@ -2108,6 +2142,149 @@ def generate_game_recap(req: GameRecapGenerateRequest) -> dict:
     if not game:
         raise HTTPException(400, "Enter a game name first.")
     return {"job_id": _queue_game_recap_job(game, week_ending=req.week_ending)}
+
+
+def _run_game_recap_remix(job_id: str, hook_seconds: Optional[float] = None) -> None:
+    """Re-cut an already-finished game recap in a new clip order, reusing
+    the per-clip renders _run_game_recap_job kept on disk (see its
+    "game_recap_meta" field) instead of re-downloading, re-transcribing, or
+    re-running the AI quality gate on anything -- just game_recap.
+    order_for_hook (most-viewed clips fill the hook window, the rest
+    shuffled) followed by the same AUDIO_ENCODE_ARGS-pinned intro/outro/
+    concat calls the original build used.
+
+    Only the intro card gets rebuilt (its darkened background is whichever
+    clip is now first) and the outro is rebuilt fresh too, but every
+    src_NN.mp4 clip render is reused untouched -- so this is fast: no
+    downloads, no Whisper, no Claude quality-gate calls, just a handful of
+    short ffmpeg passes and one concat re-encode."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    with jobs_lock:
+        job = jobs.get(job_id)
+        meta = dict(job.get("game_recap_meta") or {}) if job else {}
+    picks = meta.get("picks") or []
+    game = meta.get("game") or "this game"
+    episode = meta.get("episode")
+    week_label = meta.get("week_label") or ""
+
+    missing = [p["file"] for p in picks if not (out_dir / p["file"]).is_file()]
+    if not picks or missing:
+        _set(job_id, state="error", error=(
+            "Can't remix this recap -- its per-clip source files are missing (an older recap, or "
+            "already cleaned up). Generate a fresh one instead."
+        ))
+        return
+
+    _set(job_id, state="rendering", message="Mixing clip order...")
+    _progress(job_id, 0.1)
+    cancel()
+    ordered = game_recap.order_for_hook(picks, hook_seconds=hook_seconds or game_recap.DEFAULT_HOOK_SECONDS)
+    concat_paths = [out_dir / p["file"] for p in ordered]
+
+    title_text = f"{game_recap.SERIES_TITLE_TEMPLATE.format(game=game)} #{episode}"
+
+    _set(job_id, state="rendering", message="Rebuilding the intro...")
+    _progress(job_id, 0.3)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        print(f"[game_recap] remix: could not build the intro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Rebuilding the outro...")
+    _progress(job_id, 0.4)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        print(f"[game_recap] remix: could not build the outro, skipping it: {e}", flush=True)
+
+    cancel()
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.6)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video(concat_paths, out_path)
+    except (RuntimeError, ValueError) as e:
+        _set(job_id, state="error", error=f"Could not rebuild the recap: {e}")
+        return
+    _log_recap_av_sync(out_path)
+    intro_path.unlink(missing_ok=True)
+    outro_path.unlink(missing_ok=True)
+
+    clips_duration = round(sum(p["duration"] for p in ordered), 2)
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
+    streamer_count = len({p["streamer_login"] for p in ordered})
+    new_meta = game_recap.build_recap_metadata(ordered, week_label, game, episode, intro_offset=intro_duration)
+    if outro_added:
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
+        new_meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
+
+    _set(
+        job_id,
+        state="done",
+        message=f"{game} recap remixed -- {len(ordered)} clip(s) from {streamer_count} streamer(s).",
+        progress=1.0,
+        source_title=new_meta["title"],
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": new_meta["title"],
+            "upload_title": new_meta["title"],
+            "description": new_meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+    )
+
+
+class GameRecapRemixRequest(BaseModel):
+    hook_seconds: Optional[float] = None
+
+
+@protected.post("/api/jobs/{job_id}/game-recap/remix")
+def remix_game_recap(job_id: str, req: GameRecapRemixRequest) -> dict:
+    """Queue a re-cut of an already-finished game recap in a new clip
+    order (see _run_game_recap_remix) -- the "Mix order" button's
+    endpoint. Goes through the same background job queue as a normal
+    generate, since the concat re-encode alone can take a while for a
+    long recap; reuses this job's id and per-clip files rather than
+    creating a new job."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.get("pipeline") != "game_recap":
+            raise HTTPException(400, "not a game-recap job")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        if not (job.get("game_recap_meta") or {}).get("picks"):
+            raise HTTPException(409, (
+                "This recap predates the mix-order feature (or its source clips were already cleaned "
+                "up) -- generate a fresh one instead."
+            ))
+        job["pending_game_recap_remix"] = {"hook_seconds": req.hook_seconds}
+        job["state"] = "queued"
+        job["message"] = "Queued -- mixing clip order"
+        job["progress"] = 0.0
+        job["error"] = None
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return {"ok": True}
 
 
 # How often the recap scheduler wakes up to check whether it's time --
@@ -5034,6 +5211,10 @@ GAME_RECAP_HTML = """<!doctype html>
   #result-block { margin-top: 16px; display: none; }
   #result-block video { width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
   #result-title { font-weight: 700; font-size: 0.95rem; margin-top: 10px; }
+  #result-desc-row { margin-top: 10px; }
+  #result-desc-row textarea { width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.85rem; font-family: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; resize: vertical; }
+  #result-desc-row button { margin-top: 6px; padding: 8px 14px; font-size: 0.85rem; }
   #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   #result-actions button, #result-actions a { margin-top: 0; }
   #result-actions a.dl-link {
@@ -5057,9 +5238,10 @@ GAME_RECAP_HTML = """<!doctype html>
     <div class="subtitle">
       Pulls the top English-language Twitch clips for ONE GAME this week, across every streamer
       playing it -- not just your tracked roster -- AI-screens them the same way the regular
-      weekly recap does, then compiles up to 20 into one landscape long-form countdown video
-      with an intro, a "#N StreamerName: Title" badge on each clip, and captions. Never uploads
-      on its own -- review, then hit Upload here like any other clip.
+      weekly recap does, then compiles up to 20 into one landscape long-form video: the first
+      ~2 minutes are the most-viewed picks (the hook), the rest play in a shuffled mix. Each clip
+      gets an intro card, a "#N StreamerName: Title" badge, and captions. Never uploads on its
+      own -- review, then hit Upload here like any other clip.
     </div>
 
     <label for="game-input">Game name</label>
@@ -5086,6 +5268,7 @@ GAME_RECAP_HTML = """<!doctype html>
       <video id="result-video" controls></video>
       <div id="result-actions">
         <a id="result-download" class="dl-link" download>Download</a>
+        <button id="mix-order-btn" type="button" class="secondary">🔀 Mix order</button>
         <select id="upload-privacy">
           <option value="unlisted" selected>Unlisted</option>
           <option value="private">Private</option>
@@ -5094,7 +5277,13 @@ GAME_RECAP_HTML = """<!doctype html>
         <button id="upload-btn" type="button">📤 Upload to YouTube</button>
         <button id="delete-btn" type="button" class="secondary">🗑 Delete from server</button>
       </div>
+      <div id="mix-order-hint" class="hint">Reorders the already-rendered clips (most-viewed fill the first ~2min hook, the rest shuffled) without re-downloading or re-checking anything -- only works on recaps generated after this feature shipped.</div>
       <div id="upload-status" class="hint"></div>
+      <div id="result-desc-row">
+        <label style="margin-top:0">Description (each clip's moment &amp; title, chaptered)</label>
+        <textarea id="result-desc" rows="8" readonly></textarea>
+        <button id="copy-desc-btn" type="button" class="secondary">Copy description</button>
+      </div>
     </div>
 
     <div class="section">
@@ -5119,6 +5308,9 @@ const resultBlock = document.getElementById('result-block');
 const resultTitle = document.getElementById('result-title');
 const resultVideo = document.getElementById('result-video');
 const resultDownload = document.getElementById('result-download');
+const resultDesc = document.getElementById('result-desc');
+const copyDescBtn = document.getElementById('copy-desc-btn');
+const mixOrderBtn = document.getElementById('mix-order-btn');
 const uploadPrivacy = document.getElementById('upload-privacy');
 const uploadBtn = document.getElementById('upload-btn');
 const deleteBtn = document.getElementById('delete-btn');
@@ -5134,6 +5326,7 @@ function resetView() {
   errorMsg.textContent = '';
   resultBlock.style.display = 'none';
   uploadStatus.textContent = '';
+  resultDesc.value = '';
 }
 
 async function poll(jobId) {
@@ -5155,6 +5348,7 @@ async function poll(jobId) {
     pollTimer = null;
     generateBtn.disabled = false;
     cancelBtn.disabled = true;
+    mixOrderBtn.disabled = false;
 
     if (job.error) {
       errorMsg.textContent = job.error;
@@ -5165,6 +5359,7 @@ async function poll(jobId) {
       resultTitle.textContent = clip.upload_title || clip.title || '';
       resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
       resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
+      resultDesc.value = clip.description || '';
     }
     loadRecent();
   }
@@ -5177,7 +5372,38 @@ function attachToJob(jobId) {
   pollTimer = setInterval(() => poll(jobId), 2000);
   generateBtn.disabled = true;
   cancelBtn.disabled = false;
+  mixOrderBtn.disabled = true;
 }
+
+copyDescBtn.addEventListener('click', () => {
+  if (!resultDesc.value) return;
+  navigator.clipboard.writeText(resultDesc.value).then(() => {
+    copyDescBtn.textContent = 'Copied!';
+    setTimeout(() => { copyDescBtn.textContent = 'Copy description'; }, 1500);
+  });
+});
+
+mixOrderBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  mixOrderBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/game-recap/remix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorMsg.textContent = data.detail || 'Could not mix the clip order.';
+      mixOrderBtn.disabled = false;
+      return;
+    }
+    attachToJob(currentJobId);
+  } catch (e) {
+    errorMsg.textContent = 'Could not reach the server.';
+    mixOrderBtn.disabled = false;
+  }
+});
 
 generateBtn.addEventListener('click', async () => {
   const game = gameInput.value.trim();
