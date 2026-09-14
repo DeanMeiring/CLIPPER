@@ -25,7 +25,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass, rank_badge_dialogue
-from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
+from clipper.download import _ffprobe_duration, download_video, is_url, probe_video, usable_render_duration
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
@@ -1493,12 +1493,24 @@ def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> Non
         if not verdict["keep"]:
             print(f"[weekly_recap] skipping clip {c.get('id')} ({login}): {verdict['reason']}", flush=True)
             continue
+        # The container-level duration (dl.duration) reflects whichever
+        # of the downloaded video/audio streams is longer, not the video
+        # specifically -- yt-dlp downloads them separately and merges
+        # them, and they routinely don't end at exactly the same point.
+        # Rendering to that duration when audio runs longer than video
+        # produces a clip whose audio outlives its video; invisible
+        # alone, but concatenating several such clips compounds that
+        # overhang into a large, growing delay by the end of the recap
+        # (confirmed live). Cap at the shorter of the two real streams
+        # instead, so a render never asks for video frames that aren't
+        # there.
+        render_duration = usable_render_duration(dl.video_path, dl.duration)
         selected.append({
             "streamer_login": login,
             "title": c.get("title") or "",
             "view_count": c.get("view_count") or 0,
             "video_path": dl.video_path,
-            "duration": dl.duration,
+            "duration": render_duration,
             "words": words,
         })
         per_streamer_picks[login] = per_streamer_picks.get(login, 0) + 1
