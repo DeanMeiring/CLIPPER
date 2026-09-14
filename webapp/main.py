@@ -1657,7 +1657,13 @@ def delete_clip(job_id: str, filename: str) -> dict:
     "funny ones") was still treating that time range as spoken for, so it
     could never reconsider it even though nothing kept was using it
     anymore -- exactly the moment most likely to actually match a new
-    focus, permanently locked out."""
+    focus, permanently locked out.
+
+    A weekly-recap job has exactly one "clip" -- the whole compilation --
+    so deleting it leaves nothing else in that job worth keeping (there's
+    no source video or request to regenerate from, unlike a normal job).
+    Removes the whole job in that case instead of leaving an empty
+    "0 clip(s), Done" husk behind in the jobs list forever."""
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
@@ -1669,21 +1675,30 @@ def delete_clip(job_id: str, filename: str) -> dict:
         if deleted is None:
             raise HTTPException(404, "clip not found")
         remaining = [c for c in clips if c.get("file") != filename]
-        job["clips"] = remaining
 
-        if deleted.get("window_index") is not None:
-            used_window_indices = set(job.get("used_window_indices") or [])
-            used_window_indices.discard(deleted["window_index"])
-            job["used_window_indices"] = list(used_window_indices)
+        if not remaining and job.get("pipeline") == "weekly_recap":
+            jobs.pop(job_id, None)
+            cancel_events.pop(job_id, None)
+            job_deleted = True
         else:
-            used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
-            target = (deleted.get("start"), deleted.get("end"))
-            used_ranges = [r for r in used_ranges if r != target]
-            job["used_ranges"] = [list(r) for r in used_ranges]
-    _persist(job_id)
+            job["clips"] = remaining
+            job_deleted = False
+            if deleted.get("window_index") is not None:
+                used_window_indices = set(job.get("used_window_indices") or [])
+                used_window_indices.discard(deleted["window_index"])
+                job["used_window_indices"] = list(used_window_indices)
+            else:
+                used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+                target = (deleted.get("start"), deleted.get("end"))
+                used_ranges = [r for r in used_ranges if r != target]
+                job["used_ranges"] = [list(r) for r in used_ranges]
 
-    _remove_clip_files(BASE_DIR / job_id, filename)
-    return {"ok": True, "clips": remaining}
+    if job_deleted:
+        shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+    else:
+        _persist(job_id)
+        _remove_clip_files(BASE_DIR / job_id, filename)
+    return {"ok": True, "clips": remaining, "job_deleted": job_deleted}
 
 
 @protected.delete("/api/jobs/{job_id}/clips")
@@ -3566,7 +3581,20 @@ async function poll(jobId) {
             delClipBtn.textContent = '🗑 Delete this clip';
             return;
           }
-          poll(jobId);
+          const data = await r.json().catch(() => ({}));
+          if (data.job_deleted) {
+            // A weekly-recap job has only this one clip -- the whole job
+            // is gone now too (see delete_clip), so there's nothing left
+            // for poll(jobId) to fetch. Clear the view instead of leaving
+            // the just-deleted clip on screen until a manual refresh.
+            clipsEl.innerHTML = '';
+            statusEl.textContent = '';
+            progressWrap.style.display = 'none';
+            await loadJobsList();
+            await refreshWeeklyRecapViewBtn();
+          } else {
+            poll(jobId);
+          }
         } catch (e) {
           alert('Could not delete this clip.');
           delClipBtn.disabled = false;
