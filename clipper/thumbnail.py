@@ -11,7 +11,7 @@ work in this container, for free.
 """
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .captions import _escape_ass_text
 from .loud_moments import find_loud_moments
@@ -30,6 +30,19 @@ def pick_thumbnail_frame_times(video_path: Path, duration: float, n: int = 4) ->
     candidates instead of just one. Never raises -- loud-moment detection
     failing (an unparseable audio track) just means every candidate falls
     back to the spread."""
+    # Clamp against the file's own real duration, not just the caller-
+    # supplied metadata value -- the two can drift apart (concat rounding,
+    # a stale duration field), and a candidate seeked past the actual end
+    # of the file is a real, previously-hit failure mode: ffmpeg exits 0
+    # but silently writes no frame at all (see render_thumbnail's own
+    # existence check, which exists because of exactly this).
+    try:
+        real_duration = _probe_duration(video_path)
+        if real_duration:
+            duration = min(duration, real_duration)
+    except Exception:
+        pass
+
     try:
         moments = find_loud_moments(video_path, duration)
     except Exception:
@@ -65,6 +78,18 @@ def _probe_dimensions(video_path: Path) -> tuple:
     return int(w_str), int(h_str)
 
 
+def _probe_duration(video_path: Path) -> Optional[float]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=duration", "-of", "default=nk=1:nw=1", "-i", str(video_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
 def render_thumbnail(video_path: Path, frame_time: float, text: str, out_path: Path) -> None:
     """Grab the frame at `frame_time` and burn `text` across it as a
     single bold yellow line with a black outline and a slight tilt --
@@ -73,8 +98,17 @@ def render_thumbnail(video_path: Path, frame_time: float, text: str, out_path: P
     Renders at the clip's own resolution (portrait for a normal Short,
     landscape for a recap clip) rather than forcing a fixed size -- the
     clip is already exactly the target aspect ratio, so there's nothing
-    to crop or scale, only text to burn on top."""
+    to crop or scale, only text to burn on top.
+
+    Clamps `frame_time` to just inside the file's own real duration, and
+    verifies the output actually got written -- both defend against the
+    same failure mode: ffmpeg given a seek past the input's real end
+    exits 0 but silently produces no frame at all, which without this
+    would leave a broken-image thumbnail with no error anywhere."""
     out_w, out_h = _probe_dimensions(video_path)
+    real_duration = _probe_duration(video_path)
+    if real_duration:
+        frame_time = max(0.0, min(frame_time, real_duration - 0.05))
     ass_path = out_path.with_suffix(".ass")
     fontsize = round(out_w * 0.105)
     outline = max(2, round(fontsize * 0.09))
@@ -110,3 +144,8 @@ def render_thumbnail(video_path: Path, frame_time: float, text: str, out_path: P
         ass_path.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed rendering thumbnail:\n{result.stderr[-2000:]}")
+    if not out_path.is_file() or out_path.stat().st_size == 0:
+        raise RuntimeError(
+            f"ffmpeg reported success but wrote no thumbnail (frame_time={frame_time:.3f}s):\n"
+            f"{result.stderr[-2000:]}"
+        )

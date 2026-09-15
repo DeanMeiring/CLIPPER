@@ -3044,6 +3044,11 @@ def game_recap_page() -> str:
     return GAME_RECAP_HTML
 
 
+@protected.get("/weekly-recap", response_class=HTMLResponse)
+def weekly_recap_page() -> str:
+    return WEEKLY_RECAP_HTML
+
+
 app.include_router(protected)
 
 
@@ -3089,6 +3094,16 @@ INDEX_HTML = """<!doctype html>
     padding: 40px 16px;
   }
   .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -3190,6 +3205,14 @@ INDEX_HTML = """<!doctype html>
   .clip a:hover { text-decoration: underline; }
   .clip strong { font-size: 0.98rem; }
   .clip em { color: var(--muted); font-size: 0.88rem; display: block; margin-top: 4px; font-style: italic; }
+  .clip-primary-row { display: flex; gap: 8px; margin-top: 12px; }
+  .clip-primary-row button { flex: 1; margin-top: 0; padding: 10px 14px; font-size: 0.86rem; }
+  .clip-secondary-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .clip-secondary-row button {
+    flex: 1; margin-top: 0; padding: 8px 10px; font-size: 0.78rem; font-weight: 600;
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+  }
+  .clip-secondary-row button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); opacity: 1; }
   .title-row { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
   .title-row input { flex: 1; margin-top: 0; font-weight: 600; }
   .title-row textarea { flex: 1; margin-top: 0; font-family: inherit; font-size: 0.85rem; resize: vertical; align-self: stretch; }
@@ -3238,6 +3261,12 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <div class="page">
+<div class="topnav">
+  <a href="/" class="active">Home</a>
+  <a href="/weekly-recap">Weekly Recap</a>
+  <a href="/game-recap">Game Recap</a>
+  <a href="/analytics">Analytics</a>
+</div>
 <div class="card">
 
 <div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
@@ -3327,31 +3356,7 @@ INDEX_HTML = """<!doctype html>
   <div id="jobs-list"></div>
 </div>
 
-<button id="weekly-recap-btn" type="button" style="margin-top:10px">🗓 Generate this week's recap</button>
-<button id="weekly-recap-view-btn" type="button" style="margin-top:10px;margin-left:8px" disabled>📺 No weekly recap yet</button>
-<button id="weekly-recap-pick-week-btn" type="button" style="margin-top:10px;margin-left:8px">📅 Generate a specific week...</button>
-<div id="weekly-recap-date-picker" hidden style="margin-top:10px;padding:10px;border:1px solid #333;border-radius:6px">
-  <div class="hint" id="weekly-recap-date-hint" style="margin-bottom:6px"></div>
-  <input type="date" id="weekly-recap-date-input">
-  <button id="weekly-recap-date-generate-btn" type="button">Generate</button>
-  <button id="weekly-recap-date-cancel-btn" type="button">Cancel</button>
-</div>
-<div class="hint">Counts down that week's best Twitch clips across all tracked streamers (up to
-10), ranked by view count but AI-screened first so a highly-viewed clip that's
-mostly rambling gets skipped in favor of the next one -- max 3 picks per streamer
-so no single streamer crowds out the rest. Opens with an intro card, adds captions
-and a "#N streamer: title" badge to each clip, then concatenates them into one
-landscape long-form draft (a normal video, not a Short -- no 60s cap, no #Shorts
-tag), weakest pick first, biggest hit last. A fresh one for the current week also
-builds automatically every Monday. Never uploads on its own -- review, trim, and
-hit Upload like any other clip.</div>
-<div id="weekly-recap-status" class="hint"></div>
-
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
-
-<button id="game-recap-link-btn" type="button" style="margin-top:10px">🎮 Best game clips this week</button>
-
-<button id="analytics-link-btn" type="button" style="margin-top:10px">📊 Analytics &amp; AI strategy</button>
 
 </div>
 </div>
@@ -4529,6 +4534,27 @@ async function poll(jobId) {
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+      // One clear primary action (Upload) plus a quieter secondary row for
+      // everything else -- four identical-weight buttons in a run-on line
+      // made it hard to tell at a glance which one actually ships the clip.
+      const primaryRow = document.createElement('div');
+      primaryRow.className = 'clip-primary-row';
+      const uploadBtn = document.createElement('button');
+      uploadBtn.type = 'button';
+      uploadBtn.textContent = '📤 Upload to YouTube';
+      uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
+      primaryRow.appendChild(uploadBtn);
+      div.appendChild(primaryRow);
+
+      const secondaryRow = document.createElement('div');
+      secondaryRow.className = 'clip-secondary-row';
+
+      const thumbBtn = document.createElement('button');
+      thumbBtn.type = 'button';
+      thumbBtn.textContent = '🖼 Thumbnail';
+      thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
+      secondaryRow.appendChild(thumbBtn);
+
       if (!c.is_recap) {
         // Always offered, even with neither field set -- a clip old
         // enough to predate source_video tracking entirely still has a
@@ -4542,31 +4568,15 @@ async function poll(jobId) {
         // a modal that can only ever fail.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
-        fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
-          : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam position' : '🎯 Add facecam manually';
-        fixBtn.style.marginLeft = '8px';
+        fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam'
+          : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam' : '🎯 Add facecam';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
-        div.appendChild(fixBtn);
+        secondaryRow.appendChild(fixBtn);
       }
-
-      const uploadBtn = document.createElement('button');
-      uploadBtn.type = 'button';
-      uploadBtn.textContent = '📤 Upload to YouTube';
-      uploadBtn.style.marginLeft = '8px';
-      uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
-      div.appendChild(uploadBtn);
-
-      const thumbBtn = document.createElement('button');
-      thumbBtn.type = 'button';
-      thumbBtn.textContent = '🖼 Thumbnail';
-      thumbBtn.style.marginLeft = '8px';
-      thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
-      div.appendChild(thumbBtn);
 
       const delClipBtn = document.createElement('button');
       delClipBtn.type = 'button';
-      delClipBtn.textContent = '🗑 Delete this clip';
-      delClipBtn.style.marginLeft = '8px';
+      delClipBtn.textContent = '🗑 Delete';
       delClipBtn.addEventListener('click', async () => {
         if (!confirm(`Delete ${c.file}? This can't be undone.`)) return;
         delClipBtn.disabled = true;
@@ -4577,7 +4587,7 @@ async function poll(jobId) {
             const data = await r.json().catch(() => ({}));
             alert(data.detail || 'Could not delete this clip.');
             delClipBtn.disabled = false;
-            delClipBtn.textContent = '🗑 Delete this clip';
+            delClipBtn.textContent = '🗑 Delete';
             return;
           }
           const data = await r.json().catch(() => ({}));
@@ -4590,17 +4600,17 @@ async function poll(jobId) {
             statusEl.textContent = '';
             progressWrap.style.display = 'none';
             await loadJobsList();
-            await refreshWeeklyRecapViewBtn();
           } else {
             poll(jobId);
           }
         } catch (e) {
           alert('Could not delete this clip.');
           delClipBtn.disabled = false;
-          delClipBtn.textContent = '🗑 Delete this clip';
+          delClipBtn.textContent = '🗑 Delete';
         }
       });
-      div.appendChild(delClipBtn);
+      secondaryRow.appendChild(delClipBtn);
+      div.appendChild(secondaryRow);
     }
 
     clipsEl.appendChild(div);
@@ -4640,127 +4650,6 @@ deleteBtn.addEventListener('click', async () => {
     deleteBtn.textContent = "🗑 I've downloaded these — delete from server";
   }
   deleteBtn.disabled = false;
-});
-
-document.getElementById('analytics-link-btn').addEventListener('click', () => {
-  window.location.href = '/analytics';
-});
-
-document.getElementById('game-recap-link-btn').addEventListener('click', () => {
-  window.location.href = '/game-recap';
-});
-
-const weeklyRecapBtn = document.getElementById('weekly-recap-btn');
-const weeklyRecapViewBtn = document.getElementById('weekly-recap-view-btn');
-const weeklyRecapStatus = document.getElementById('weekly-recap-status');
-const weeklyRecapPickWeekBtn = document.getElementById('weekly-recap-pick-week-btn');
-const weeklyRecapDatePicker = document.getElementById('weekly-recap-date-picker');
-const weeklyRecapDateHint = document.getElementById('weekly-recap-date-hint');
-const weeklyRecapDateInput = document.getElementById('weekly-recap-date-input');
-const weeklyRecapDateGenerateBtn = document.getElementById('weekly-recap-date-generate-btn');
-const weeklyRecapDateCancelBtn = document.getElementById('weekly-recap-date-cancel-btn');
-let latestWeeklyRecapJobId = null;
-
-// Finds the most recent weekly-recap job (if any) and updates the "Go to
-// this week's recap" button for it -- so it's reachable any time the
-// page is opened, not just right after clicking "Generate", including
-// the recap the Monday scheduler builds on its own with nobody watching,
-// and while one is still building (downloading/transcribing/rendering
-// several Twitch clips can take minutes -- see webapp/main.py's
-// _run_weekly_recap_job) so its live progress is always one click away.
-// Left visible-but-disabled rather than hidden when none exists yet, so
-// the feature itself is never invisible -- just says plainly there's
-// nothing to jump to.
-async function refreshWeeklyRecapViewBtn() {
-  try {
-    const resp = await fetch('/api/jobs');
-    if (!resp.ok) return;
-    const { jobs } = await resp.json();
-    const latest = jobs.find(j => j.pipeline === 'weekly_recap');
-    latestWeeklyRecapJobId = latest ? latest.id : null;
-    weeklyRecapViewBtn.disabled = !latest;
-    if (!latest) {
-      weeklyRecapViewBtn.textContent = '📺 No weekly recap yet';
-    } else if (latest.state === 'error') {
-      weeklyRecapViewBtn.textContent = '⚠ Last recap attempt failed -- view details';
-    } else if (['done', 'cancelled'].includes(latest.state)) {
-      weeklyRecapViewBtn.textContent = "📺 Go to this week's recap";
-    } else {
-      weeklyRecapViewBtn.textContent = '⏳ Recap building -- view progress';
-    }
-  } catch (e) {
-    // leave the button as-is -- a failed check here shouldn't reset an
-    // already-known recap or spam an error for a background refresh
-  }
-}
-weeklyRecapViewBtn.addEventListener('click', () => {
-  if (latestWeeklyRecapJobId) attachToJob(latestWeeklyRecapJobId);
-});
-refreshWeeklyRecapViewBtn();
-setInterval(refreshWeeklyRecapViewBtn, 5000);
-
-// Shared by the "this week" button and the date-picker's "Generate"
-// button below -- both just queue the same background job with a
-// different (or absent) week_ending, then jump to its live progress.
-async function queueWeeklyRecap(weekEnding, triggerBtn) {
-  triggerBtn.disabled = true;
-  weeklyRecapStatus.textContent = '';
-  try {
-    const resp = await fetch('/api/weekly-recap/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ week_ending: weekEnding || null }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      weeklyRecapStatus.textContent = data.detail || 'Could not queue the recap.';
-    } else {
-      // Queuing is near-instant -- the actual build runs as a background
-      // job (same as a normal clip job), so jump straight to its live
-      // progress rather than waiting here for it to finish.
-      await loadJobsList();
-      await refreshWeeklyRecapViewBtn();
-      attachToJob(data.job_id);
-    }
-  } catch (e) {
-    weeklyRecapStatus.textContent = 'Could not reach the server.';
-  } finally {
-    triggerBtn.disabled = false;
-  }
-}
-
-weeklyRecapBtn.addEventListener('click', () => queueWeeklyRecap(null, weeklyRecapBtn));
-
-// yyyy-mm-dd in LOCAL time (not toISOString, which is UTC and can land
-// on the wrong day depending on the viewer's timezone) -- matches what
-// <input type="date"> both displays and expects back.
-function localDateInputValue(date) {
-  const offsetMs = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10);
-}
-
-weeklyRecapPickWeekBtn.addEventListener('click', () => {
-  const isHidden = weeklyRecapDatePicker.hidden;
-  weeklyRecapDatePicker.hidden = !isHidden;
-  if (!isHidden) return;
-  const today = new Date();
-  const lastWeek = new Date(today.getTime() - 7 * 86400000);
-  weeklyRecapDateInput.max = localDateInputValue(today);
-  weeklyRecapDateInput.value = localDateInputValue(lastWeek);
-  weeklyRecapDateHint.textContent =
-    `Today: ${today.toDateString()} -- defaulted to last week, ending ${lastWeek.toDateString()}. `
-    + `Pick any past date; the recap covers the 7 days ending on it.`;
-});
-weeklyRecapDateCancelBtn.addEventListener('click', () => {
-  weeklyRecapDatePicker.hidden = true;
-});
-weeklyRecapDateGenerateBtn.addEventListener('click', () => {
-  if (!weeklyRecapDateInput.value) {
-    weeklyRecapStatus.textContent = 'Pick a date first.';
-    return;
-  }
-  weeklyRecapDatePicker.hidden = true;
-  queueWeeklyRecap(weeklyRecapDateInput.value, weeklyRecapDateGenerateBtn);
 });
 
 const notifyTestBtn = document.getElementById('notify-test-btn');
@@ -4841,6 +4730,16 @@ ANALYTICS_HTML = """<!doctype html>
     padding: 40px 16px;
   }
   .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -4916,9 +4815,14 @@ ANALYTICS_HTML = """<!doctype html>
 </head>
 <body>
 <div class="page">
+<div class="topnav">
+  <a href="/">Home</a>
+  <a href="/weekly-recap">Weekly Recap</a>
+  <a href="/game-recap">Game Recap</a>
+  <a href="/analytics" class="active">Analytics</a>
+</div>
 <div class="card">
 
-<a href="/" class="back-link">&larr; Back to clipper</a>
 <div class="brand"><span class="logo">📊</span><h1>Analytics &amp; AI strategy</h1></div>
 <p class="subtitle">Best day to post, what's working, and how you compare to channels clipping the same streamers.</p>
 
@@ -5411,6 +5315,16 @@ GAME_RECAP_HTML = """<!doctype html>
     padding: 40px 16px;
   }
   .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -5481,11 +5395,31 @@ GAME_RECAP_HTML = """<!doctype html>
     font-size: 0.85rem; cursor: pointer;
   }
   #recent-list .meta { color: var(--muted); font-size: 0.75rem; }
+  #thumbnail-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  #thumbnail-modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; width: 100%; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
+  .modal p { margin: 0 0 8px; font-size: 0.95rem; }
+  .modal .hint { margin-bottom: 16px; }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .modal-actions button { margin-top: 0; width: 100%; }
+  .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
 </style>
 </head>
 <body>
 <div class="page">
-  <a class="back-link" href="/">&larr; Back to clipper</a>
+  <div class="topnav">
+    <a href="/">Home</a>
+    <a href="/weekly-recap">Weekly Recap</a>
+    <a href="/game-recap" class="active">Game Recap</a>
+    <a href="/analytics">Analytics</a>
+  </div>
   <div class="card">
     <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
     <div class="subtitle">
@@ -5522,6 +5456,7 @@ GAME_RECAP_HTML = """<!doctype html>
       <div id="result-actions">
         <a id="result-download" class="dl-link" download>Download</a>
         <button id="mix-order-btn" type="button" class="secondary">🔀 Mix order</button>
+        <button id="thumbnail-open-btn" type="button" class="secondary">🖼 Thumbnail</button>
         <select id="upload-privacy">
           <option value="unlisted" selected>Unlisted</option>
           <option value="private">Private</option>
@@ -5543,6 +5478,31 @@ GAME_RECAP_HTML = """<!doctype html>
       <label style="margin-top:0">Recent game recaps</label>
       <div id="recent-list"></div>
       <div id="recent-empty" class="hint">None yet.</div>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the recap -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
     </div>
   </div>
 </div>
@@ -5570,8 +5530,10 @@ const deleteBtn = document.getElementById('delete-btn');
 const uploadStatus = document.getElementById('upload-status');
 const recentList = document.getElementById('recent-list');
 const recentEmpty = document.getElementById('recent-empty');
+const thumbnailOpenBtn = document.getElementById('thumbnail-open-btn');
 
 let currentJobId = null;
+let currentClipFilename = null;
 let pollTimer = null;
 
 function resetView() {
@@ -5580,6 +5542,7 @@ function resetView() {
   resultBlock.style.display = 'none';
   uploadStatus.textContent = '';
   resultDesc.value = '';
+  currentClipFilename = null;
 }
 
 async function poll(jobId) {
@@ -5613,6 +5576,7 @@ async function poll(jobId) {
       resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
       resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
       resultDesc.value = clip.description || '';
+      currentClipFilename = clip.file;
     }
     loadRecent();
   }
@@ -5764,6 +5728,674 @@ async function loadRecent() {
 }
 loadRecent();
 setInterval(loadRecent, 8000);
+
+// --- thumbnail modal: generate a handful of candidate downloadable
+// thumbnails for the recap's own single "clip" (the whole concatenated
+// video), same endpoints and flow as a normal clip's Thumbnail button.
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
+
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+thumbnailOpenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename) return;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+});
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
+});
+</script>
+</body>
+</html>
+"""
+
+
+WEEKLY_RECAP_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — weekly recap</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  #status-block { margin-top: 20px; display: none; }
+  #status-msg { font-size: 0.88rem; margin-bottom: 8px; }
+  #progress-track { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: linear-gradient(135deg, var(--accent), var(--accent2)); transition: width 0.3s; }
+  #error-msg { color: var(--danger); font-size: 0.88rem; margin-top: 10px; }
+  #result-block { margin-top: 16px; display: none; }
+  #result-block video { width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
+  #result-title { font-weight: 700; font-size: 0.95rem; margin-top: 10px; }
+  #result-desc-row { margin-top: 10px; }
+  #result-desc-row textarea { width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.85rem; font-family: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; resize: vertical; }
+  #result-desc-row button { margin-top: 6px; padding: 8px 14px; font-size: 0.85rem; }
+  #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #result-actions button, #result-actions a { margin-top: 0; }
+  #result-actions a.dl-link {
+    display: inline-flex; align-items: center; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  #recent-list > div {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  #recent-list .meta { color: var(--muted); font-size: 0.75rem; }
+  #thumbnail-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  #thumbnail-modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; width: 100%; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
+  .modal p { margin: 0 0 8px; font-size: 0.95rem; }
+  .modal .hint { margin-bottom: 16px; }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .modal-actions button { margin-top: 0; width: 100%; }
+  .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topnav">
+    <a href="/">Home</a>
+    <a href="/weekly-recap" class="active">Weekly Recap</a>
+    <a href="/game-recap">Game Recap</a>
+    <a href="/analytics">Analytics</a>
+  </div>
+  <div class="card">
+    <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
+    <div class="subtitle">
+      Counts down that week's best Twitch clips across all tracked streamers (up to 10), ranked by
+      view count but AI-screened first so a highly-viewed clip that's mostly rambling gets skipped in
+      favor of the next one -- max 3 picks per streamer so no single streamer crowds out the rest.
+      Opens with an intro card, adds captions and a "#N streamer: title" badge to each clip, then
+      concatenates them into one landscape long-form draft (a normal video, not a Short -- no 60s cap,
+      no #Shorts tag), weakest pick first, biggest hit last. A fresh one for the current week also
+      builds automatically every Monday. Never uploads on its own -- review, then hit Upload here like
+      any other clip.
+    </div>
+
+    <label for="week-input">Specific week ending (optional)</label>
+    <input id="week-input" type="date">
+    <div class="hint">Leave blank for the trailing 7 days from now.</div>
+
+    <button id="generate-btn" type="button">Generate recap</button>
+    <div id="form-error" class="hint" style="color:var(--danger)"></div>
+
+    <div id="status-block">
+      <div id="status-msg"></div>
+      <div id="progress-track"><div id="progress-bar"></div></div>
+      <button id="cancel-btn" type="button" class="secondary">Cancel</button>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="result-block">
+      <div id="result-title"></div>
+      <video id="result-video" controls></video>
+      <div id="result-actions">
+        <a id="result-download" class="dl-link" download>Download</a>
+        <button id="thumbnail-open-btn" type="button" class="secondary">🖼 Thumbnail</button>
+        <select id="upload-privacy">
+          <option value="unlisted" selected>Unlisted</option>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+        <button id="upload-btn" type="button">📤 Upload to YouTube</button>
+        <button id="delete-btn" type="button" class="secondary">🗑 Delete from server</button>
+      </div>
+      <div id="upload-status" class="hint"></div>
+      <div id="result-desc-row">
+        <label style="margin-top:0">Description (each clip's moment &amp; title, chaptered)</label>
+        <textarea id="result-desc" rows="8" readonly></textarea>
+        <button id="copy-desc-btn" type="button" class="secondary">Copy description</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label style="margin-top:0">Recent weekly recaps</label>
+      <div id="recent-list"></div>
+      <div id="recent-empty" class="hint">None yet.</div>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the recap -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const weekInput = document.getElementById('week-input');
+const generateBtn = document.getElementById('generate-btn');
+const formError = document.getElementById('form-error');
+const statusBlock = document.getElementById('status-block');
+const statusMsg = document.getElementById('status-msg');
+const progressBar = document.getElementById('progress-bar');
+const cancelBtn = document.getElementById('cancel-btn');
+const errorMsg = document.getElementById('error-msg');
+const resultBlock = document.getElementById('result-block');
+const resultTitle = document.getElementById('result-title');
+const resultVideo = document.getElementById('result-video');
+const resultDownload = document.getElementById('result-download');
+const resultDesc = document.getElementById('result-desc');
+const copyDescBtn = document.getElementById('copy-desc-btn');
+const uploadPrivacy = document.getElementById('upload-privacy');
+const uploadBtn = document.getElementById('upload-btn');
+const deleteBtn = document.getElementById('delete-btn');
+const uploadStatus = document.getElementById('upload-status');
+const recentList = document.getElementById('recent-list');
+const recentEmpty = document.getElementById('recent-empty');
+const thumbnailOpenBtn = document.getElementById('thumbnail-open-btn');
+
+let currentJobId = null;
+let currentClipFilename = null;
+let pollTimer = null;
+
+function resetView() {
+  statusBlock.style.display = 'none';
+  errorMsg.textContent = '';
+  resultBlock.style.display = 'none';
+  uploadStatus.textContent = '';
+  resultDesc.value = '';
+  currentClipFilename = null;
+}
+
+async function poll(jobId) {
+  let job;
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}`);
+    if (!resp.ok) return;
+    job = await resp.json();
+  } catch (e) {
+    return;
+  }
+  currentJobId = jobId;
+  statusBlock.style.display = 'block';
+  statusMsg.textContent = job.message || job.state;
+  progressBar.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+
+  if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    generateBtn.disabled = false;
+    cancelBtn.disabled = true;
+
+    if (job.error) {
+      errorMsg.textContent = job.error;
+    }
+    const clip = (job.clips || [])[0];
+    if (job.state === 'done' && clip) {
+      resultBlock.style.display = 'block';
+      resultTitle.textContent = clip.upload_title || clip.title || '';
+      resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+      resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
+      resultDesc.value = clip.description || '';
+      currentClipFilename = clip.file;
+    }
+    loadRecent();
+  }
+}
+
+function attachToJob(jobId) {
+  resetView();
+  if (pollTimer) clearInterval(pollTimer);
+  poll(jobId);
+  pollTimer = setInterval(() => poll(jobId), 2000);
+  generateBtn.disabled = true;
+  cancelBtn.disabled = false;
+}
+
+copyDescBtn.addEventListener('click', () => {
+  if (!resultDesc.value) return;
+  navigator.clipboard.writeText(resultDesc.value).then(() => {
+    copyDescBtn.textContent = 'Copied!';
+    setTimeout(() => { copyDescBtn.textContent = 'Copy description'; }, 1500);
+  });
+});
+
+generateBtn.addEventListener('click', async () => {
+  formError.textContent = '';
+  generateBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/weekly-recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ week_ending: weekInput.value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      formError.textContent = data.detail || 'Could not queue the recap.';
+      generateBtn.disabled = false;
+      return;
+    }
+    attachToJob(data.job_id);
+  } catch (e) {
+    formError.textContent = 'Could not reach the server.';
+    generateBtn.disabled = false;
+  }
+});
+
+cancelBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  cancelBtn.disabled = true;
+  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+  const job = await resp0.json().catch(() => ({}));
+  const clip = (job.clips || [])[0];
+  if (!clip) return;
+  uploadBtn.disabled = true;
+  uploadStatus.textContent = 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: uploadPrivacy.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      uploadStatus.textContent = data.detail || 'Upload failed.';
+    } else {
+      uploadStatus.textContent = `Uploaded: ${data.url}`;
+    }
+  } catch (e) {
+    uploadStatus.textContent = 'Upload failed -- could not reach the server.';
+  } finally {
+    uploadBtn.disabled = false;
+  }
+});
+
+deleteBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if (!confirm("Delete this recap from the server? This can't be undone.")) return;
+  deleteBtn.disabled = true;
+  try {
+    const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+    const job = await resp0.json().catch(() => ({}));
+    const clip = (job.clips || [])[0];
+    if (clip) {
+      await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}`, { method: 'DELETE' });
+    }
+    resetView();
+    currentJobId = null;
+    loadRecent();
+  } finally {
+    deleteBtn.disabled = false;
+  }
+});
+
+async function loadRecent() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    const items = jobs.filter(j => j.pipeline === 'weekly_recap');
+    recentList.innerHTML = '';
+    recentEmpty.style.display = items.length ? 'none' : 'block';
+    items.forEach(j => {
+      const row = document.createElement('div');
+      const left = document.createElement('div');
+      left.textContent = j.source_title || j.id;
+      const right = document.createElement('div');
+      right.className = 'meta';
+      right.textContent = j.state === 'error' ? '⚠ failed'
+        : ['done', 'cancelled'].includes(j.state) ? '✅ done' : '⏳ ' + j.state;
+      row.appendChild(left);
+      row.appendChild(right);
+      row.addEventListener('click', () => attachToJob(j.id));
+      recentList.appendChild(row);
+    });
+  } catch (e) {
+    // leave the list as-is on a failed background refresh
+  }
+}
+loadRecent();
+setInterval(loadRecent, 8000);
+
+// --- thumbnail modal: generate a handful of candidate downloadable
+// thumbnails for the recap's own single "clip" (the whole concatenated
+// video), same endpoints and flow as a normal clip's Thumbnail button.
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
+
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+thumbnailOpenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename) return;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+});
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
+});
 </script>
 </body>
 </html>
