@@ -57,6 +57,7 @@ from clipper import competitor_content
 from clipper import youtube_analytics
 from clipper import youtube_oauth
 from clipper import youtube_upload
+from clipper import thumbnail
 from clipper import weekly_recap
 from clipper import game_recap
 
@@ -1349,6 +1350,98 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
             trimmed_path.unlink(missing_ok=True)
 
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+
+
+def _thumbnail_default_text(clip: dict) -> str:
+    text = (clip.get("hook_caption") or clip.get("upload_title") or clip.get("title") or "").strip()
+    return text.upper()
+
+
+def _get_job_clip(job_id: str, filename: str) -> dict:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        return clip
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/thumbnails")
+def generate_thumbnails(job_id: str, filename: str) -> dict:
+    """Render a handful of candidate downloadable thumbnails for one
+    already-picked clip -- a real frame from the clip itself (not an
+    AI-generated image) with one bold auto-written line of text burned
+    over it. Candidate frames are picked from the clip's own loudest
+    moments (a proxy for "the exciting part"), so the person reviewing
+    clips gets a few genuinely different options to choose from rather
+    than just whatever the midpoint happens to be."""
+    clip = _get_job_clip(job_id, filename)
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    duration = float(clip.get("duration") or 0)
+    if duration <= 0:
+        raise HTTPException(400, "clip has no known duration")
+
+    text = _thumbnail_default_text(clip)
+    stem = path.stem
+    frame_times = thumbnail.pick_thumbnail_frame_times(path, duration, n=4)
+    thumbs = []
+    for i, frame_time in enumerate(frame_times, start=1):
+        out_path = path.with_name(f"{stem}_thumb{i}.jpg")
+        try:
+            thumbnail.render_thumbnail(path, frame_time, text, out_path)
+        except RuntimeError as e:
+            print(f"[thumbnail] candidate {i} failed for {filename}: {e}", flush=True)
+            continue
+        thumbs.append({"index": i, "frame_time": frame_time, "url": f"/api/jobs/{job_id}/clips/{filename}/thumbnails/{i}"})
+
+    if not thumbs:
+        raise HTTPException(500, "could not render any thumbnail candidates")
+    return {"ok": True, "text": text, "thumbnails": thumbs}
+
+
+class ThumbnailEditRequest(BaseModel):
+    text: str
+    frame_time: float
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}")
+def regenerate_thumbnail(job_id: str, filename: str, index: int, req: ThumbnailEditRequest) -> dict:
+    """Re-burn one already-picked candidate's frame with edited text --
+    the user has chosen this one out of the batch generate_thumbnails
+    made and wants to tweak the wording before downloading it."""
+    _get_job_clip(job_id, filename)  # 404s if the job/clip don't exist
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "text cannot be empty")
+
+    out_path = path.with_name(f"{path.stem}_thumb{index}.jpg")
+    try:
+        thumbnail.render_thumbnail(path, req.frame_time, text, out_path)
+    except RuntimeError as e:
+        raise HTTPException(500, f"could not render thumbnail: {e}") from e
+    return {"ok": True, "text": text, "url": f"/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}"}
+
+
+@protected.get("/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}")
+def get_thumbnail(job_id: str, filename: str, index: int, download: bool = False) -> FileResponse:
+    if Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(400, "bad filename")
+    path = BASE_DIR / job_id / Path(filename).with_name(f"{Path(filename).stem}_thumb{index}.jpg")
+    if not path.is_file():
+        raise HTTPException(404, "thumbnail not found -- generate it first")
+    if download:
+        dl_name = f"{Path(filename).stem}_thumbnail.jpg"
+        return FileResponse(path, media_type="image/jpeg", filename=dl_name)
+    return FileResponse(path, media_type="image/jpeg")
 
 
 _RECAP_OUT_W = 1920
@@ -3058,11 +3151,16 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay, #thumbnail-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open { display: flex; }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-gallery .thumb-loading { aspect-ratio: 9/16; background: var(--track); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.8rem; }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
   .privacy-option {
     display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 10px 12px;
     background: var(--bg); border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
@@ -3378,6 +3476,31 @@ hit Upload like any other clip.</div>
     <div class="modal-actions" style="margin-top:16px">
       <button id="youtube-upload-go-btn" type="button">Upload</button>
       <button id="youtube-upload-cancel-btn" type="button" class="ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal" style="max-width:520px;width:100%;max-height:92vh;overflow:auto">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the clip -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions" style="margin-top:12px">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
     </div>
   </div>
 </div>
@@ -4050,6 +4173,15 @@ const youtubeUploadPreview = document.getElementById('youtube-upload-preview');
 const youtubeUploadGoBtn = document.getElementById('youtube-upload-go-btn');
 const youtubeUploadTrimStart = document.getElementById('youtube-upload-trim-start');
 const youtubeUploadTrimEnd = document.getElementById('youtube-upload-trim-end');
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
 const youtubeUploadTrimHint = document.getElementById('youtube-upload-trim-hint');
 const youtubeUploadSetStartBtn = document.getElementById('youtube-upload-set-start-btn');
 const youtubeUploadSetEndBtn = document.getElementById('youtube-upload-set-end-btn');
@@ -4061,6 +4193,11 @@ let youtubeUploadFilename = null;
 // truth for what ffmpeg will actually trim against, not whatever got
 // rounded into the job's metadata at render time.
 let youtubeUploadDuration = 0;
+let thumbnailJobId = null;
+let thumbnailFilename = null;
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
 
 function refreshYoutubeUploadTrimHint() {
   const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
@@ -4157,12 +4294,121 @@ youtubeUploadGoBtn.addEventListener('click', async () => {
   }
 });
 
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailJobId = null;
+  thumbnailFilename = null;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+async function openThumbnailModal(jobId, clip) {
+  thumbnailJobId = jobId;
+  thumbnailFilename = clip.file;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${clip.file}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+}
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!thumbnailJobId || !thumbnailFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
+});
+
 // The part that actually *asks*: once a job is done, if any clip's
 // facecam got rejected, open the picker for it right away instead of
 // leaving a button to be noticed. Each clip is offered once per page
 // load, so "Skip for now" is respected -- the button stays on the clip.
 function maybePromptFacecam(jobId, job) {
-  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open')) return;
+  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open')) return;
   const next = (job.clips || []).find(c => c.facecam_uncertain && c.source_frame && !facecamPrompted.has(`${jobId}/${c.file}`));
   if (!next) return;
   facecamPrompted.add(`${jobId}/${next.file}`);
@@ -4309,6 +4555,13 @@ async function poll(jobId) {
       uploadBtn.style.marginLeft = '8px';
       uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
       div.appendChild(uploadBtn);
+
+      const thumbBtn = document.createElement('button');
+      thumbBtn.type = 'button';
+      thumbBtn.textContent = '🖼 Thumbnail';
+      thumbBtn.style.marginLeft = '8px';
+      thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
+      div.appendChild(thumbBtn);
 
       const delClipBtn = document.createElement('button');
       delClipBtn.type = 'button';
