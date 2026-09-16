@@ -18,6 +18,17 @@ DEFAULT_MODEL = os.environ.get("CLIPPER_MODEL", "claude-sonnet-4-5")
 
 _WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
+# What counts as a genuine top performer to model future titles/thumbnails/
+# hooks on, rather than just "whatever happens to be at the top of a views
+# sort." A video with only a handful of views can show 90%+ retention purely
+# from small-sample noise (three friends who watched the whole thing), which
+# would get treated as a proven winning pattern on nothing. Real retention
+# data (average_view_percentage) is also only available at all once YouTube
+# Analytics is connected -- see _select_top_performers for the views-only
+# fallback when it isn't.
+_MIN_VIEWS_FOR_TOP_PERFORMER = 500
+_TOP_PERFORMER_COUNT = 3
+
 # How many past analyses to keep on disk. Only the single most recent one
 # actually gets fed into clip selection (see load_latest_overview) -- the
 # rest are kept only in case they're useful to look back on later, not to
@@ -74,7 +85,101 @@ def clear_history(path: Path) -> None:
         pass
 
 
-def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str]) -> str:
+def _select_top_performers(videos: list) -> tuple:
+    """The top _TOP_PERFORMER_COUNT videos to actively model future titles,
+    hooks, and thumbnails on, plus a note on how they were picked.
+
+    Ranked by retention (average_view_percentage) among videos with at
+    least _MIN_VIEWS_FOR_TOP_PERFORMER views -- both conditions matter: a
+    low-view video's retention is too noisy to trust (three friends
+    watching the whole thing reads as 90%+ retention), and a high-view
+    video with weak retention is a reach win, not proof its title/thumbnail
+    style is what people actually wanted once they clicked. Videos too
+    recent to judge are excluded for the same reason as everywhere else in
+    this module.
+
+    Falls back to ranking by views alone when retention data isn't there
+    (no Analytics connection) or too few videos clear the view bar with it
+    -- clearly labelled as a weaker signal, so the prompt doesn't claim
+    retention-backed confidence it doesn't have."""
+    eligible = [v for v in videos if not v.get("too_new_to_judge") and v.get("views", 0) >= _MIN_VIEWS_FOR_TOP_PERFORMER]
+    with_retention = [v for v in eligible if v.get("average_view_percentage") is not None]
+
+    if len(with_retention) >= _TOP_PERFORMER_COUNT:
+        ranked = sorted(with_retention, key=lambda v: v["average_view_percentage"], reverse=True)
+        return ranked[:_TOP_PERFORMER_COUNT], "retention"
+
+    ranked = sorted(eligible, key=lambda v: v.get("views", 0), reverse=True)
+    if ranked:
+        return ranked[:_TOP_PERFORMER_COUNT], "views"
+    return [], "none"
+
+
+def _describe_top_thumbnails(
+    videos: list, api_key: Optional[str], model: str,
+) -> Optional[str]:
+    """A short shared-pattern description of what the top performers'
+    actual thumbnail images look like -- colors, composition, whether it's
+    a close-up face/reaction, text overlay style -- so title/thumbnail
+    guidance is grounded in what's actually on screen, not just guessed
+    from view counts. Downloads each thumbnail and shows them to Claude in
+    one call.
+
+    Fails open (returns None) on any error: no API key, a download
+    failure, an empty response. Losing this is losing one input to the
+    overview, not the overview itself."""
+    urls = [v["thumbnail_url"] for v in videos if v.get("thumbnail_url")]
+    if not urls:
+        return None
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        import base64
+        import anthropic
+        import requests
+
+        content: list = [{
+            "type": "text",
+            "text": (
+                "These are the thumbnails of this creator's best-performing videos, "
+                "in order. In 2-3 sentences, describe the concrete SHARED visual "
+                "pattern across them -- composition, color, whether it's a close-up "
+                "face/reaction shot, text overlay style and wording, anything a "
+                "future thumbnail or on-screen hook caption should copy. If they "
+                "don't actually share a pattern, say that plainly instead of forcing "
+                "one. Respond with ONLY the description, no preamble."
+            ),
+        }]
+        for url in urls:
+            img_resp = requests.get(url, timeout=15)
+            img_resp.raise_for_status()
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img_resp.headers.get("content-type", "image/jpeg").split(";")[0],
+                    "data": base64.b64encode(img_resp.content).decode("ascii"),
+                },
+            })
+
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model, max_tokens=300, messages=[{"role": "user", "content": content}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        return text or None
+    except Exception as e:  # noqa: BLE001 - one input to the overview, never worth failing it over
+        print(f"[channel_strategy] thumbnail analysis skipped: {e}", flush=True)
+        return None
+
+
+def _build_prompt(
+    snapshot: dict, analytics: Optional[dict], focus: Optional[str],
+    top_performers: Optional[list] = None, top_performer_basis: str = "none",
+    thumbnail_pattern: Optional[str] = None,
+) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
         f"Subscribers: {snapshot.get('subscriber_count')}",
@@ -142,6 +247,25 @@ def _build_prompt(snapshot: dict, analytics: Optional[dict], focus: Optional[str
                 for v in too_new
             )
 
+    if top_performers:
+        if top_performer_basis == "retention":
+            lines.append(
+                f"\nTOP {len(top_performers)} PERFORMERS TO MODEL (ranked by retention, "
+                f"min {_MIN_VIEWS_FOR_TOP_PERFORMER} views -- these are proven: people "
+                "clicked AND stayed, so their title and thumbnail approach is worth "
+                "deliberately copying, not just their topic):"
+            )
+        else:
+            lines.append(
+                f"\nTOP {len(top_performers)} PERFORMERS TO MODEL (ranked by views -- "
+                "no connected Analytics account, so this is views only, not "
+                "retention-confirmed; treat it as a weaker signal than a retention-based "
+                "ranking would be):"
+            )
+        lines.extend(_fmt(v) for v in top_performers)
+        if thumbnail_pattern:
+            lines.append(f"\nWhat their actual thumbnail images have in common: {thumbnail_pattern}")
+
     if analytics:
         lines.append(f"\nReal YouTube Analytics (last {analytics['lookback_days']} days, the channel's own authenticated data):")
         lines.append(f"Views by day of week: {analytics['views_by_day']}")
@@ -206,8 +330,12 @@ creator can get), and diagnose the gap as platform-restricted, a reach
 problem, or a content problem per the framework above (or say which if you
 can't tell without retention data).
 
-CONTENT THAT WORKS: what type of clip and title/hook should they make
-more of, and what should they stop clipping?
+CONTENT THAT WORKS: if a TOP PERFORMERS list is given above, base this on
+THAT specifically -- name the concrete shared pattern across those exact
+videos (topic, title wording/structure, and the thumbnail pattern if
+given) and say to copy it, not a vague trend from the channel overall.
+Without that list, say what type of clip and title/hook to make more of
+from the data available, and what to stop clipping.
 
 FORMAT NOTES: one concrete format or editing change from the
 retention/traffic signals (or general best practice if none given).
@@ -229,7 +357,9 @@ def get_ai_overview(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    prompt = _build_prompt(snapshot, analytics, focus)
+    top_performers, basis = _select_top_performers(snapshot.get("recent_videos") or [])
+    thumbnail_pattern = _describe_top_thumbnails(top_performers, api_key, model) if top_performers else None
+    prompt = _build_prompt(snapshot, analytics, focus, top_performers, basis, thumbnail_pattern)
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=model,

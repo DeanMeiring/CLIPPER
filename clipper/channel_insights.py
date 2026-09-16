@@ -70,10 +70,15 @@ def get_channel_snapshot(channel_id_or_handle: str, sample_size: int = 25) -> Op
             published_dt = datetime.datetime.fromisoformat(published_at.replace("Z", "+00:00"))
             age_days = max(1.0, (now - published_dt).total_seconds() / 86400)
             views = int(v.get("statistics", {}).get("viewCount", 0))
+            thumbs = v["snippet"].get("thumbnails") or {}
+            thumbnail_url = (
+                (thumbs.get("high") or thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+            )
             videos.append({
                 "id": v["id"],
                 "title": v["snippet"]["title"],
                 "published_at": published_at,
+                "thumbnail_url": thumbnail_url,
                 "views": views,
                 "views_per_day": round(views / age_days, 1),
                 "age_days": round(age_days, 1),
