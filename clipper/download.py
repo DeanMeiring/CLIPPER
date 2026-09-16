@@ -90,6 +90,25 @@ def is_url(source: str) -> bool:
     return bool(URL_RE.match(source))
 
 
+# Every pipeline crops down to a 1080px-wide vertical output -- source
+# video above 1080p buys nothing there (a facecam tile is often scaled UP
+# from a small source box regardless, see reframe.py) while costing
+# several times the download size, the memory to hold/decode it, and the
+# ffmpeg time to process it. An uncapped `bv*` selector will happily pull
+# a 1440p/4K stream for a handful of short highlight clips -- found to be
+# the single largest driver of Railway network/compute usage (a 45GB
+# download in one sample window). The uncapped chain is kept as a final
+# fallback so a source that genuinely offers nothing at or under 1080p
+# still downloads rather than failing outright; in practice that fallback
+# should almost never be reached.
+MAX_DOWNLOAD_HEIGHT = 1080
+FORMAT_SELECTOR = (
+    f"bv*[height<={MAX_DOWNLOAD_HEIGHT}][ext=mp4]+ba[ext=m4a]/"
+    f"b[height<={MAX_DOWNLOAD_HEIGHT}][ext=mp4]/"
+    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"
+)
+
+
 def base_ydl_opts() -> dict:
     opts = {
         "quiet": True, "no_warnings": False, "noplaylist": True,
@@ -263,7 +282,7 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
     outtmpl = str(out_dir / f"{out_name}.%(ext)s")
     ydl_opts = {
         **base_ydl_opts(),
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "format": FORMAT_SELECTOR,
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
         "download_ranges": download_range_func(None, [(start, end)]),
@@ -323,7 +342,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
     outtmpl = str(out_dir / "%(id)s.%(ext)s")
     ydl_opts = {
         **base_ydl_opts(),
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "format": FORMAT_SELECTOR,
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
         "writesubtitles": True,
