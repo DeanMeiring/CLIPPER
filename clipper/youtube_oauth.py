@@ -26,6 +26,11 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",
     "https://www.googleapis.com/auth/youtube.readonly",
+    # Lets the "Upload to YouTube" button on a clip post directly to the
+    # connected channel. An account already connected before this scope was
+    # added won't have it on its stored token -- disconnecting and
+    # reconnecting re-runs consent and picks it up.
+    "https://www.googleapis.com/auth/youtube.upload",
 ]
 
 

@@ -45,7 +45,23 @@ def is_long_vod(info: VideoInfo) -> bool:
     return info.duration >= LONG_VOD_THRESHOLD_SECONDS and "twitch" in info.extractor
 
 
-def _probe_source_accessible(source: str, duration: float, raw_dir: Path) -> None:
+def _probe_once(source: str, probe_start: float, probe_end: float, raw_dir: Path) -> Optional[bool]:
+    """One probe download attempt. True = confirmed accessible, False =
+    confirmed empty/corrupt, None = inconclusive (timeout, network
+    hiccup -- says nothing either way about the source itself)."""
+    try:
+        download_range(source, raw_dir, probe_start, probe_end, out_name="_probe")
+        return True
+    except CorruptDownload:
+        return False
+    except Exception:
+        return None
+    finally:
+        for p in raw_dir.glob("_probe.*"):
+            p.unlink(missing_ok=True)
+
+
+def probe_source_accessible(source: str, duration: float, raw_dir: Path) -> None:
     """Cheap upfront sanity check: pull one short window from partway
     through the VOD before committing to downloading/transcribing up to
     20 full candidate windows. A VOD that's subscriber-only, deleted-but-
@@ -64,28 +80,41 @@ def _probe_source_accessible(source: str, duration: float, raw_dir: Path) -> Non
     sort out."""
     probe_start = max(0.0, duration * 0.5 - 5.0)
     probe_end = probe_start + 8.0
-    last_error: Optional[CorruptDownload] = None
+    confirmed_corrupt = False
     for attempt in range(_PROBE_ATTEMPTS):
         if attempt > 0:
             time.sleep(3)
-        try:
-            download_range(source, raw_dir, probe_start, probe_end, out_name="_probe")
-            return  # got real video back -- source is accessible
-        except CorruptDownload as e:
-            last_error = e
-        except Exception:
-            return  # inconclusive (timeout, network hiccup) -- let the real loop judge it
-        finally:
-            for p in raw_dir.glob("_probe.*"):
-                p.unlink(missing_ok=True)
+        result = _probe_once(source, probe_start, probe_end, raw_dir)
+        if result is None:
+            return  # inconclusive -- let the real candidate loop judge it
+        if result is True:
+            return
+        confirmed_corrupt = True
 
-    raise RuntimeError(
-        "This VOD's video content isn't accessible right now -- most likely "
-        "subscriber-only, restricted, or currently blocked by the source "
-        f"(a probe near the middle of the VOD came back empty {_PROBE_ATTEMPTS} times in "
-        "a row). Try a different VOD, or set YTDLP_COOKIES to an account with "
-        "access to this one."
-    ) from last_error
+    if confirmed_corrupt:
+        raise RuntimeError(
+            "This VOD's video content isn't accessible right now -- most likely "
+            "subscriber-only, restricted, or currently blocked by the source "
+            f"(a probe near the middle of the VOD came back empty {_PROBE_ATTEMPTS} times in "
+            "a row). Try a different VOD, or set YTDLP_COOKIES to an account with "
+            "access to this one."
+        )
+
+
+def quick_probe_accessible(source: str, duration: float, raw_dir: Path, window_seconds: float = 4.0) -> bool:
+    """A fast, single-attempt accessibility check for triage across a whole
+    LIST of candidate VODs (e.g. "recommend a VOD to clip today") rather
+    than committing to one -- unlike probe_source_accessible, this never
+    retries and treats an inconclusive result (timeout, network hiccup) as
+    accessible, so one flaky check never wrongly hides an otherwise-fine
+    VOD from the list; it only filters out a CONFIRMED empty/corrupt
+    response. Trades the retry's certainty for speed, since a wrong "yes"
+    here just gets caught later if the VOD is actually picked to download,
+    and a wrong "no" just means falling through to the next-ranked
+    candidate rather than failing outright."""
+    probe_start = max(0.0, duration * 0.5 - window_seconds / 2)
+    probe_end = probe_start + window_seconds
+    return _probe_once(source, probe_start, probe_end, raw_dir) is not False
 
 
 def gather_candidates(
@@ -113,7 +142,7 @@ def gather_candidates(
         should_cancel()
 
     report("Checking that the source video is actually accessible...")
-    _probe_source_accessible(source, info.duration, raw_dir)
+    probe_source_accessible(source, info.duration, raw_dir)
 
     if should_cancel:
         should_cancel()

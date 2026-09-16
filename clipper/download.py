@@ -90,13 +90,13 @@ def is_url(source: str) -> bool:
     return bool(URL_RE.match(source))
 
 
-def _base_ydl_opts() -> dict:
+def base_ydl_opts() -> dict:
     opts = {
         "quiet": True, "no_warnings": False, "noplaylist": True,
         # A persistently failing source (e.g. a 403 on a restricted/expired
         # VOD) can otherwise have yt-dlp retry with growing backoff for a
         # very long time -- bound that so a bad source fails in minutes,
-        # not indefinitely. _run_with_timeout below is the hard backstop
+        # not indefinitely. run_with_timeout below is the hard backstop
         # in case even this isn't enough (a genuinely stalled connection).
         "socket_timeout": 30,
         "retries": 3,
@@ -124,7 +124,7 @@ class CorruptDownload(RuntimeError):
     through every remaining candidate for nothing."""
 
 
-def _run_with_timeout(
+def run_with_timeout(
     fn: Callable[[], _T],
     timeout_seconds: float,
     on_late_completion: Optional[Callable[[], None]] = None,
@@ -183,10 +183,10 @@ def probe_video(source: str) -> VideoInfo:
     import yt_dlp
 
     def _extract() -> dict:
-        with yt_dlp.YoutubeDL(_base_ydl_opts()) as ydl:
+        with yt_dlp.YoutubeDL(base_ydl_opts()) as ydl:
             return ydl.extract_info(source, download=False)
 
-    info = _run_with_timeout(_extract, timeout_seconds=90.0)
+    info = run_with_timeout(_extract, timeout_seconds=90.0)
 
     extractor = (info.get("extractor_key") or info.get("extractor") or "").lower()
     video_id = str(info.get("id", ""))
@@ -262,7 +262,7 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
     out_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(out_dir / f"{out_name}.%(ext)s")
     ydl_opts = {
-        **_base_ydl_opts(),
+        **base_ydl_opts(),
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
@@ -278,7 +278,7 @@ def download_range(source: str, out_dir: Path, start: float, end: float, out_nam
         for p in out_dir.glob(f"{out_name}.*"):
             p.unlink(missing_ok=True)
 
-    _run_with_timeout(_extract, timeout_seconds=240.0, on_late_completion=_cleanup_late_files)
+    run_with_timeout(_extract, timeout_seconds=240.0, on_late_completion=_cleanup_late_files)
 
     candidates = list(out_dir.glob(f"{out_name}.*"))
     video_candidates = [p for p in candidates if p.suffix in {".mp4", ".mkv", ".webm"}]
@@ -322,7 +322,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
 
     outtmpl = str(out_dir / "%(id)s.%(ext)s")
     ydl_opts = {
-        **_base_ydl_opts(),
+        **base_ydl_opts(),
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "outtmpl": outtmpl,
         "merge_output_format": "mp4",
@@ -357,7 +357,7 @@ def download_video(source: str, out_dir: Path, lang: str = "en") -> DownloadResu
             if p not in existing_before:
                 p.unlink(missing_ok=True)
 
-    info = _run_with_timeout(_extract, timeout_seconds=600.0, on_late_completion=_cleanup_late_files)
+    info = run_with_timeout(_extract, timeout_seconds=600.0, on_late_completion=_cleanup_late_files)
     video_id = info["id"]
     title = info.get("title", video_id)
     duration = float(info.get("duration") or 0.0)
@@ -395,3 +395,44 @@ def _ffprobe_duration(video_path: Path) -> float:
         capture_output=True, text=True, check=True, timeout=30,
     )
     return float(result.stdout.strip())
+
+
+def usable_render_duration(video_path: Path, fallback: float) -> float:
+    """The longest duration a render can safely request without asking
+    for more video than actually exists -- the container-level duration
+    _ffprobe_duration reads reflects whichever of the video/audio
+    streams happens to be longer, not the video specifically. That's
+    silently wrong whenever the two were sourced and encoded separately
+    and merged into one file (routine for a yt-dlp video+audio download):
+    if audio runs a beat longer than video, requesting the container's
+    reported duration renders a clip whose audio track outlives its
+    video -- invisible in one clip played alone, but concatenating
+    several such clips back to back (see weekly_recap.build_recap_video)
+    pushes each next clip's audio a little later than its video, and
+    that overhang compounds with every clip after it into a large,
+    obvious delay by the end.
+
+    Returns the shorter of the video and audio streams' own individually
+    probed durations, so a render is never asked to produce video frames
+    that aren't there. Falls back to `fallback` (the caller's already-
+    known container-level duration) if either stream can't be probed,
+    rather than failing the render over a best-effort correction."""
+    import subprocess
+
+    durations = []
+    for stream in ("v:0", "a:0"):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-select_streams", stream,
+                    "-show_entries", "stream=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
+                ],
+                capture_output=True, text=True, check=True, timeout=30,
+            )
+            text = result.stdout.strip()
+            if text:
+                durations.append(float(text))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            continue
+    return min(durations) if durations else fallback

@@ -5,6 +5,7 @@ at once.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import queue
@@ -23,9 +24,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass
-from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
-from clipper.long_vod import gather_candidates, is_long_vod, select_and_map
+from clipper.captions import build_ass, rank_badge_dialogue
+from clipper.download import _ffprobe_duration, download_video, is_url, probe_video, usable_render_duration
+from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
     MAX_COCAM_TILES,
@@ -35,17 +36,30 @@ from clipper.reframe import (
     compute_layout,
     layout_from_manual_boxes,
 )
-from clipper.render import render_clip
+from clipper.render import render_clip, trim_clip
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
-from clipper.trending import get_trending_sections, search_creator
+from clipper.trending import (
+    get_trending_sections,
+    search_creator,
+    get_recommendation_candidates,
+    get_top_twitch_clips,
+    get_top_clips_for_game,
+    parse_twitch_duration,
+)
 from clipper.notify import send_telegram
-from clipper.channel_insights import get_channel_snapshot
+from clipper.channel_insights import get_channel_snapshot, MAX_SHORT_SECONDS
 from clipper import channel_strategy
 from clipper.channel_strategy import get_ai_overview
+from clipper import competitor_discovery
+from clipper import competitor_content
 from clipper import youtube_analytics
 from clipper import youtube_oauth
+from clipper import youtube_upload
+from clipper import thumbnail
+from clipper import weekly_recap
+from clipper import game_recap
 
 BASE_DIR = Path(os.environ.get("CLIPPER_JOBS_DIR", "/tmp/clipper_jobs"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,6 +71,11 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 # account survives restarts/redeploys -- see clipper/youtube_oauth.py.
 _youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
+_competitor_channels_path = BASE_DIR / "_competitor_channels.json"
+_recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
+_reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
+_recap_episode_path = BASE_DIR / "_recap_episode_number.json"
+_game_recap_episode_path = BASE_DIR / "_game_recap_episode_numbers.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -266,18 +285,50 @@ def _estimate_long_vod_seconds(num_candidates: int, num_clips: int) -> float:
     return scan + candidates + select + render
 
 
+def _estimate_recap_seconds(num_candidates: int) -> float:
+    # Measured from real Railway logs on a live recap build: each Twitch-
+    # clip candidate (download + Whisper transcription + facecam vision +
+    # render) took roughly 20-35s end to end -- much less than a long-VOD
+    # candidate window since a Twitch clip is short (usually well under
+    # 60s) to begin with. 35s/candidate is the generous end of that.
+    lookup = 10.0
+    candidates = num_candidates * 35.0
+    concat = 15.0
+    return lookup + candidates + concat
+
+
 def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
         pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
+        pending_weekly_recap = jobs[job_id].pop("pending_weekly_recap", None)
+        pending_game_recap = jobs[job_id].pop("pending_game_recap", None)
+        pending_game_recap_remix = jobs[job_id].pop("pending_game_recap_remix", None)
     if pending_regenerate is not None:
         _run_regenerate(job_id, pending_regenerate)
         return
     if pending_manual_facecam is not None:
         _run_manual_facecam_render(job_id, pending_manual_facecam)
         return
+    if pending_weekly_recap is not None:
+        _run_weekly_recap_job(job_id, week_ending=pending_weekly_recap.get("week_ending"))
+        return
+    if pending_game_recap is not None:
+        _run_game_recap_job(job_id, game=pending_game_recap["game"], week_ending=pending_game_recap.get("week_ending"))
+        return
+    if pending_game_recap_remix is not None:
+        _run_game_recap_remix(job_id, hook_seconds=pending_game_recap_remix.get("hook_seconds"))
+        return
 
     req: JobRequest = jobs[job_id]["request"]
+    # YouTube's Shorts feed itself allows up to 3 minutes, but a video
+    # uploaded through the Data API only gets reliably auto-classified as a
+    # Short up to MAX_SHORT_SECONDS (60s) -- past that it can silently land
+    # as a regular video no matter what tag or aspect ratio it has. A clip
+    # this app renders past that line can never actually become a Short via
+    # the upload button, so clamp here rather than let a job silently
+    # produce something that was never eligible.
+    req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -377,7 +428,10 @@ def _run_job(job_id: str) -> None:
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
-def _render_atomic(video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path) -> None:
+def _render_atomic(
+    video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path,
+    out_w: int = 1080, out_h: int = 1920,
+) -> None:
     """Render to a temp file alongside the target, then move it into place
     in one step.
 
@@ -393,7 +447,7 @@ def _render_atomic(video_path: Path, start: float, end: float, layout, ass_path:
     new one, never a partial."""
     tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
     try:
-        render_clip(video_path, start, end, layout, ass_path, tmp_path)
+        render_clip(video_path, start, end, layout, ass_path, tmp_path, out_w=out_w, out_h=out_h)
         os.replace(tmp_path, out_path)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -532,16 +586,18 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                 facecam_uncertain = True
                 has_trusted_facecam = False
 
-        if not has_trusted_facecam:
-            # No facecam the pipeline trusts in this clip -- detection found
-            # none, or what it found was just rejected. Either way keep a raw
-            # source frame so a person can place the facecam by hand: the
-            # rejected still only shows the crop that was judged wrong, not
-            # where the facecam(s) actually sit in the source.
-            source_frame_path = out_dir / f"clip_{out_index:02d}_source_frame.jpg"
-            if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
-                source_frame_name = source_frame_path.name
-                print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
+        # Always keep a raw source frame so a person can place the facecam
+        # by hand, even when the pipeline trusts its own placement -- the
+        # post-render check catches an obviously broken facecam band, but
+        # it isn't proof the placement is actually right (e.g. it can
+        # confidently approve a frame that grabbed an on-screen overlay
+        # graphic instead of an actual face). Without this, a clip the
+        # check happened to approve had no way to fix a wrong placement
+        # short of "generate more clips" and hoping for something different.
+        source_frame_path = out_dir / f"clip_{out_index:02d}_source_frame.jpg"
+        if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
+            source_frame_name = source_frame_path.name
+            print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
 
         clips_meta.append({
             "file": out_path.name,
@@ -568,9 +624,15 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             # the wrong place, so the frontend prompts for a manual
             # placement as soon as the job finishes.
             "facecam_uncertain": facecam_uncertain,
-            # Set whenever the clip has no trusted facecam (rejected, or
-            # none detected at all): the frame the manual box-picker draws
-            # on. Its presence is what makes the fix/add button appear.
+            # True when the pipeline auto-placed and trusted a facecam here
+            # (passed the post-render check, or the check wasn't usable) --
+            # distinct from facecam_manual, so the frontend can label the
+            # button "Adjust" (something's there, maybe wrong) rather than
+            # "Add" (nothing's there) for a clip nobody has touched yet.
+            "facecam_trusted": has_trusted_facecam,
+            # The frame the manual box-picker draws on. Always saved now
+            # (see above) so any clip's facecam can be overridden by hand,
+            # not just ones the pipeline itself flagged as uncertain.
             "source_frame": source_frame_name,
         })
         _set(job_id, clips=list(clips_meta))
@@ -690,7 +752,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     num_clips = max(1, int(req.get("num_clips") or 3))
     focus = req.get("focus") or None
     min_len = float(req.get("min_len") or 20.0)
-    max_len = float(req.get("max_len") or 90.0)
+    max_len = min(float(req.get("max_len") or 90.0), MAX_SHORT_SECONDS)
     reset_used = bool(req.get("reset_used"))
 
     with jobs_lock:
@@ -919,7 +981,29 @@ def _worker() -> None:
             job_queue.task_done()
 
 
+def _cleanup_empty_recap_stubs() -> None:
+    """One-time startup sweep for weekly-recap (and game-recap) job husks
+    left behind by a clip deletion that predates delete_clip's own cleanup
+    (see delete_clip) -- an empty "0 clip(s), Done" entry with nothing
+    useful left to do with it, stuck in the jobs list until removed by
+    hand. Runs once after _load_persisted_jobs so any stub already on disk
+    clears itself on the next deploy instead of needing a manual
+    "I've downloaded these" click per stub."""
+    with jobs_lock:
+        stale_ids = [
+            job_id for job_id, job in jobs.items()
+            if job.get("pipeline") in ("weekly_recap", "game_recap")
+            and job.get("state") in TERMINAL_STATES
+            and not (job.get("clips") or [])
+        ]
+        for job_id in stale_ids:
+            jobs.pop(job_id, None)
+    for job_id in stale_ids:
+        shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+
+
 _load_persisted_jobs()
+_cleanup_empty_recap_stubs()
 threading.Thread(target=_worker, daemon=True).start()
 
 
@@ -1018,6 +1102,80 @@ def regenerate_job(job_id: str, req: RegenerateRequest) -> dict:
     return {"ok": True}
 
 
+_SOURCE_VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".ts"}
+
+
+def _infer_source_video(out_dir: Path) -> Optional[str]:
+    """A clip from before source_video was tracked per-clip has no
+    filename recorded for its downloaded source. The normal (non-long-VOD)
+    pipeline downloads exactly one video into _source/ per job, shared by
+    every clip in it -- if exactly one video file is sitting there, it's
+    unambiguous which one this clip came from. A long-VOD job's _source/
+    instead holds one small file per candidate window, so this correctly
+    declines (returns None) rather than guessing wrong for those."""
+    raw_dir = out_dir / "_source"
+    if not raw_dir.is_dir():
+        return None
+    candidates = [p for p in raw_dir.iterdir() if p.is_file() and p.suffix.lower() in _SOURCE_VIDEO_EXTS]
+    return candidates[0].name if len(candidates) == 1 else None
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/ensure-source-frame")
+def ensure_source_frame(job_id: str, filename: str) -> dict:
+    """Return the clip's source-frame filename for the facecam picker to
+    draw on, generating it on the spot if it's missing -- a clip rendered
+    before source frames were saved for every clip (not just uncertain
+    ones) has no source_frame in its stored metadata, but its downloaded
+    source video is usually still sitting right there, so there's no need
+    to make "Adjust facecam position" a dead end for it."""
+    if Path(filename).name != filename:
+        raise HTTPException(400, "bad filename")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        clips = job.get("clips") or []
+        clip = next((c for c in clips if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        existing = clip.get("source_frame")
+
+    out_dir = BASE_DIR / job_id
+    if existing and (out_dir / existing).is_file():
+        return {"source_frame": existing}
+
+    source_video = clip.get("source_video") or _infer_source_video(out_dir)
+    if not source_video:
+        raise HTTPException(409, "this clip predates manual facecam fixes -- try Generate more clips instead")
+    video_path = out_dir / "_source" / source_video
+    if not video_path.is_file():
+        raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+    if not clip.get("source_video"):
+        # Backfill so set_facecam_boxes (the actual re-render, triggered
+        # next by "Re-render with these boxes") doesn't have to repeat
+        # this inference -- once known, it's known for good.
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is not None:
+                for c in job.get("clips") or []:
+                    if c.get("file") == filename:
+                        c["source_video"] = source_video
+        _persist(job_id)
+
+    source_frame_path = out_dir / f"{Path(filename).stem}_source_frame.jpg"
+    if not _save_source_still(video_path, clip.get("start", 0.0), clip.get("end", 0.0), source_frame_path):
+        raise HTTPException(500, "could not read a frame from the source video")
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            for c in job.get("clips") or []:
+                if c.get("file") == filename:
+                    c["source_frame"] = source_frame_path.name
+    _persist(job_id)
+    return {"source_frame": source_frame_path.name}
+
+
 @protected.post("/api/jobs/{job_id}/clips/{filename}/facecam-boxes")
 def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> dict:
     """Re-render one clip using facecam box(es) a human drew on its source
@@ -1048,11 +1206,15 @@ def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> d
             raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
         filenames = [filename]
         if req.apply_to_all_missing:
-            # Every other clip with no trusted automatic facecam -- the
-            # ones with a source frame saved for manual placement.
+            # Every other clip with a downloaded source, no trusted
+            # automatic facecam, and no manual placement of its own yet.
+            # Doesn't require a saved source_frame -- the re-render itself
+            # only needs source_video, a preview still is only for showing
+            # this clip's own frame in the picker.
             filenames += [
                 c["file"] for c in (job.get("clips") or [])
-                if c.get("file") != filename and c.get("source_frame") and c.get("source_video")
+                if c.get("file") != filename and c.get("source_video")
+                and not c.get("facecam_trusted") and not c.get("facecam_manual")
             ]
         job["pending_manual_facecam"] = {
             "filenames": filenames,
@@ -1099,7 +1261,7 @@ def cancel_job(job_id: str, save: bool = False) -> dict:
 
 
 @protected.get("/api/jobs/{job_id}/clips/{filename}")
-def get_clip(job_id: str, filename: str) -> FileResponse:
+def get_clip(job_id: str, filename: str, download: bool = False) -> FileResponse:
     # Reject any filename that isn't a plain name, so a crafted path can't
     # walk out of the job directory and serve an arbitrary file off disk.
     if Path(filename).name != filename or filename.startswith("."):
@@ -1111,7 +1273,1196 @@ def get_clip(job_id: str, filename: str) -> FileResponse:
     # labelling that video/mp4 makes a browser download it instead of just
     # showing it -- which defeats the point of having a still at all.
     media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "video/mp4"
-    return FileResponse(path, media_type=media_type, filename=filename)
+    # Starlette only sends a Content-Disposition header at all when
+    # `filename` is passed, and it defaults that header to "attachment" --
+    # which some browsers take as a sign to refuse playing a <video src>
+    # pointed at it and force a save dialog instead. So plain playback (the
+    # in-page preview) omits `filename` entirely; only the explicit
+    # "Download" button asks for ?download=1 and gets the Save-As behavior.
+    if download:
+        return FileResponse(path, media_type=media_type, filename=filename)
+    return FileResponse(path, media_type=media_type)
+
+
+class YouTubeUploadRequest(BaseModel):
+    # Defaults to Unlisted rather than Public -- a wrong first click (the
+    # wrong clip, a typo'd title before ever seeing this modal) shouldn't
+    # be able to go live on the channel by accident. Public is one
+    # deliberate radio-button choice away, not the default.
+    privacy_status: str = "unlisted"
+    # Optional: shave a beat off either end before posting, without
+    # re-rendering or touching the kept copy on disk -- captions are
+    # burned into the pixels already, so trimming the finished file
+    # carries them along for free.
+    trim_start: float = 0.0
+    trim_end: float = 0.0
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/upload-youtube")
+def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest) -> dict:
+    """Post one already-rendered, already-hand-picked clip straight to the
+    connected YouTube channel -- the manual "I've decided this one's going
+    up" action, never a bulk or automatic publish. Uses the clip's
+    already-generated upload_title/description as-is."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+
+    access_token = _youtube_token_store.get_valid_access_token()
+    if not access_token:
+        raise HTTPException(409, "Connect your YouTube account on the analytics page first.")
+
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    trimmed_path = None
+    if req.trim_start > 0 or req.trim_end > 0:
+        trimmed_path = path.with_name(f".{path.stem}.trimmed{path.suffix}")
+        try:
+            trim_clip(path, trimmed_path, req.trim_start, req.trim_end, float(clip.get("duration") or 0))
+        except (RuntimeError, ValueError) as e:
+            trimmed_path.unlink(missing_ok=True)
+            raise HTTPException(400, f"Could not trim the clip: {e}") from e
+        upload_path = trimmed_path
+    else:
+        upload_path = path
+
+    is_recap = bool(clip.get("is_recap"))
+    try:
+        video_id = youtube_upload.upload_video(
+            access_token, upload_path,
+            title=clip.get("upload_title") or clip.get("title") or filename,
+            description=clip.get("description") or "",
+            privacy_status=req.privacy_status,
+            is_short=not is_recap,
+        )
+    except (youtube_upload.UploadError, ValueError) as e:
+        raise HTTPException(502, str(e)) from e
+    finally:
+        if trimmed_path is not None:
+            trimmed_path.unlink(missing_ok=True)
+
+    return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+
+
+def _thumbnail_default_text(clip: dict) -> str:
+    text = (clip.get("hook_caption") or clip.get("upload_title") or clip.get("title") or "").strip()
+    return text.upper()
+
+
+def _get_job_clip(job_id: str, filename: str) -> dict:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        return clip
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/thumbnails")
+def generate_thumbnails(job_id: str, filename: str) -> dict:
+    """Render a handful of candidate downloadable thumbnails for one
+    already-picked clip -- a real frame from the clip itself (not an
+    AI-generated image) with one bold auto-written line of text burned
+    over it. Candidate frames are picked from the clip's own loudest
+    moments (a proxy for "the exciting part"), so the person reviewing
+    clips gets a few genuinely different options to choose from rather
+    than just whatever the midpoint happens to be."""
+    clip = _get_job_clip(job_id, filename)
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    duration = float(clip.get("duration") or 0)
+    if duration <= 0:
+        raise HTTPException(400, "clip has no known duration")
+
+    text = _thumbnail_default_text(clip)
+    stem = path.stem
+    frame_times = thumbnail.pick_thumbnail_frame_times(path, duration, n=4)
+    thumbs = []
+    for i, frame_time in enumerate(frame_times, start=1):
+        out_path = path.with_name(f"{stem}_thumb{i}.jpg")
+        try:
+            thumbnail.render_thumbnail(path, frame_time, text, out_path)
+        except RuntimeError as e:
+            print(f"[thumbnail] candidate {i} failed for {filename}: {e}", flush=True)
+            continue
+        thumbs.append({"index": i, "frame_time": frame_time, "url": f"/api/jobs/{job_id}/clips/{filename}/thumbnails/{i}"})
+
+    if not thumbs:
+        raise HTTPException(500, "could not render any thumbnail candidates")
+    return {"ok": True, "text": text, "thumbnails": thumbs}
+
+
+class ThumbnailEditRequest(BaseModel):
+    text: str
+    frame_time: float
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}")
+def regenerate_thumbnail(job_id: str, filename: str, index: int, req: ThumbnailEditRequest) -> dict:
+    """Re-burn one already-picked candidate's frame with edited text --
+    the user has chosen this one out of the batch generate_thumbnails
+    made and wants to tweak the wording before downloading it."""
+    _get_job_clip(job_id, filename)  # 404s if the job/clip don't exist
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "text cannot be empty")
+
+    out_path = path.with_name(f"{path.stem}_thumb{index}.jpg")
+    try:
+        thumbnail.render_thumbnail(path, req.frame_time, text, out_path)
+    except RuntimeError as e:
+        raise HTTPException(500, f"could not render thumbnail: {e}") from e
+    return {"ok": True, "text": text, "url": f"/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}"}
+
+
+@protected.get("/api/jobs/{job_id}/clips/{filename}/thumbnails/{index}")
+def get_thumbnail(job_id: str, filename: str, index: int, download: bool = False) -> FileResponse:
+    if Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(400, "bad filename")
+    path = BASE_DIR / job_id / Path(filename).with_name(f"{Path(filename).stem}_thumb{index}.jpg")
+    if not path.is_file():
+        raise HTTPException(404, "thumbnail not found -- generate it first")
+    if download:
+        dl_name = f"{Path(filename).stem}_thumbnail.jpg"
+        return FileResponse(path, media_type="image/jpeg", filename=dl_name)
+    return FileResponse(path, media_type="image/jpeg")
+
+
+_RECAP_OUT_W = 1920
+_RECAP_OUT_H = 1080
+
+
+def _render_twitch_clip_for_recap(
+    video_path: Path, duration: float, words: list, out_path: Path, badge_text: Optional[str] = None,
+) -> None:
+    """Render one already-downloaded Twitch clip to landscape (1920x1080)
+    with burned-in captions, for the recap's normal-video upload -- a raw
+    Twitch clip download has no captions of its own, so those still need
+    adding, but NOT the facecam-aware crop/split logic _render_all uses
+    for a vertical Short.
+
+    That logic exists specifically to carve a narrow vertical frame out
+    of a wide landscape broadcast without losing either the gameplay or
+    the facecam -- there's nothing to carve out here, since the target
+    IS landscape, the same shape the clip was actually broadcast in, so
+    a plain centered crop-to-16:9 (a no-op whenever the source is already
+    16:9, which a Twitch clip almost always is) already shows everything
+    the streamer's own layout composited, facecam included.
+
+    `badge_text` (e.g. "#7 Jynxzi: Insane 1v5 clutch") burns a persistent
+    top-left rank badge into this clip for the whole clip's duration --
+    appended into the same .ass file as the spoken captions so both
+    render in one ffmpeg pass, rather than a second overlay pass.
+
+    Renders directly rather than going through render_clip/_render_atomic's
+    shared -ss(input-side)/-t(output-side) trim. That mechanism is the
+    right choice for a normal Short, which often trims a short window out
+    of a multi-hour source VOD -- -ss's fast keyframe seek matters a lot
+    there. But real downloaded Twitch-clip footage can have its video and
+    audio streams start at slightly different native PTS offsets (routine
+    when they were captured/encoded separately), and an output-level -t
+    cap doesn't reliably normalize that away -- it can leave the rendered
+    clip's own audio track a little longer than its video, which then
+    compounds across every clip after it once concatenated (confirmed
+    live even after capping the requested duration at the shorter of the
+    two source streams' own lengths -- that alone wasn't the whole
+    story). Since a recap clip always starts at 0 anyway, there's no
+    seek-speed benefit to lose here, so explicit trim/atrim with a
+    setpts/asetpts reset to zero -- the same technique already used for
+    the intro/outro cards -- costs nothing extra and removes the
+    ambiguity entirely.
+
+    Two more subtleties beyond the reset, both confirmed by direct
+    testing, not just theory:
+
+    - The reset has to happen BEFORE the trim, not after. trim/atrim cut
+      against the stream's ORIGINAL clock, so trim-then-reset on a stream
+      whose real content starts at a non-zero native offset silently
+      drops that many seconds (captures [offset, duration] of the
+      original clock, which is only (duration - offset) seconds once
+      renumbered from zero) -- reset-then-trim uses the stream's own
+      first real frame as the zero point first, so the requested
+      duration is measured from where the content actually starts.
+    - Video can only be cut on frame boundaries (~33ms steps at 30fps);
+      audio can be cut at sample precision. Asking trim for an exact
+      duration that lands between two frame starts is a no-op for that
+      frame -- trim keeps a frame if its own start PTS is before the
+      cutoff, so a cutoff a hair under an existing frame's start doesn't
+      remove it, and the video comes out effectively untrimmed while
+      audio (which isn't quantized to frame boundaries) trims correctly,
+      opening exactly the kind of video/audio length mismatch this whole
+      function exists to avoid. Rounding the requested duration to a
+      whole frame first, and using that same rounded value for both
+      trim and atrim, keeps both streams cutting at a boundary video can
+      actually hit."""
+    import subprocess
+
+    layout = center_crop_layout(video_path, target_w=_RECAP_OUT_W, target_h=_RECAP_OUT_H)
+    ass_path = out_path.with_suffix(".ass")
+    build_ass(words, 0.0, ass_path, play_res=(_RECAP_OUT_W, _RECAP_OUT_H))
+    if badge_text:
+        with ass_path.open("a", encoding="utf-8") as f:
+            f.write("\n" + rank_badge_dialogue(badge_text, duration))
+    ass_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
+
+    out_fps = 30
+    quantized_duration = round(duration * out_fps) / out_fps
+
+    tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
+    filter_complex = (
+        f"[0:v]setpts=PTS-STARTPTS,trim=0:{quantized_duration},"
+        f"crop={layout.w}:{layout.h}:{layout.x}:{layout.y},"
+        f"scale={_RECAP_OUT_W}:{_RECAP_OUT_H},fps={out_fps},ass='{ass_escaped}'[outv];"
+        f"[0:a]asetpts=PTS-STARTPTS,atrim=0:{quantized_duration}[outa]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k", *weekly_recap.AUDIO_ENCODE_ARGS,
+        "-movflags", "+faststart",
+        str(tmp_path),
+    ]
+    try:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"ffmpeg timed out after {e.timeout:.0f}s rendering {out_path.name}"
+            ) from e
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed rendering {out_path.name}:\n{result.stderr[-2000:]}")
+        os.replace(tmp_path, out_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        ass_path.unlink(missing_ok=True)
+
+
+def _log_recap_av_sync(recap_path: Path) -> None:
+    """Log the finished recap's video vs. audio stream length.
+
+    Audio drifting behind the video has been this feature's most
+    persistent bug, and every round of it was reported by ear ("still
+    delayed") with no way to tell from the server whether a given build
+    was actually better. The two stream durations are the measurement
+    that answers it: they should end within a few ms of each other, and
+    a drift that scales with the recap's length means the streams are
+    running at different effective rates rather than merely being cut at
+    slightly different points. Never raises -- a diagnostic that can
+    fail a finished render would be worse than no diagnostic."""
+    import subprocess
+
+    def _stream_duration(selector: str) -> Optional[float]:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", selector,
+                 "-show_entries", "stream=duration", "-of", "default=nk=1:nw=1", "-i", str(recap_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            return float(result.stdout.strip().splitlines()[0])
+        except (subprocess.SubprocessError, ValueError, IndexError):
+            return None
+
+    video, audio = _stream_duration("v:0"), _stream_duration("a:0")
+    if not video or audio is None:
+        print(f"[weekly_recap] could not probe {recap_path.name} for a/v sync", flush=True)
+        return
+    drift = audio - video
+    print(
+        f"[weekly_recap] {recap_path.name} a/v sync: video={video:.3f}s "
+        f"audio={audio:.3f}s drift={drift:+.3f}s ({drift / video * 100:+.2f}%)",
+        flush=True,
+    )
+
+
+def _run_weekly_recap_job(job_id: str, week_ending: Optional[str] = None) -> None:
+    """Build a cross-streamer recap on the shared worker thread -- same
+    async, progress-reporting flow as a normal clip job (the existing
+    progress bar/poll UI just works for this job too), rather than
+    blocking the request handler for however long it takes to download,
+    transcribe, and render several Twitch clips back to back. The first
+    version of this feature did exactly that and reliably outran the
+    client/proxy's own timeout ("could not reach the server" on a real
+    attempt) despite the work succeeding server-side -- moving it here
+    is the actual fix, not just a nicer progress bar.
+
+    `week_ending` (an ISO "YYYY-MM-DD" date, or None) anchors the source
+    window: None means the normal trailing-7-days-from-now behavior,
+    while a date builds the 7 days ending on it instead -- for catching
+    up on an older week rather than always getting whatever's aired
+    since now. An unparseable date is treated the same as None rather
+    than failing the job, since it can only ever come from the date
+    picker's own <input type="date">.
+
+    Source material is that week's Twitch clips (trending.get_top_twitch_clips)
+    across all tracked streamers -- Twitch's own curated highlight moments
+    (made from the Clip button, by the creator or a viewer), available
+    immediately with no dependency on this app having already rendered
+    and uploaded something for that streamer first. Twitch view count
+    alone is a noisy quality signal though (a clip can rack up views just
+    for who's in it while being mostly the streamer talking with no real
+    moment), so each candidate is screened by weekly_recap.judge_clip_quality
+    on its own transcript before it's counted as a pick, walked in
+    view-count order with weekly_recap.MAX_CLIPS_PER_STREAMER capping how
+    many any one streamer can contribute -- falling through to the next
+    candidate whenever one is quality-skipped or capped, up to
+    weekly_recap.TARGET_CLIP_COUNT picks. The final video opens with an
+    intro card (see weekly_recap.build_intro_clip), then counts down from
+    the weakest of the picks to the biggest hit, which plays last, with a
+    "#N streamer: title" badge burned into each clip's top-left corner
+    (see _render_twitch_clip_for_recap).
+
+    Ends in state "error" (not a raised exception) when there isn't
+    enough to work with -- no tracked streamer had a clip that week, or
+    fewer than 2 candidates actually passed the quality gate and could be
+    downloaded and rendered -- since that's a normal week, not a pipeline
+    bug."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_recap_source"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ended_at = None
+    if week_ending:
+        try:
+            ended_at = (
+                datetime.datetime.strptime(week_ending, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                + datetime.timedelta(days=1)
+            )
+        except ValueError:
+            print(f"[weekly_recap] could not parse week_ending {week_ending!r}, using this week instead", flush=True)
+            ended_at = None
+
+    _set(
+        job_id, state="checking",
+        message=f"Looking up top Twitch clips for the week of {week_ending}..." if ended_at
+        else "Looking up this week's top Twitch clips...",
+    )
+    _progress(job_id, 0.05)
+    cancel()
+    twitch_logins = [l for l in os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",") if l.strip()]
+    clips = get_top_twitch_clips(twitch_logins, days=7.0, per_streamer=8, ended_at=ended_at)
+    pool = weekly_recap.build_candidate_pool(clips)
+    if not pool:
+        _set(job_id, state="error", error="No Twitch clips found for your tracked streamers in that week.")
+        return
+
+    target_total = weekly_recap.TARGET_CLIP_COUNT
+    # Rough denominator for the progress bar only -- the real stopping
+    # point is target_total *good* picks, which can mean walking further
+    # into the pool than this if the quality gate skips several.
+    considered = min(len(pool), target_total * 3)
+    # Reset created_at here (not when the job was queued) so the "time
+    # remaining" math in the UI counts from when real work starts, not
+    # from the brief Twitch-lookup step above -- same pattern _run_regenerate
+    # uses once it knows enough to estimate.
+    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(considered) / 60, 1))
+
+    # Walk the whole-roster pool in view-count order, downloading,
+    # transcribing, and quality-checking each candidate before counting
+    # it as a pick -- a per-streamer cap keeps one viral streamer from
+    # crowding out the rest, and a quality-skip or a download/
+    # transcription failure just falls through to the next candidate
+    # instead of giving up on that streamer (or the whole recap).
+    selected = []
+    per_streamer_picks: dict = {}
+    processed = 0
+    for c in pool:
+        if len(selected) >= target_total:
+            break
+        cancel()
+        processed += 1
+        login = (c.get("streamer_login") or "").strip().lower()
+        display = weekly_recap.display_name({"streamer_login": login})
+        _set(job_id, state="checking", message=f'Checking clip {processed}: {display} -- "{c.get("title", "")}"')
+        _progress(job_id, 0.05 + 0.55 * (processed / max(considered, 1)))
+        if per_streamer_picks.get(login, 0) >= weekly_recap.MAX_CLIPS_PER_STREAMER:
+            continue
+        try:
+            dl = download_video(c["url"], raw_dir)
+        except Exception as e:
+            print(f"[weekly_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
+            continue
+        try:
+            words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
+        except Exception as e:
+            print(f"[weekly_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
+            words = []
+        transcript_text = " ".join(w.text for w in words)
+        verdict = weekly_recap.judge_clip_quality(c.get("title") or "", display, c.get("view_count") or 0, transcript_text)
+        if not verdict["keep"]:
+            print(f"[weekly_recap] skipping clip {c.get('id')} ({login}): {verdict['reason']}", flush=True)
+            continue
+        # The container-level duration (dl.duration) reflects whichever
+        # of the downloaded video/audio streams is longer, not the video
+        # specifically -- yt-dlp downloads them separately and merges
+        # them, and they routinely don't end at exactly the same point.
+        # Rendering to that duration when audio runs longer than video
+        # produces a clip whose audio outlives its video; invisible
+        # alone, but concatenating several such clips compounds that
+        # overhang into a large, growing delay by the end of the recap
+        # (confirmed live). Cap at the shorter of the two real streams
+        # instead, so a render never asks for video frames that aren't
+        # there.
+        render_duration = usable_render_duration(dl.video_path, dl.duration)
+        selected.append({
+            "streamer_login": login,
+            "title": c.get("title") or "",
+            "view_count": c.get("view_count") or 0,
+            "video_path": dl.video_path,
+            "duration": render_duration,
+            "words": words,
+        })
+        per_streamer_picks[login] = per_streamer_picks.get(login, 0) + 1
+
+    if len(selected) < 2:
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            "Not enough of this week's Twitch clips passed the quality check and could be downloaded "
+            "to build a recap (need at least 2). Check the deploy logs for why specific clips were skipped."
+        ))
+        return
+
+    cancel()
+    # Rank purely by Twitch view count -- the quality gate above already
+    # filtered for whether a clip belongs in the recap at all; view count
+    # decides where within it. Rank 1 is this week's biggest hit.
+    selected.sort(key=lambda s: s["view_count"], reverse=True)
+    for i, s in enumerate(selected):
+        s["rank"] = i + 1
+    # Countdown order for the actual video: the weakest of the picks
+    # plays first, the biggest hit plays last as the payoff.
+    concat_order = list(reversed(selected))
+
+    rendered = []
+    total_render = len(concat_order)
+    for i, s in enumerate(concat_order):
+        cancel()
+        display = weekly_recap.display_name(s)
+        _set(job_id, state="rendering", message=f'Rendering clip {i + 1}/{total_render}: #{s["rank"]} {display}')
+        _progress(job_id, 0.6 + 0.3 * ((i + 1) / max(total_render, 1)))
+        rendered_path = out_dir / f"src_{i:02d}.mp4"
+        badge_text = weekly_recap.rank_badge_text(s["rank"], s)
+        try:
+            _render_twitch_clip_for_recap(s["video_path"], s["duration"], s["words"], rendered_path, badge_text=badge_text)
+        except Exception as e:
+            print(f"[weekly_recap] render failed for #{s['rank']} ({s['streamer_login']}): {e}", flush=True)
+            continue
+        actual_duration = _ffprobe_duration(rendered_path) or s["duration"]
+        rendered.append({
+            "streamer_login": s["streamer_login"],
+            "title": s["title"],
+            "duration": actual_duration,
+            "view_count": s["view_count"],
+            "rank": s["rank"],
+            "path": rendered_path,
+        })
+
+    shutil.rmtree(raw_dir, ignore_errors=True)  # downloaded source no longer needed once rendered
+
+    if len(rendered) < 2:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            "Rendering failed for too many of this week's selected clips to build a recap "
+            "(need at least 2). Check the deploy logs for why a specific clip failed."
+        ))
+        return
+
+    cancel()
+    # `rendered` is already in countdown (on-screen) order from the
+    # render loop above -- do NOT re-sort by view count here, that would
+    # undo the countdown.
+    concat_paths = [r["path"] for r in rendered]
+
+    # Reserved now, not earlier -- only once a video is actually going to
+    # finish, so a failed attempt (too few clips passed the quality gate,
+    # a render blew up) doesn't burn an episode number nothing ever used.
+    episode = weekly_recap.next_episode_number(_recap_episode_path)
+    title_text = f"{weekly_recap.SERIES_TITLE} #{episode}"
+
+    _set(job_id, state="rendering", message="Adding an intro...")
+    _progress(job_id, 0.88)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        # A missing intro is a cosmetic loss, not a reason to fail an
+        # otherwise-good recap -- ship it without one instead.
+        print(f"[weekly_recap] could not build the intro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Adding an outro...")
+    _progress(job_id, 0.92)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        # A missing outro is a cosmetic loss, not a reason to fail an
+        # otherwise-good recap -- ship it without one instead.
+        print(f"[weekly_recap] could not build the outro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.95)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video(concat_paths, out_path)
+    except (RuntimeError, ValueError) as e:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=f"Could not build the recap: {e}")
+        return
+    _log_recap_av_sync(out_path)
+    for p in concat_paths:
+        p.unlink(missing_ok=True)
+
+    clips_duration = round(sum(r["duration"] for r in rendered), 2)
+    # The concat re-encode's actual output duration (intro+outro
+    # included) is the real source of truth for what plays back --
+    # summed per-clip durations are close but can drift slightly from
+    # re-encode rounding.
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
+    streamer_count = len({r["streamer_login"] for r in rendered})
+    week_end = ended_at - datetime.timedelta(days=1) if ended_at else datetime.datetime.now(datetime.timezone.utc)
+    week_label = f"{week_end - datetime.timedelta(days=7):%b %d}-{week_end:%b %d}"
+    meta = weekly_recap.build_recap_metadata(rendered, week_label, episode, intro_offset=intro_duration)
+    if outro_added:
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
+        meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
+
+    message = f"Weekly recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
+
+    _set(
+        job_id,
+        state="done",
+        message=message,
+        progress=1.0,
+        source_title=meta["title"],
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": meta["title"],
+            "upload_title": meta["title"],
+            "description": meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            # Landscape, not vertical -- see _render_twitch_clip_for_recap
+            # -- and long-form on purpose: a recap is a compilation of
+            # several clips, not itself meant to be classified as a Short
+            # (see is_short=False on the upload endpoint below), so
+            # nothing here needs to fit the 60s Shorts cap either.
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+    )
+
+
+def _queue_weekly_recap_job(week_ending: Optional[str] = None) -> str:
+    """Creates and enqueues a weekly-recap job for the shared worker
+    thread to pick up (see _run_job's pending_weekly_recap dispatch and
+    _run_weekly_recap_job) -- shared by the manual button endpoint, the
+    "generate a specific week" date-picker flow, and the Monday
+    scheduler below, so all three go through the exact same async,
+    progress-reporting path rather than one of them running the (multi-
+    minute) build inline.
+
+    `week_ending` (an ISO "YYYY-MM-DD" date, or None for the normal
+    trailing-7-days-from-now behavior) lets a creator catch up on an
+    older week instead of always getting whatever's aired in the last
+    7 days -- see _run_weekly_recap_job."""
+    job_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "source_url": None,
+            "source_title": f"Weekly recap (week of {week_ending})" if week_ending else "Weekly recap",
+            "created_at": time.time(),
+            "state": "queued",
+            "message": "Queued",
+            "progress": 0.0,
+            "estimate_minutes": None,
+            "pipeline": "weekly_recap",
+            "clips": [],
+            "error": None,
+            "saved": True,
+            "pending_weekly_recap": {"week_ending": week_ending},
+        }
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return job_id
+
+
+class WeeklyRecapGenerateRequest(BaseModel):
+    week_ending: Optional[str] = None
+
+
+@protected.post("/api/weekly-recap/generate")
+def generate_weekly_recap(req: WeeklyRecapGenerateRequest) -> dict:
+    """Queue a recap build as a background job -- the same "submit and
+    watch the progress bar" flow as generating regular clips, since the
+    actual build can take minutes (see _run_weekly_recap_job) and
+    blocking the request for that long isn't reliable. Defaults to this
+    week's clips; pass week_ending (an ISO "YYYY-MM-DD" date) to build an
+    older week's recap instead -- e.g. to catch up on a week that was
+    missed. Always produces a draft for review, never uploads on its
+    own."""
+    return {"job_id": _queue_weekly_recap_job(week_ending=req.week_ending)}
+
+
+def _run_game_recap_job(job_id: str, game: str, week_ending: Optional[str] = None) -> None:
+    """Build a cross-streamer recap for ONE GAME on the shared worker
+    thread -- same async, progress-reporting flow _run_weekly_recap_job
+    uses, and it reuses nearly all of that function's machinery verbatim
+    (the AI quality gate, the per-streamer cap, AUDIO_ENCODE_ARGS-pinned
+    intro/outro/render/concat, _render_twitch_clip_for_recap). Only
+    discovery and the title differ: source material here is
+    trending.get_top_clips_for_game (every streamer playing `game` this
+    week, English-language, not just the tracked roster
+    TRENDING_TWITCH_LOGINS get_top_twitch_clips reads from), and the
+    target/title come from clipper/game_recap.py's own constants instead
+    of weekly_recap's fixed SERIES_TITLE.
+
+    Kept as its own job function/pipeline ("game_recap") rather than a
+    branch inside _run_weekly_recap_job -- the two features are meant to
+    stay independently reachable and manageable (separate page, separate
+    endpoint, separate jobs-list entries), not merged into one flow.
+
+    See _run_weekly_recap_job's own docstring for the reasoning behind the
+    week_ending/ended_at handling and the "fewer than 2 candidates" /
+    "fewer than 2 rendered" failure modes -- identical here, just phrased
+    around one game instead of the whole tracked roster."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_recap_source"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ended_at = None
+    if week_ending:
+        try:
+            ended_at = (
+                datetime.datetime.strptime(week_ending, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                + datetime.timedelta(days=1)
+            )
+        except ValueError:
+            print(f"[game_recap] could not parse week_ending {week_ending!r}, using this week instead", flush=True)
+            ended_at = None
+
+    _set(
+        job_id, state="checking",
+        message=f"Looking up top {game} Twitch clips for the week of {week_ending}..." if ended_at
+        else f"Looking up this week's top {game} Twitch clips...",
+    )
+    _progress(job_id, 0.05)
+    cancel()
+    clips = get_top_clips_for_game(game, days=7.0, limit=100, ended_at=ended_at)
+    pool = weekly_recap.build_candidate_pool(clips)
+    if not pool:
+        _set(job_id, state="error", error=f"No English-language Twitch clips found for {game!r} in that week.")
+        return
+
+    target_total = game_recap.TARGET_CLIP_COUNT
+    considered = min(len(pool), target_total * 3)
+    _set(job_id, created_at=time.time(), estimate_minutes=round(_estimate_recap_seconds(considered) / 60, 1))
+
+    selected = []
+    per_streamer_picks: dict = {}
+    processed = 0
+    for c in pool:
+        if len(selected) >= target_total:
+            break
+        cancel()
+        processed += 1
+        login = (c.get("streamer_login") or "").strip().lower()
+        display = weekly_recap.display_name({"streamer_login": login})
+        _set(job_id, state="checking", message=f'Checking clip {processed}: {display} -- "{c.get("title", "")}"')
+        _progress(job_id, 0.05 + 0.55 * (processed / max(considered, 1)))
+        if per_streamer_picks.get(login, 0) >= weekly_recap.MAX_CLIPS_PER_STREAMER:
+            continue
+        try:
+            dl = download_video(c["url"], raw_dir)
+        except Exception as e:
+            print(f"[game_recap] could not download clip {c.get('id')} ({login}): {e}", flush=True)
+            continue
+        try:
+            words = get_transcript(dl.video_path, dl.captions_path, prefer_whisper=True)
+        except Exception as e:
+            print(f"[game_recap] transcription failed for clip {c.get('id')} ({login}): {e}", flush=True)
+            words = []
+        transcript_text = " ".join(w.text for w in words)
+        verdict = weekly_recap.judge_clip_quality(c.get("title") or "", display, c.get("view_count") or 0, transcript_text)
+        if not verdict["keep"]:
+            print(f"[game_recap] skipping clip {c.get('id')} ({login}): {verdict['reason']}", flush=True)
+            continue
+        render_duration = usable_render_duration(dl.video_path, dl.duration)
+        selected.append({
+            "streamer_login": login,
+            "title": c.get("title") or "",
+            "view_count": c.get("view_count") or 0,
+            "video_path": dl.video_path,
+            "duration": render_duration,
+            "words": words,
+        })
+        per_streamer_picks[login] = per_streamer_picks.get(login, 0) + 1
+
+    if len(selected) < 2:
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            f"Not enough of this week's {game} Twitch clips passed the quality check and could be "
+            "downloaded to build a recap (need at least 2). Check the deploy logs for why specific clips were skipped."
+        ))
+        return
+
+    cancel()
+    selected.sort(key=lambda s: s["view_count"], reverse=True)
+    for i, s in enumerate(selected):
+        s["rank"] = i + 1
+    # Front-load the biggest hits as the hook instead of making viewers
+    # wait through a countdown for them (unlike the streamer recap's
+    # weakest-first build to a payoff) -- see game_recap.order_for_hook.
+    concat_order = game_recap.order_for_hook(selected)
+
+    rendered = []
+    total_render = len(concat_order)
+    for i, s in enumerate(concat_order):
+        cancel()
+        display = weekly_recap.display_name(s)
+        _set(job_id, state="rendering", message=f'Rendering clip {i + 1}/{total_render}: #{s["rank"]} {display}')
+        _progress(job_id, 0.6 + 0.3 * ((i + 1) / max(total_render, 1)))
+        rendered_path = out_dir / f"src_{i:02d}.mp4"
+        badge_text = weekly_recap.rank_badge_text(s["rank"], s)
+        try:
+            _render_twitch_clip_for_recap(s["video_path"], s["duration"], s["words"], rendered_path, badge_text=badge_text)
+        except Exception as e:
+            print(f"[game_recap] render failed for #{s['rank']} ({s['streamer_login']}): {e}", flush=True)
+            continue
+        actual_duration = _ffprobe_duration(rendered_path) or s["duration"]
+        rendered.append({
+            "streamer_login": s["streamer_login"],
+            "title": s["title"],
+            "duration": actual_duration,
+            "view_count": s["view_count"],
+            "rank": s["rank"],
+            "path": rendered_path,
+        })
+
+    shutil.rmtree(raw_dir, ignore_errors=True)
+
+    if len(rendered) < 2:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=(
+            f"Rendering failed for too many of this week's selected {game} clips to build a recap "
+            "(need at least 2). Check the deploy logs for why a specific clip failed."
+        ))
+        return
+
+    cancel()
+    concat_paths = [r["path"] for r in rendered]
+
+    episode = game_recap.next_episode_number(_game_recap_episode_path, game)
+    title_text = f"{game_recap.SERIES_TITLE_TEMPLATE.format(game=game)} #{episode}"
+
+    _set(job_id, state="rendering", message="Adding an intro...")
+    _progress(job_id, 0.88)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        print(f"[game_recap] could not build the intro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Adding an outro...")
+    _progress(job_id, 0.92)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        print(f"[game_recap] could not build the outro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.95)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video(concat_paths, out_path)
+    except (RuntimeError, ValueError) as e:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        _set(job_id, state="error", error=f"Could not build the recap: {e}")
+        return
+    _log_recap_av_sync(out_path)
+    # Only the intro/outro cards are thrown away -- they're cheap to
+    # regenerate and the intro's darkened background depends on whichever
+    # clip is first, which a remix can change. Each per-clip render
+    # (src_NN.mp4, already badged/captioned) is kept on disk so
+    # /game-recap/remix (see _run_game_recap_remix) can re-cut the recap in
+    # a new order without re-downloading or re-transcribing anything --
+    # cleaned up together with the rest of the job's files whenever the
+    # job itself is deleted.
+    intro_path.unlink(missing_ok=True)
+    outro_path.unlink(missing_ok=True)
+
+    clips_duration = round(sum(r["duration"] for r in rendered), 2)
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
+    streamer_count = len({r["streamer_login"] for r in rendered})
+    week_end = ended_at - datetime.timedelta(days=1) if ended_at else datetime.datetime.now(datetime.timezone.utc)
+    week_label = f"{week_end - datetime.timedelta(days=7):%b %d}-{week_end:%b %d}"
+    meta = game_recap.build_recap_metadata(rendered, week_label, game, episode, intro_offset=intro_duration)
+    if outro_added:
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
+        meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
+
+    message = f"{game} recap ready -- {len(rendered)} clip(s) from {streamer_count} streamer(s)."
+
+    _set(
+        job_id,
+        state="done",
+        message=message,
+        progress=1.0,
+        source_title=meta["title"],
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": meta["title"],
+            "upload_title": meta["title"],
+            "description": meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+        # Everything /game-recap/remix needs to re-cut this recap in a
+        # different clip order without touching Twitch, downloads, or the
+        # AI quality gate again -- see _run_game_recap_remix.
+        game_recap_meta={
+            "game": game,
+            "episode": episode,
+            "week_label": week_label,
+            "picks": [
+                {
+                    "file": r["path"].name,
+                    "streamer_login": r["streamer_login"],
+                    "title": r["title"],
+                    "view_count": r["view_count"],
+                    "duration": r["duration"],
+                    "rank": r["rank"],
+                }
+                for r in rendered
+            ],
+        },
+    )
+
+
+def _queue_game_recap_job(game: str, week_ending: Optional[str] = None) -> str:
+    """Creates and enqueues a game-recap job for the shared worker thread
+    -- see _queue_weekly_recap_job for the shared reasoning (async worker
+    thread, not an inline multi-minute request). Kept as its own
+    function/pipeline value ("game_recap") rather than reusing
+    _queue_weekly_recap_job with a branch, so the two features' jobs stay
+    independently listable/trackable in the jobs panel and each has its
+    own "go to latest" affordance on its own page."""
+    job_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "source_url": None,
+            "source_title": f"{game} recap (week of {week_ending})" if week_ending else f"{game} recap",
+            "created_at": time.time(),
+            "state": "queued",
+            "message": "Queued",
+            "progress": 0.0,
+            "estimate_minutes": None,
+            "pipeline": "game_recap",
+            "clips": [],
+            "error": None,
+            "saved": True,
+            "pending_game_recap": {"game": game, "week_ending": week_ending},
+        }
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return job_id
+
+
+class GameRecapGenerateRequest(BaseModel):
+    game: str
+    week_ending: Optional[str] = None
+
+
+@protected.post("/api/game-recap/generate")
+def generate_game_recap(req: GameRecapGenerateRequest) -> dict:
+    """Queue a build of the "best <game> Twitch clips this week" recap as a
+    background job -- same "submit and watch the progress bar" flow as the
+    streamer-based weekly recap (see generate_weekly_recap), just sourced
+    by game (trending.get_top_clips_for_game, every streamer playing it)
+    instead of the tracked streamer roster. Always produces a draft for
+    review, never uploads on its own."""
+    game = (req.game or "").strip()
+    if not game:
+        raise HTTPException(400, "Enter a game name first.")
+    return {"job_id": _queue_game_recap_job(game, week_ending=req.week_ending)}
+
+
+def _run_game_recap_remix(job_id: str, hook_seconds: Optional[float] = None) -> None:
+    """Re-cut an already-finished game recap in a new clip order, reusing
+    the per-clip renders _run_game_recap_job kept on disk (see its
+    "game_recap_meta" field) instead of re-downloading, re-transcribing, or
+    re-running the AI quality gate on anything -- just game_recap.
+    order_for_hook (most-viewed clips fill the hook window, the rest
+    shuffled) followed by the same AUDIO_ENCODE_ARGS-pinned intro/outro/
+    concat calls the original build used.
+
+    Only the intro card gets rebuilt (its darkened background is whichever
+    clip is now first) and the outro is rebuilt fresh too, but every
+    src_NN.mp4 clip render is reused untouched -- so this is fast: no
+    downloads, no Whisper, no Claude quality-gate calls, just a handful of
+    short ffmpeg passes and one concat re-encode."""
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    out_dir = BASE_DIR / job_id
+    with jobs_lock:
+        job = jobs.get(job_id)
+        meta = dict(job.get("game_recap_meta") or {}) if job else {}
+    picks = meta.get("picks") or []
+    game = meta.get("game") or "this game"
+    episode = meta.get("episode")
+    week_label = meta.get("week_label") or ""
+
+    missing = [p["file"] for p in picks if not (out_dir / p["file"]).is_file()]
+    if not picks or missing:
+        _set(job_id, state="error", error=(
+            "Can't remix this recap -- its per-clip source files are missing (an older recap, or "
+            "already cleaned up). Generate a fresh one instead."
+        ))
+        return
+
+    _set(job_id, state="rendering", message="Mixing clip order...")
+    _progress(job_id, 0.1)
+    cancel()
+    ordered = game_recap.order_for_hook(picks, hook_seconds=hook_seconds or game_recap.DEFAULT_HOOK_SECONDS)
+    concat_paths = [out_dir / p["file"] for p in ordered]
+
+    title_text = f"{game_recap.SERIES_TITLE_TEMPLATE.format(game=game)} #{episode}"
+
+    _set(job_id, state="rendering", message="Rebuilding the intro...")
+    _progress(job_id, 0.3)
+    intro_path = out_dir / "intro.mp4"
+    intro_duration = 0.0
+    try:
+        weekly_recap.build_intro_clip(concat_paths[0], intro_path, title_text)
+        concat_paths = [intro_path] + concat_paths
+        intro_duration = _ffprobe_duration(intro_path) or 0.0
+    except Exception as e:
+        print(f"[game_recap] remix: could not build the intro, skipping it: {e}", flush=True)
+
+    _set(job_id, state="rendering", message="Rebuilding the outro...")
+    _progress(job_id, 0.4)
+    outro_path = out_dir / "outro.mp4"
+    outro_added = False
+    try:
+        weekly_recap.build_outro_clip(outro_path, "Subscribe for more weekly recaps!")
+        concat_paths.append(outro_path)
+        outro_added = True
+    except Exception as e:
+        print(f"[game_recap] remix: could not build the outro, skipping it: {e}", flush=True)
+
+    cancel()
+    _set(job_id, state="rendering", message="Combining clips into the recap...")
+    _progress(job_id, 0.6)
+    out_path = out_dir / "recap.mp4"
+    try:
+        weekly_recap.build_recap_video(concat_paths, out_path)
+    except (RuntimeError, ValueError) as e:
+        _set(job_id, state="error", error=f"Could not rebuild the recap: {e}")
+        return
+    _log_recap_av_sync(out_path)
+    intro_path.unlink(missing_ok=True)
+    outro_path.unlink(missing_ok=True)
+
+    clips_duration = round(sum(p["duration"] for p in ordered), 2)
+    total_duration = _ffprobe_duration(out_path) or (intro_duration + clips_duration)
+    streamer_count = len({p["streamer_login"] for p in ordered})
+    new_meta = game_recap.build_recap_metadata(ordered, week_label, game, episode, intro_offset=intro_duration)
+    if outro_added:
+        minutes, seconds = divmod(int(intro_duration + clips_duration), 60)
+        new_meta["description"] += f"\n{minutes}:{seconds:02d} \U0001F514 Subscribe for more weekly recaps!"
+
+    _set(
+        job_id,
+        state="done",
+        message=f"{game} recap remixed -- {len(ordered)} clip(s) from {streamer_count} streamer(s).",
+        progress=1.0,
+        source_title=new_meta["title"],
+        clips=[{
+            "file": out_path.name,
+            "duration": total_duration,
+            "title": new_meta["title"],
+            "upload_title": new_meta["title"],
+            "description": new_meta["description"],
+            "hook_caption": None,
+            "reason": None,
+            "window_index": None,
+            "source_video": None,
+            "facecam_uncertain": False,
+            "facecam_trusted": False,
+            "source_frame": None,
+            "is_recap": True,
+        }],
+    )
+
+
+class GameRecapRemixRequest(BaseModel):
+    hook_seconds: Optional[float] = None
+
+
+@protected.post("/api/jobs/{job_id}/game-recap/remix")
+def remix_game_recap(job_id: str, req: GameRecapRemixRequest) -> dict:
+    """Queue a re-cut of an already-finished game recap in a new clip
+    order (see _run_game_recap_remix) -- the "Mix order" button's
+    endpoint. Goes through the same background job queue as a normal
+    generate, since the concat re-encode alone can take a while for a
+    long recap; reuses this job's id and per-clip files rather than
+    creating a new job."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.get("pipeline") != "game_recap":
+            raise HTTPException(400, "not a game-recap job")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        if not (job.get("game_recap_meta") or {}).get("picks"):
+            raise HTTPException(409, (
+                "This recap predates the mix-order feature (or its source clips were already cleaned "
+                "up) -- generate a fresh one instead."
+            ))
+        job["pending_game_recap_remix"] = {"hook_seconds": req.hook_seconds}
+        job["state"] = "queued"
+        job["message"] = "Queued -- mixing clip order"
+        job["progress"] = 0.0
+        job["error"] = None
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return {"ok": True}
+
+
+# How often the recap scheduler wakes up to check whether it's time --
+# hourly is frequent enough to land within an hour of the target time
+# without a dedicated cron mechanism, and cheap enough to just poll.
+_RECAP_SCHEDULER_CHECK_SECONDS = 3600
+_RECAP_SCHEDULE_WEEKDAY = 0  # Monday
+_RECAP_SCHEDULE_HOUR_UTC = 9
+
+
+def _weekly_recap_scheduler_loop() -> None:
+    """Builds the week's recap as a draft automatically once a week, so
+    it's just waiting for review rather than something the creator has to
+    remember to click. Never uploads by itself -- see _run_weekly_recap_job.
+    A persisted "last run" ISO week (not just a sleep timer) survives a
+    Railway restart/redeploy without either skipping a week or firing
+    twice for the same one."""
+    while True:
+        time.sleep(_RECAP_SCHEDULER_CHECK_SECONDS)
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if now.weekday() != _RECAP_SCHEDULE_WEEKDAY or now.hour < _RECAP_SCHEDULE_HOUR_UTC:
+                continue
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+            state = {}
+            if _recap_scheduler_state_path.exists():
+                try:
+                    state = json.loads(_recap_scheduler_state_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    state = {}
+            if state.get("last_run_iso_week") == iso_week:
+                continue
+            job_id = _queue_weekly_recap_job()
+            print(f"[weekly_recap] scheduled run for {iso_week}: queued job {job_id}", flush=True)
+            state["last_run_iso_week"] = iso_week
+            _recap_scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
+        except Exception as e:
+            # A missed or double-counted week is a minor annoyance; taking
+            # the whole scheduler thread down over one bad week is worse.
+            print(f"[weekly_recap] scheduler tick failed: {e}", flush=True)
+
+
+threading.Thread(target=_weekly_recap_scheduler_loop, daemon=True).start()
+
+
+# Sunday evening, UTC -- adjust _REMINDER_SCHEDULE_HOUR_UTC if this lands
+# at an inconvenient local time.
+_REMINDER_SCHEDULE_WEEKDAY = 6  # Sunday
+_REMINDER_SCHEDULE_HOUR_UTC = 18
+
+
+def _weekly_reminder_scheduler_loop() -> None:
+    """Sends a plain Telegram nudge every Sunday to upload the week's
+    clips -- independent of the recap (which sources its own clips
+    straight from Twitch's view counts and needs nothing uploaded first,
+    see weekly_recap.py), this is just a reminder for the creator's own
+    regular posting habit. Same persisted-ISO-week pattern as
+    _weekly_recap_scheduler_loop (see its docstring) so a restart/
+    redeploy can't skip a week or send the reminder twice. Independent of
+    whether a Telegram bot is actually configured -- send_telegram() is
+    itself silent/best-effort on a missing token, so this thread doesn't
+    need to check first."""
+    while True:
+        time.sleep(_RECAP_SCHEDULER_CHECK_SECONDS)
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if now.weekday() != _REMINDER_SCHEDULE_WEEKDAY or now.hour < _REMINDER_SCHEDULE_HOUR_UTC:
+                continue
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+            state = {}
+            if _reminder_scheduler_state_path.exists():
+                try:
+                    state = json.loads(_reminder_scheduler_state_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    state = {}
+            if state.get("last_sent_iso_week") == iso_week:
+                continue
+            send_telegram("\U0001F4C5 Sunday reminder -- remember to upload this week's clips!")
+            state["last_sent_iso_week"] = iso_week
+            _reminder_scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
+        except Exception as e:
+            print(f"[reminder] scheduler tick failed: {e}", flush=True)
+
+
+threading.Thread(target=_weekly_reminder_scheduler_loop, daemon=True).start()
 
 
 @protected.delete("/api/jobs/{job_id}/clips/{filename}")
@@ -1128,7 +2479,13 @@ def delete_clip(job_id: str, filename: str) -> dict:
     "funny ones") was still treating that time range as spoken for, so it
     could never reconsider it even though nothing kept was using it
     anymore -- exactly the moment most likely to actually match a new
-    focus, permanently locked out."""
+    focus, permanently locked out.
+
+    A weekly-recap or game-recap job has exactly one "clip" -- the whole
+    compilation -- so deleting it leaves nothing else in that job worth
+    keeping (there's no source video or request to regenerate from, unlike
+    a normal job). Removes the whole job in that case instead of leaving
+    an empty "0 clip(s), Done" husk behind in the jobs list forever."""
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
@@ -1140,21 +2497,30 @@ def delete_clip(job_id: str, filename: str) -> dict:
         if deleted is None:
             raise HTTPException(404, "clip not found")
         remaining = [c for c in clips if c.get("file") != filename]
-        job["clips"] = remaining
 
-        if deleted.get("window_index") is not None:
-            used_window_indices = set(job.get("used_window_indices") or [])
-            used_window_indices.discard(deleted["window_index"])
-            job["used_window_indices"] = list(used_window_indices)
+        if not remaining and job.get("pipeline") in ("weekly_recap", "game_recap"):
+            jobs.pop(job_id, None)
+            cancel_events.pop(job_id, None)
+            job_deleted = True
         else:
-            used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
-            target = (deleted.get("start"), deleted.get("end"))
-            used_ranges = [r for r in used_ranges if r != target]
-            job["used_ranges"] = [list(r) for r in used_ranges]
-    _persist(job_id)
+            job["clips"] = remaining
+            job_deleted = False
+            if deleted.get("window_index") is not None:
+                used_window_indices = set(job.get("used_window_indices") or [])
+                used_window_indices.discard(deleted["window_index"])
+                job["used_window_indices"] = list(used_window_indices)
+            else:
+                used_ranges = [tuple(r) for r in (job.get("used_ranges") or [])]
+                target = (deleted.get("start"), deleted.get("end"))
+                used_ranges = [r for r in used_ranges if r != target]
+                job["used_ranges"] = [list(r) for r in used_ranges]
 
-    _remove_clip_files(BASE_DIR / job_id, filename)
-    return {"ok": True, "clips": remaining}
+    if job_deleted:
+        shutil.rmtree(BASE_DIR / job_id, ignore_errors=True)
+    else:
+        _persist(job_id)
+        _remove_clip_files(BASE_DIR / job_id, filename)
+    return {"ok": True, "clips": remaining, "job_deleted": job_deleted}
 
 
 @protected.delete("/api/jobs/{job_id}/clips")
@@ -1228,6 +2594,110 @@ def search_creator_endpoint(q: str) -> dict:
     return {"results": [vars(e) for e in results]}
 
 
+_MAX_ACCESSIBILITY_PROBES = 4  # bound worst-case latency: stop checking further down the ranking
+
+
+@protected.post("/api/recommend-vod")
+def recommend_vod_endpoint() -> dict:
+    """Which of the tracked streamers' recent VODs (TRENDING_TWITCH_LOGINS
+    -- the same watchlist the trending rows use) is most worth downloading
+    and clipping today. Not cached and only run on a button click, same as
+    the AI overview: it's a real Claude API call, so it shouldn't fire on
+    every page load.
+
+    Twitch's video-list API can't tell us a VOD is subscriber-only,
+    deleted-but-listed, or otherwise blocked -- that only shows up once
+    something actually tries to download it. So before handing a pick back,
+    this probes it for real accessibility and walks down Claude's ranking
+    past any VOD that fails it, capped at _MAX_ACCESSIBILITY_PROBES
+    candidates so one bad streak of inaccessible VODs can't make this
+    endpoint hang. Uses quick_probe_accessible (a single fast attempt on a
+    short window) rather than the job pipeline's careful multi-attempt
+    probe_source_accessible -- this is a button click a person is waiting
+    on, not a job already committed to one VOD, so speed matters more than
+    certainty here; a wrongly-skipped VOD just falls through to the next
+    ranked one instead of blocking the whole response."""
+    import shutil
+    import tempfile
+    from datetime import datetime
+
+    twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
+    candidates = get_recommendation_candidates(twitch_logins)
+    if not candidates:
+        raise HTTPException(
+            409,
+            "No recent VODs found -- set TRENDING_TWITCH_LOGINS to the streamers you clip, "
+            "or check that TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET are configured.",
+        )
+
+    candidate_dicts = []
+    for c in candidates:
+        d = vars(c).copy()
+        d["_published_ts"] = None
+        if c.published_at:
+            try:
+                d["_published_ts"] = datetime.fromisoformat(c.published_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        candidate_dicts.append(d)
+
+    try:
+        result = channel_strategy.recommend_vod(candidate_dicts, notes=_load_strategy_notes())
+        ranking = result["ranking"]
+        reasons = {ranking[0]: result["why_best"]} if ranking else {}
+        if len(ranking) > 1:
+            reasons[ranking[1]] = result["why_second"]
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(400, str(e)) from e
+
+    def _entry(index: int, reason: Optional[str]) -> dict:
+        c = candidates[index]
+        return {
+            "name": c.name, "url": c.url, "title": c.title,
+            "view_count": c.view_count, "duration": c.duration,
+            "thumbnail": c.thumbnail, "published_at": c.published_at,
+            "reason": reason,
+        }
+
+    picks: list = []
+    skipped_inaccessible = 0
+    probe_dir = Path(tempfile.mkdtemp(prefix="vod_probe_"))
+    try:
+        for index in ranking[:_MAX_ACCESSIBILITY_PROBES]:
+            c = candidates[index]
+            duration_seconds = parse_twitch_duration(c.duration or "")
+            if duration_seconds and not quick_probe_accessible(c.url, duration_seconds, probe_dir):
+                skipped_inaccessible += 1
+                continue
+            # No parseable duration -- can't pick a probe point, so take it
+            # on trust rather than blocking the recommendation on that.
+            reason = reasons.get(index)
+            if reason is None:
+                reason = (
+                    f"Next best option after {skipped_inaccessible} higher-ranked VOD(s) "
+                    "turned out to be inaccessible right now."
+                )
+            picks.append(_entry(index, reason))
+            if len(picks) >= 2:
+                break
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+    if not picks:
+        raise HTTPException(
+            409,
+            f"Checked the top {min(len(ranking), _MAX_ACCESSIBILITY_PROBES)} tracked VODs and none of them "
+            "were downloadable right now (likely subscriber-only or otherwise restricted). Try again later.",
+        )
+
+    return {
+        "pick": picks[0],
+        "runner_up": picks[1] if len(picks) > 1 else None,
+        "candidates_considered": len(candidates),
+        "skipped_inaccessible": skipped_inaccessible,
+    }
+
+
 def _youtube_redirect_uri() -> str:
     domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if not domain:
@@ -1262,13 +2732,13 @@ def youtube_login() -> RedirectResponse:
 @protected.get("/auth/youtube/callback")
 def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
     if error:
-        return RedirectResponse(f"/?youtube_error={error}")
+        return RedirectResponse(f"/analytics?youtube_error={error}")
     issued_at = _youtube_oauth_states.pop(state, None)
     if issued_at is None or time.time() - issued_at > 600:
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
     _youtube_token_store.save(token)
-    return RedirectResponse("/?youtube_connected=1")
+    return RedirectResponse("/analytics?youtube_connected=1")
 
 
 @protected.post("/api/youtube/disconnect")
@@ -1334,15 +2804,21 @@ def _gather_channel_insights_data() -> dict:
         # snapshot by id -- tells apart "nobody clicked it" (low views,
         # retention doesn't matter yet) from "people clicked but didn't
         # stick around" (decent views, weak retention), which raw view
-        # counts alone can't distinguish.
-        recent_videos = (result.get("heuristic") or {}).get("recent_videos")
-        if recent_videos:
+        # counts alone can't distinguish. get_video_retention isn't
+        # duration-filtered, so the same lookup covers long-form videos
+        # too -- arguably where retention matters most, since a long-form
+        # video's whole draw is holding attention past the first few
+        # seconds a Short lives or dies on.
+        heuristic = result.get("heuristic") or {}
+        recent_videos = heuristic.get("recent_videos")
+        recent_long_form = heuristic.get("recent_long_form_videos")
+        if recent_videos or recent_long_form:
             try:
                 retention_by_id = youtube_analytics.get_video_retention(access_token, channel_id)
             except Exception as e:
                 result["retention_error"] = str(e)
                 retention_by_id = {}
-            for v in recent_videos:
+            for v in (recent_videos or []) + (recent_long_form or []):
                 r = retention_by_id.get(v.get("id"))
                 if r:
                     v["average_view_duration_seconds"] = r["average_view_duration_seconds"]
@@ -1372,14 +2848,28 @@ def channel_insights() -> dict:
 
 class OverviewRequest(BaseModel):
     focus: Optional[str] = None
+    # Off by default: reads each saved competitor's top video's actual
+    # transcript + loudness, not just its title -- meaningfully slower
+    # (a caption + an audio-only fetch per video, capped below) than the
+    # metadata-only overview, so it's an explicit opt-in rather than
+    # something that silently makes every overview take longer.
+    analyze_content: bool = False
+
+
+# Worst-case latency ceiling for the opt-in content analysis: this many
+# competitor videos, each a caption fetch + a short audio-only download,
+# on top of the Claude call itself.
+_MAX_CONTENT_ANALYSIS_VIDEOS = 5
 
 
 @protected.post("/api/channel-insights/overview")
 def channel_insights_overview(req: OverviewRequest) -> dict:
     """A plain-language strategy read from Claude over the same channel
     data the insights panel shows -- best day, what content is working,
-    format notes. Costs a Claude API call, so this is its own on-demand
-    endpoint (a button) rather than something the panel auto-loads."""
+    format notes, plus a competitor-pattern comparison if any competitor
+    channels are saved. Costs a Claude API call, so this is its own
+    on-demand endpoint (a button) rather than something the panel
+    auto-loads."""
     data = _gather_channel_insights_data()
     snapshot = data.get("heuristic")
     if not snapshot:
@@ -1389,8 +2879,48 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
             or data.get("setup_needed")
             or "No channel data available yet -- set YOUTUBE_OWN_CHANNEL or connect your YouTube account first.",
         )
+    competitor_snapshots = []
+    for c in channel_strategy.load_competitors(_competitor_channels_path):
+        channel_id = c.get("channel_id")
+        if not channel_id:
+            continue
+        try:
+            comp_snapshot = get_channel_snapshot(channel_id)
+        except Exception as e:
+            print(f"[channel_strategy] competitor lookup for {channel_id!r} failed, skipping: {e}", flush=True)
+            continue
+        if comp_snapshot:
+            competitor_snapshots.append(comp_snapshot)
+
+    content_analyses = []
+    if req.analyze_content and competitor_snapshots:
+        for comp in competitor_snapshots[:_MAX_CONTENT_ANALYSIS_VIDEOS]:
+            videos = [v for v in (comp.get("recent_videos") or []) if not v.get("too_new_to_judge")]
+            if not videos:
+                continue
+            top = max(videos, key=lambda v: v["views_per_day"])
+            video_url = f"https://www.youtube.com/watch?v={top['id']}"
+            try:
+                content = competitor_content.analyze_video_content(video_url, top.get("duration_seconds") or 60.0)
+            except Exception as e:
+                print(f"[channel_strategy] content analysis for {video_url} failed, skipping: {e}", flush=True)
+                continue
+            if content:
+                content_analyses.append({
+                    "channel_title": comp.get("channel_title"),
+                    "video_title": top.get("title"),
+                    "transcript_text": content.transcript_text,
+                    "loud_moments": [
+                        {"start": m.start, "end": m.end, "peak_db": m.peak_db, "jump_db": m.jump_db}
+                        for m in content.loud_moments
+                    ],
+                })
+
     try:
-        overview = get_ai_overview(snapshot, data.get("analytics"), focus=req.focus)
+        overview = get_ai_overview(
+            snapshot, data.get("analytics"), focus=req.focus,
+            competitors=competitor_snapshots, content_analyses=content_analyses,
+        )
     except Exception as e:
         raise HTTPException(502, f"Could not generate an overview: {e}") from e
     channel_strategy.save_overview(_channel_strategy_path, overview, channel_title=snapshot.get("channel_title"))
@@ -1404,6 +2934,84 @@ def channel_insights_clear_overview() -> dict:
     fresh instead of piling onto whatever's already saved."""
     channel_strategy.clear_history(_channel_strategy_path)
     return {"ok": True}
+
+
+@protected.get("/api/competitor-search")
+def competitor_search(streamer: str) -> dict:
+    """Discover YouTube channels actively clipping `streamer`, for the
+    competitor picker -- a creator clipping someone else's stream usually
+    has no idea who else clips the same person, so this searches instead
+    of asking them to type in channel names. The most expensive lookup
+    this app makes (100 YouTube quota units), so it only ever runs from
+    this explicit button, never automatically."""
+    if not streamer or not streamer.strip():
+        raise HTTPException(400, "enter a streamer name to search for")
+    if not os.environ.get("YOUTUBE_API_KEY"):
+        raise HTTPException(400, "YOUTUBE_API_KEY is not set on this deployment")
+    try:
+        candidates = competitor_discovery.search_clipping_channels(streamer)
+    except Exception as e:
+        raise HTTPException(502, f"Search failed: {e}") from e
+    return {"channels": [
+        {
+            "channel_id": c.channel_id,
+            "channel_title": c.channel_title,
+            "thumbnail": c.thumbnail,
+            "subscriber_count": c.subscriber_count,
+            "sample_video_title": c.sample_video_title,
+            "sample_video_views": c.sample_video_views,
+        }
+        for c in candidates
+    ]}
+
+
+class CompetitorChannel(BaseModel):
+    channel_id: str
+    channel_title: str
+
+
+class CompetitorChannelsRequest(BaseModel):
+    channels: List[CompetitorChannel]
+
+
+@protected.get("/api/competitor-channels")
+def get_competitor_channels() -> dict:
+    return {"channels": channel_strategy.load_competitors(_competitor_channels_path)}
+
+
+@protected.post("/api/competitor-channels")
+def set_competitor_channels(req: CompetitorChannelsRequest) -> dict:
+    """Replace the saved competitor list -- the frontend keeps the full
+    set client-side (after an add or a remove) and always sends it whole,
+    so this is a plain overwrite rather than incremental add/remove calls
+    against the same file."""
+    channels = [{"channel_id": c.channel_id, "channel_title": c.channel_title} for c in req.channels]
+    channel_strategy.save_competitors(_competitor_channels_path, channels)
+    return {"channels": channels}
+
+
+@protected.get("/api/competitor-channels/insights")
+def get_competitor_channels_insights() -> dict:
+    """Recent-video snapshots for every saved competitor -- the same
+    heuristic lookup used for the AI overview, but returned directly for
+    the top-videos charts on the analytics page instead of feeding a
+    Claude call. Cheap (a few YouTube Data API quota units per channel,
+    not the 100-unit search), so unlike competitor-search this is safe to
+    run on every page load. A channel whose lookup fails is skipped, not
+    fatal -- one bad handle shouldn't blank out the rest of the page."""
+    results = []
+    for c in channel_strategy.load_competitors(_competitor_channels_path):
+        channel_id = c.get("channel_id")
+        if not channel_id:
+            continue
+        try:
+            snapshot = get_channel_snapshot(channel_id)
+        except Exception as e:
+            print(f"[analytics] competitor insights lookup for {channel_id!r} failed, skipping: {e}", flush=True)
+            continue
+        if snapshot:
+            results.append(snapshot)
+    return {"channels": results}
 
 
 @app.get("/healthz")
@@ -1424,6 +3032,21 @@ def notify_test() -> dict:
 @protected.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
+
+
+@protected.get("/analytics", response_class=HTMLResponse)
+def analytics_page() -> str:
+    return ANALYTICS_HTML
+
+
+@protected.get("/game-recap", response_class=HTMLResponse)
+def game_recap_page() -> str:
+    return GAME_RECAP_HTML
+
+
+@protected.get("/weekly-recap", response_class=HTMLResponse)
+def weekly_recap_page() -> str:
+    return WEEKLY_RECAP_HTML
 
 
 app.include_router(protected)
@@ -1471,6 +3094,16 @@ INDEX_HTML = """<!doctype html>
     padding: 40px 16px;
   }
   .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -1533,12 +3166,25 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay, #thumbnail-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open { display: flex; }
-  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open { display: flex; }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-gallery .thumb-loading { aspect-ratio: 9/16; background: var(--track); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.8rem; }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
+  .privacy-option {
+    display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+    text-transform: none; letter-spacing: normal;
+  }
+  .privacy-option input { width: auto; margin-top: 3px; }
+  .privacy-option .privacy-label { display: block; font-weight: 700; font-size: 0.9rem; color: var(--text); }
+  .privacy-option .privacy-desc { font-size: 0.78rem; color: var(--muted); margin-top: 2px; font-weight: 400; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
   .modal p { margin: 0 0 8px; font-size: 0.95rem; }
   .modal .hint { margin-bottom: 16px; }
   .modal-actions { display: flex; flex-direction: column; gap: 8px; }
@@ -1559,6 +3205,14 @@ INDEX_HTML = """<!doctype html>
   .clip a:hover { text-decoration: underline; }
   .clip strong { font-size: 0.98rem; }
   .clip em { color: var(--muted); font-size: 0.88rem; display: block; margin-top: 4px; font-style: italic; }
+  .clip-primary-row { display: flex; gap: 8px; margin-top: 12px; }
+  .clip-primary-row button { flex: 1; margin-top: 0; padding: 10px 14px; font-size: 0.86rem; }
+  .clip-secondary-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .clip-secondary-row button {
+    flex: 1; margin-top: 0; padding: 8px 10px; font-size: 0.78rem; font-weight: 600;
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+  }
+  .clip-secondary-row button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); opacity: 1; }
   .title-row { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
   .title-row input { flex: 1; margin-top: 0; font-weight: 600; }
   .title-row textarea { flex: 1; margin-top: 0; font-family: inherit; font-size: 0.85rem; resize: vertical; align-self: stretch; }
@@ -1580,6 +3234,15 @@ INDEX_HTML = """<!doctype html>
   .creator-card .name { font-size: 0.78rem; font-weight: 700; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .creator-card .meta { font-size: 0.7rem; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .live-badge { display: inline-block; background: var(--danger); color: #fff; font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-top: 6px; letter-spacing: 0.03em; }
+  #recommend-vod-btn { padding: 8px 16px; }
+  .recommend-card { display: flex; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
+  .recommend-card img { width: 110px; height: 62px; object-fit: cover; border-radius: 6px; background: var(--track); flex: 0 0 auto; }
+  .recommend-card .rc-body { min-width: 0; flex: 1; }
+  .recommend-card .rc-tag { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; color: var(--accent); text-transform: uppercase; }
+  .recommend-card .rc-title { font-weight: 700; font-size: 0.88rem; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recommend-card .rc-meta { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+  .recommend-card .rc-reason { font-size: 0.8rem; margin-top: 6px; }
+  .recommend-card button { margin-top: 8px; padding: 5px 12px; font-size: 0.8rem; }
   .actions { display: flex; align-items: center; gap: 0; }
   #search-row { display: flex; gap: 8px; margin-top: 0; }
   #search-row input { flex: 1; margin-top: 0; }
@@ -1598,6 +3261,12 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <div class="page">
+<div class="topnav">
+  <a href="/" class="active">Home</a>
+  <a href="/weekly-recap">Weekly Recap</a>
+  <a href="/game-recap">Game Recap</a>
+  <a href="/analytics">Analytics</a>
+</div>
 <div class="card">
 
 <div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
@@ -1611,6 +3280,13 @@ INDEX_HTML = """<!doctype html>
 <div class="trending-section" id="search-results-section">
   <div class="trending-row" id="search-results"></div>
   <div class="hint" id="search-status" style="display:none"></div>
+</div>
+
+<div class="trending-section" id="recommend-vod-section">
+  <label style="margin-top:0">Recommended VOD to clip today</label>
+  <button id="recommend-vod-btn" type="button">🎯 Recommend one</button>
+  <div class="hint" id="recommend-vod-status" style="display:none"></div>
+  <div id="recommend-vod-results" style="display:none; margin-top:10px"></div>
 </div>
 
 <div id="trending-wrap">
@@ -1649,7 +3325,8 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div>
     <label>Max length (s)</label>
-    <input id="max_len" type="number" value="90">
+    <input id="max_len" type="number" value="60" max="60">
+    <div class="hint">Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.</div>
   </div>
 </div>
 
@@ -1680,14 +3357,6 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <button id="notify-test-btn" type="button">🔔 Test Telegram notification</button>
-
-<div id="insights-panel">
-  <label style="margin-top:0">📈 Channel insights — best day to post</label>
-  <div id="insights-body"><div class="hint">Loading...</div></div>
-  <button id="ai-overview-btn" type="button" style="margin-top:10px">🤖 Get AI strategy overview</button>
-  <button id="ai-overview-clear-btn" type="button" style="margin-top:10px;margin-left:8px">🗑 Clear saved analysis</button>
-  <div id="ai-overview-body"></div>
-</div>
 
 </div>
 </div>
@@ -1768,6 +3437,79 @@ INDEX_HTML = """<!doctype html>
   </div>
 </div>
 
+<div id="youtube-upload-modal-overlay">
+  <div class="modal" style="max-height:92vh;overflow:auto">
+    <p>Upload to YouTube</p>
+    <p class="hint" id="youtube-upload-title-hint"></p>
+    <video id="youtube-upload-preview" controls preload="metadata" style="width:100%;max-height:40vh;border-radius:8px;background:var(--track);display:block;object-fit:contain"></video>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="unlisted" checked>
+      <span>
+        <span class="privacy-label">Unlisted</span>
+        <span class="privacy-desc" style="display:block">Only people with the link can see it -- good for a final check before going public.</span>
+      </span>
+    </label>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="public">
+      <span>
+        <span class="privacy-label">Public</span>
+        <span class="privacy-desc" style="display:block">Live immediately on your channel and in search/Shorts feed.</span>
+      </span>
+    </label>
+    <label class="privacy-option">
+      <input type="radio" name="youtube-privacy" value="private">
+      <span>
+        <span class="privacy-label">Private</span>
+        <span class="privacy-desc" style="display:block">Only you can see it.</span>
+      </span>
+    </label>
+    <label style="margin-top:16px">Trim before uploading (optional)</label>
+    <p class="hint">Play the video above, pause where you want to cut, then use the buttons below -- or type seconds directly.</p>
+    <div class="row">
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the start (s)</label>
+        <input id="youtube-upload-trim-start" type="number" value="0" min="0" step="0.5">
+        <button id="youtube-upload-set-start-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
+      </div>
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the end (s)</label>
+        <input id="youtube-upload-trim-end" type="number" value="0" min="0" step="0.5">
+        <button id="youtube-upload-set-end-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
+      </div>
+    </div>
+    <p class="hint" id="youtube-upload-trim-hint"></p>
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="youtube-upload-go-btn" type="button">Upload</button>
+      <button id="youtube-upload-cancel-btn" type="button" class="ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal" style="max-width:520px;width:100%;max-height:92vh;overflow:auto">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the clip -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions" style="margin-top:12px">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const statusEl = document.getElementById('status');
 const clipsEl = document.getElementById('clips');
@@ -1843,6 +3585,91 @@ async function loadTrending() {
   }
 }
 loadTrending();
+
+function formatDuration(d) {
+  // Twitch's own format is already compact (e.g. "3h20m10s") -- just
+  // space it out a bit for readability.
+  if (!d) return '';
+  return d.replace(/(\d+)h/, '$1h ').replace(/(\d+)m/, '$1m ').trim();
+}
+
+function buildRecommendCard(entry, tag) {
+  const card = document.createElement('div');
+  card.className = 'recommend-card';
+
+  const img = document.createElement('img');
+  if (entry.thumbnail) img.src = entry.thumbnail;
+  card.appendChild(img);
+
+  const body = document.createElement('div');
+  body.className = 'rc-body';
+
+  const tagEl = document.createElement('div');
+  tagEl.className = 'rc-tag';
+  tagEl.textContent = tag;
+  body.appendChild(tagEl);
+
+  const title = document.createElement('div');
+  title.className = 'rc-title';
+  title.title = entry.title || '';
+  title.textContent = `${entry.name} — ${entry.title || ''}`;
+  body.appendChild(title);
+
+  const meta = document.createElement('div');
+  meta.className = 'rc-meta';
+  const metaParts = [];
+  if (entry.view_count != null) metaParts.push(`${formatViewers(entry.view_count)} views`);
+  if (entry.duration) metaParts.push(formatDuration(entry.duration));
+  meta.textContent = metaParts.join(' · ');
+  body.appendChild(meta);
+
+  if (entry.reason) {
+    const reason = document.createElement('div');
+    reason.className = 'rc-reason';
+    reason.textContent = entry.reason;
+    body.appendChild(reason);
+  }
+
+  const useBtn = document.createElement('button');
+  useBtn.type = 'button';
+  useBtn.textContent = 'Use this VOD';
+  useBtn.addEventListener('click', () => {
+    document.getElementById('source').value = entry.url;
+    document.getElementById('source').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  body.appendChild(useBtn);
+
+  card.appendChild(body);
+  return card;
+}
+
+const recommendVodBtn = document.getElementById('recommend-vod-btn');
+const recommendVodStatus = document.getElementById('recommend-vod-status');
+const recommendVodResults = document.getElementById('recommend-vod-results');
+
+recommendVodBtn.addEventListener('click', async () => {
+  recommendVodBtn.disabled = true;
+  recommendVodResults.style.display = 'none';
+  recommendVodResults.innerHTML = '';
+  recommendVodStatus.style.display = 'block';
+  recommendVodStatus.textContent = "Checking your tracked streamers' recent VODs -- this can take up to a minute since it double-checks each one is actually downloadable...";
+  try {
+    const resp = await fetch('/api/recommend-vod', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      recommendVodStatus.textContent = data.detail || 'Could not get a recommendation.';
+      return;
+    }
+    recommendVodStatus.style.display = 'none';
+    if (data.pick) recommendVodResults.appendChild(buildRecommendCard(data.pick, 'Top pick'));
+    if (data.runner_up) recommendVodResults.appendChild(buildRecommendCard(data.runner_up, 'Runner-up'));
+    recommendVodResults.style.display = 'block';
+  } catch (e) {
+    recommendVodStatus.textContent = 'Could not get a recommendation -- try again.';
+  } finally {
+    recommendVodBtn.disabled = false;
+  }
+});
 
 const searchInput = document.getElementById('search-input');
 const searchBtn = document.getElementById('search-btn');
@@ -1934,7 +3761,7 @@ async function loadJobsList() {
         viewBtn.addEventListener('click', () => attachToJob(job.id));
         row.appendChild(viewBtn);
       }
-      if (!running) {
+      if (!running && job.pipeline !== 'weekly_recap') {
         const regenBtn = document.createElement('button');
         regenBtn.type = 'button';
         regenBtn.textContent = 'Generate more clips';
@@ -2137,10 +3964,16 @@ let lastFacecamSourceBoxes = null;    // the last placement submitted -- pre-fil
 const facecamPrompted = new Set();    // `${jobId}/${file}` already prompted for on this page load
 
 function facecamOthersMissing(job, clip) {
-  return (job.clips || []).filter(c => c.file !== clip.file && c.source_frame).length;
+  // Every clip with a downloaded source is eligible for the batch "apply
+  // to others" option (a saved source_frame isn't required -- one gets
+  // generated on demand if needed), but it must still only ever target
+  // clips with no trusted placement yet -- otherwise it would offer to
+  // stamp this clip's box position onto clips that already have a
+  // perfectly good, differently-positioned facecam.
+  return (job.clips || []).filter(c => c.file !== clip.file && c.source_video && !c.facecam_trusted && !c.facecam_manual).length;
 }
 
-function openFacecamModal(jobId, clip, othersMissing) {
+async function openFacecamModal(jobId, clip, othersMissing) {
   facecamJobId = jobId;
   facecamFilename = clip.file;
   facecamBoxes = [];
@@ -2153,6 +3986,9 @@ function openFacecamModal(jobId, clip, othersMissing) {
   } else if (clip.facecam_manual) {
     facecamModalTitle.textContent = `Adjust the facecam position -- "${clip.title}"`;
     why = 'This clip uses the boxes you placed earlier.';
+  } else if (clip.facecam_trusted) {
+    facecamModalTitle.textContent = `Adjust the facecam position -- "${clip.title}"`;
+    why = 'The automatic placement passed its check, but override it if it actually looks wrong.';
   } else {
     facecamModalTitle.textContent = `Add a facecam -- "${clip.title}"`;
     why = 'No facecam was detected in this clip.';
@@ -2163,7 +3999,27 @@ function openFacecamModal(jobId, clip, othersMissing) {
   facecamApplyAll.checked = othersMissing > 0;
   facecamModal.classList.add('open');
   renderFacecamBoxes();
-  facecamImg.src = `/api/jobs/${jobId}/clips/${clip.source_frame}`;
+  let sourceFrame = clip.source_frame;
+  if (!sourceFrame) {
+    // An older clip rendered before every clip saved its own source frame
+    // -- generate one now instead of leaving the picker with nothing to
+    // draw on, as long as its downloaded source is still on disk.
+    facecamModalHint.textContent = 'Loading the source frame...';
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/clips/${clip.file}/ensure-source-frame`, { method: 'POST' });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        facecamModalHint.textContent = data.detail || "Couldn't load a source frame for this clip.";
+        return;
+      }
+      sourceFrame = data.source_frame;
+      facecamModalHint.textContent = `${why} Click and drag on the frame to draw a box tightly around each facecam window (up to ${FACECAM_MAX_BOXES}), then re-render.`;
+    } catch (e) {
+      facecamModalHint.textContent = "Couldn't load a source frame for this clip -- try again.";
+      return;
+    }
+  }
+  facecamImg.src = `/api/jobs/${jobId}/clips/${sourceFrame}`;
   // A cached frame may already be complete before the load event queues
   // -- decode() resolves either way; if it rejects (the request changed
   // under it), the load listener below covers it.
@@ -2316,12 +4172,248 @@ facecamGoBtn.addEventListener('click', async () => {
   }
 });
 
+const youtubeUploadModal = document.getElementById('youtube-upload-modal-overlay');
+const youtubeUploadTitleHint = document.getElementById('youtube-upload-title-hint');
+const youtubeUploadPreview = document.getElementById('youtube-upload-preview');
+const youtubeUploadGoBtn = document.getElementById('youtube-upload-go-btn');
+const youtubeUploadTrimStart = document.getElementById('youtube-upload-trim-start');
+const youtubeUploadTrimEnd = document.getElementById('youtube-upload-trim-end');
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
+const youtubeUploadTrimHint = document.getElementById('youtube-upload-trim-hint');
+const youtubeUploadSetStartBtn = document.getElementById('youtube-upload-set-start-btn');
+const youtubeUploadSetEndBtn = document.getElementById('youtube-upload-set-end-btn');
+let youtubeUploadJobId = null;
+let youtubeUploadFilename = null;
+// Seeded from the clip's recorded duration so the hint has a number to
+// show immediately, then overwritten by the video element's own
+// loadedmetadata duration once the preview loads -- that's the ground
+// truth for what ffmpeg will actually trim against, not whatever got
+// rounded into the job's metadata at render time.
+let youtubeUploadDuration = 0;
+let thumbnailJobId = null;
+let thumbnailFilename = null;
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
+
+function refreshYoutubeUploadTrimHint() {
+  const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(youtubeUploadTrimEnd.value) || 0);
+  const resultSeconds = youtubeUploadDuration - trimStart - trimEnd;
+  if (resultSeconds < 1) {
+    youtubeUploadTrimHint.textContent =
+      `Clip is ${youtubeUploadDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.`;
+    youtubeUploadGoBtn.disabled = true;
+  } else {
+    youtubeUploadTrimHint.textContent =
+      `Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploading ${resultSeconds.toFixed(1)}s after this trim.`;
+    youtubeUploadGoBtn.disabled = false;
+  }
+}
+youtubeUploadTrimStart.addEventListener('input', refreshYoutubeUploadTrimHint);
+youtubeUploadTrimEnd.addEventListener('input', refreshYoutubeUploadTrimHint);
+
+youtubeUploadSetStartBtn.addEventListener('click', () => {
+  youtubeUploadTrimStart.value = youtubeUploadPreview.currentTime.toFixed(1);
+  refreshYoutubeUploadTrimHint();
+});
+youtubeUploadSetEndBtn.addEventListener('click', () => {
+  const remaining = Math.max(0, youtubeUploadDuration - youtubeUploadPreview.currentTime);
+  youtubeUploadTrimEnd.value = remaining.toFixed(1);
+  refreshYoutubeUploadTrimHint();
+});
+
+function openYoutubeUploadModal(jobId, clip) {
+  youtubeUploadJobId = jobId;
+  youtubeUploadFilename = clip.file;
+  youtubeUploadDuration = clip.duration || 0;
+  youtubeUploadTitleHint.textContent = `"${clip.upload_title || clip.title}"`;
+  youtubeUploadPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+  youtubeUploadPreview.onloadedmetadata = () => {
+    if (youtubeUploadPreview.duration && isFinite(youtubeUploadPreview.duration)) {
+      youtubeUploadDuration = youtubeUploadPreview.duration;
+    }
+    refreshYoutubeUploadTrimHint();
+  };
+  youtubeUploadTrimStart.value = '0';
+  youtubeUploadTrimEnd.value = '0';
+  refreshYoutubeUploadTrimHint();
+  document.querySelector('input[name="youtube-privacy"][value="unlisted"]').checked = true;
+  youtubeUploadModal.classList.add('open');
+}
+
+document.getElementById('youtube-upload-cancel-btn').addEventListener('click', () => {
+  youtubeUploadModal.classList.remove('open');
+  youtubeUploadJobId = null;
+  youtubeUploadFilename = null;
+  youtubeUploadPreview.pause();
+  youtubeUploadPreview.removeAttribute('src');
+  youtubeUploadPreview.load();
+});
+
+youtubeUploadGoBtn.addEventListener('click', async () => {
+  if (!youtubeUploadJobId || !youtubeUploadFilename) return;
+  const jobId = youtubeUploadJobId;
+  const filename = youtubeUploadFilename;
+  const privacyInput = document.querySelector('input[name="youtube-privacy"]:checked');
+  const privacyStatus = privacyInput ? privacyInput.value : 'unlisted';
+  const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(youtubeUploadTrimEnd.value) || 0);
+  if (trimStart + trimEnd >= youtubeUploadDuration) {
+    alert('That trim would cut the whole clip -- leave at least a second.');
+    return;
+  }
+  youtubeUploadGoBtn.disabled = true;
+  youtubeUploadGoBtn.textContent = (trimStart || trimEnd) ? 'Trimming & uploading...' : 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: privacyStatus, trim_start: trimStart, trim_end: trimEnd }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Upload failed.');
+      return;
+    }
+    youtubeUploadModal.classList.remove('open');
+    youtubeUploadJobId = null;
+    youtubeUploadFilename = null;
+    youtubeUploadPreview.pause();
+    youtubeUploadPreview.removeAttribute('src');
+    youtubeUploadPreview.load();
+    alert(`Uploaded -- ${data.url}`);
+  } catch (e) {
+    alert('Upload failed.');
+  } finally {
+    youtubeUploadGoBtn.disabled = false;
+    youtubeUploadGoBtn.textContent = 'Upload';
+  }
+});
+
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailJobId = null;
+  thumbnailFilename = null;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+async function openThumbnailModal(jobId, clip) {
+  thumbnailJobId = jobId;
+  thumbnailFilename = clip.file;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${clip.file}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+}
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!thumbnailJobId || !thumbnailFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${thumbnailJobId}/clips/${thumbnailFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
+});
+
 // The part that actually *asks*: once a job is done, if any clip's
 // facecam got rejected, open the picker for it right away instead of
 // leaving a button to be noticed. Each clip is offered once per page
 // load, so "Skip for now" is respected -- the button stays on the clip.
 function maybePromptFacecam(jobId, job) {
-  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open')) return;
+  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open')) return;
   const next = (job.clips || []).find(c => c.facecam_uncertain && c.source_frame && !facecamPrompted.has(`${jobId}/${c.file}`));
   if (!next) return;
   facecamPrompted.add(`${jobId}/${next.file}`);
@@ -2387,6 +4479,15 @@ async function poll(jobId) {
       div.appendChild(em);
     }
 
+    // Watchable right here -- downloading is now an extra, optional step
+    // (the button below), not the only way to see what got rendered.
+    const preview = document.createElement('video');
+    preview.controls = true;
+    preview.preload = 'metadata';
+    preview.style.cssText = 'width:100%;max-width:360px;border-radius:8px;background:var(--track);display:block;margin:8px 0';
+    preview.src = `/api/jobs/${jobId}/clips/${c.file}`;
+    div.appendChild(preview);
+
     const titleRow = document.createElement('div');
     titleRow.className = 'title-row';
     const titleInput = document.createElement('input');
@@ -2427,26 +4528,55 @@ async function poll(jobId) {
     }
 
     const link = document.createElement('a');
-    link.href = `/api/jobs/${jobId}/clips/${c.file}`;
+    link.href = `/api/jobs/${jobId}/clips/${c.file}?download=1`;
     link.setAttribute('download', '');
     link.textContent = `Download ${c.file}`;
     div.appendChild(link);
 
     if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
-      if (c.source_frame) {
+      // One clear primary action (Upload) plus a quieter secondary row for
+      // everything else -- four identical-weight buttons in a run-on line
+      // made it hard to tell at a glance which one actually ships the clip.
+      const primaryRow = document.createElement('div');
+      primaryRow.className = 'clip-primary-row';
+      const uploadBtn = document.createElement('button');
+      uploadBtn.type = 'button';
+      uploadBtn.textContent = '📤 Upload to YouTube';
+      uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
+      primaryRow.appendChild(uploadBtn);
+      div.appendChild(primaryRow);
+
+      const secondaryRow = document.createElement('div');
+      secondaryRow.className = 'clip-secondary-row';
+
+      const thumbBtn = document.createElement('button');
+      thumbBtn.type = 'button';
+      thumbBtn.textContent = '🖼 Thumbnail';
+      thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
+      secondaryRow.appendChild(thumbBtn);
+
+      if (!c.is_recap) {
+        // Always offered, even with neither field set -- a clip old
+        // enough to predate source_video tracking entirely still has a
+        // chance: ensure-source-frame can infer the source from the job's
+        // download folder when there's only one candidate for it. If that
+        // fails too, the modal says so instead of the button just not
+        // being there with no explanation.
+        // A weekly-recap clip (is_recap) has no single source video to
+        // pull a facecam frame from -- it's a concatenation of several --
+        // so this button is skipped for it entirely rather than opening
+        // a modal that can only ever fail.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
-        fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam position'
-          : (c.facecam_manual ? '🎯 Adjust facecam position' : '🎯 Add facecam manually');
-        fixBtn.style.marginLeft = '8px';
+        fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam'
+          : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam' : '🎯 Add facecam';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
-        div.appendChild(fixBtn);
+        secondaryRow.appendChild(fixBtn);
       }
 
       const delClipBtn = document.createElement('button');
       delClipBtn.type = 'button';
-      delClipBtn.textContent = '🗑 Delete this clip';
-      delClipBtn.style.marginLeft = '8px';
+      delClipBtn.textContent = '🗑 Delete';
       delClipBtn.addEventListener('click', async () => {
         if (!confirm(`Delete ${c.file}? This can't be undone.`)) return;
         delClipBtn.disabled = true;
@@ -2457,17 +4587,30 @@ async function poll(jobId) {
             const data = await r.json().catch(() => ({}));
             alert(data.detail || 'Could not delete this clip.');
             delClipBtn.disabled = false;
-            delClipBtn.textContent = '🗑 Delete this clip';
+            delClipBtn.textContent = '🗑 Delete';
             return;
           }
-          poll(jobId);
+          const data = await r.json().catch(() => ({}));
+          if (data.job_deleted) {
+            // A weekly-recap job has only this one clip -- the whole job
+            // is gone now too (see delete_clip), so there's nothing left
+            // for poll(jobId) to fetch. Clear the view instead of leaving
+            // the just-deleted clip on screen until a manual refresh.
+            clipsEl.innerHTML = '';
+            statusEl.textContent = '';
+            progressWrap.style.display = 'none';
+            await loadJobsList();
+          } else {
+            poll(jobId);
+          }
         } catch (e) {
           alert('Could not delete this clip.');
           delClipBtn.disabled = false;
-          delClipBtn.textContent = '🗑 Delete this clip';
+          delClipBtn.textContent = '🗑 Delete';
         }
       });
-      div.appendChild(delClipBtn);
+      secondaryRow.appendChild(delClipBtn);
+      div.appendChild(secondaryRow);
     }
 
     clipsEl.appendChild(div);
@@ -2509,6 +4652,220 @@ deleteBtn.addEventListener('click', async () => {
   deleteBtn.disabled = false;
 });
 
+const notifyTestBtn = document.getElementById('notify-test-btn');
+notifyTestBtn.addEventListener('click', async () => {
+  notifyTestBtn.disabled = true;
+  notifyTestBtn.textContent = 'Sending...';
+  const resp = await fetch('/api/notify-test', { method: 'POST' });
+  notifyTestBtn.textContent = resp.ok
+    ? '✅ Sent -- check Telegram'
+    : '❌ Failed -- check CLIPPER_BOT_API is set and message the bot first';
+  setTimeout(() => {
+    notifyTestBtn.textContent = '🔔 Test Telegram notification';
+    notifyTestBtn.disabled = false;
+  }, 3000);
+});
+</script>
+</body>
+</html>
+"""
+
+
+ANALYTICS_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — analytics</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+    /* Chart series colors -- "your channel" gets the app's own accent
+       (it's not a competitor among competitors, so it sits outside the
+       categorical rotation); competitor channels are assigned blue, aqua,
+       yellow, magenta in that order, skipping orange deliberately -- orange
+       next to yellow is the one adjacent pair in this palette that fails
+       colorblind-safety, so a 5th competitor folds into a repeat rather
+       than ever seat orange beside yellow. */
+    --chart-you: #4a3aa7;
+    --chart-c1: #2a78d6;
+    --chart-c2: #1baf7a;
+    --chart-c3: #eda100;
+    --chart-c4: #e87ba4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+      --chart-you: #9085e9;
+      --chart-c1: #3987e5;
+      --chart-c2: #199e70;
+      --chart-c3: #c98500;
+      --chart-c4: #d55181;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, textarea {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 2px; text-transform: none; letter-spacing: normal; }
+  .back-link { display: inline-block; margin-bottom: 4px; color: var(--muted); font-size: 0.85rem; text-decoration: none; }
+  .back-link:hover { color: var(--accent); }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .section:first-of-type { margin-top: 20px; padding-top: 0; border-top: none; }
+  #insights-body > div { margin-top: 6px; }
+  #insights-body > button { margin-top: 12px; }
+  #competitor-search-row { display: flex; gap: 8px; margin-top: 6px; }
+  #competitor-search-row input { flex: 1; margin-top: 0; }
+  #competitor-search-row button { margin-top: 0; padding: 0 16px; white-space: nowrap; }
+  .competitor-card {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .competitor-card img { width: 56px; height: 56px; border-radius: 8px; object-fit: cover; background: var(--track); flex-shrink: 0; }
+  .competitor-card .info { flex: 1; min-width: 0; }
+  .competitor-card .title { font-size: 0.88rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .competitor-card .meta { font-size: 0.75rem; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .competitor-card button { margin-top: 0; padding: 6px 12px; font-size: 0.8rem; flex-shrink: 0; }
+  .competitor-card button.remove-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .competitor-card button.remove-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
+  #ai-overview-body { margin-top: 10px; }
+  .chart-block { margin-top: 18px; }
+  .chart-block:first-child { margin-top: 8px; }
+  .chart-title { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: 700; }
+  .chart-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .chart-title .hint { font-weight: 400; margin: 0; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .bar-label { flex: 0 0 42%; min-width: 0; }
+  .bar-label .bar-title { font-size: 0.78rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-label .bar-sub { font-size: 0.68rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { flex: 1; height: 20px; background: var(--track); border-radius: 4px; }
+  .bar-fill { height: 16px; margin-top: 2px; border-radius: 0 4px 4px 0; min-width: 3px; }
+  .bar-value { flex: 0 0 auto; min-width: 46px; text-align: right; font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="page">
+<div class="topnav">
+  <a href="/">Home</a>
+  <a href="/weekly-recap">Weekly Recap</a>
+  <a href="/game-recap">Game Recap</a>
+  <a href="/analytics" class="active">Analytics</a>
+</div>
+<div class="card">
+
+<div class="brand"><span class="logo">📊</span><h1>Analytics &amp; AI strategy</h1></div>
+<p class="subtitle">Best day to post, what's working, and how you compare to channels clipping the same streamers.</p>
+
+<div class="section">
+  <label style="margin-top:0">📈 Channel insights — best day to post</label>
+  <div id="insights-body"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🏆 Your top 10 videos</label>
+  <div id="own-top-videos"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🔍 Compare against other clipping channels</label>
+  <p class="hint">Search a streamer you clip to find channels already posting clips of them, then add a few as
+    comparison points -- the AI overview below will contrast your top titles against theirs.</p>
+  <div id="competitor-search-row">
+    <input id="competitor-search-input" placeholder="Streamer name, e.g. jynxzi">
+    <button id="competitor-search-btn" type="button">Search</button>
+  </div>
+  <div class="hint" id="competitor-search-status" style="display:none"></div>
+  <div id="competitor-search-results"></div>
+  <label style="margin-top:16px">Comparing against</label>
+  <div id="competitor-saved-list"></div>
+  <div id="competitor-top-videos"></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🤖 AI strategy overview</label>
+  <label style="margin-top:10px;display:flex;align-items:center;gap:8px;font-weight:normal;text-transform:none;letter-spacing:normal">
+    <input id="ai-overview-analyze-content" type="checkbox" style="width:auto">
+    🔬 Also read competitor clips' actual content (transcript + loudness), not just titles -- slower
+  </label>
+  <button id="ai-overview-btn" type="button">🤖 Get AI strategy overview</button>
+  <button id="ai-overview-clear-btn" type="button" style="margin-left:8px">🗑 Clear saved analysis</button>
+  <div id="ai-overview-body"></div>
+</div>
+
+</div>
+</div>
+
+<script>
 function formatSeconds(s) {
   s = Math.round(s || 0);
   const m = Math.floor(s / 60);
@@ -2525,6 +4882,81 @@ function el(tag, opts) {
   }
   return node;
 }
+
+function formatCompact(n) {
+  n = n || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
+  return String(n);
+}
+
+const DAY_NAMES_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// Builds one labeled bar-chart block (title + up to 10 ranked bars) and
+// returns it -- callers own placing it (one channel per block, so a page
+// with several competitor channels appends several of these into one
+// container). Single series per block, so per the dataviz color rules this
+// needs no legend box -- the title + colored dot next to it already say
+// what's plotted. A flat single hue per channel (not a sequential ramp) is
+// enough: bar LENGTH already carries the magnitude, so color here only
+// needs to carry which channel this block belongs to.
+function buildTopVideosBlock(label, colorVar, videos, subtitle) {
+  const block = document.createElement('div');
+  block.className = 'chart-block';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'chart-title';
+  const dot = document.createElement('span');
+  dot.className = 'chart-dot';
+  dot.style.background = colorVar;
+  titleRow.appendChild(dot);
+  titleRow.appendChild(el('span', { text: label }));
+  if (subtitle) titleRow.appendChild(el('span', { className: 'hint', text: subtitle }));
+  block.appendChild(titleRow);
+
+  // Too-new-to-judge videos are excluded here the same way they're excluded
+  // from every other performance comparison in this app -- a video posted
+  // hours ago hasn't earned its views yet, and ranking it by raw view count
+  // against settled uploads would bury it near the bottom for being new,
+  // not for underperforming.
+  const top = (videos || [])
+    .filter(v => !v.too_new_to_judge)
+    .slice()
+    .sort((a, b) => b.views - a.views)
+    .slice(0, 10);
+
+  if (!top.length) {
+    block.appendChild(el('div', { className: 'hint', text: 'No settled uploads yet to rank.' }));
+    return block;
+  }
+
+  const maxViews = top[0].views || 1;
+  top.forEach(v => {
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+
+    const labelCol = document.createElement('div');
+    labelCol.className = 'bar-label';
+    labelCol.appendChild(el('div', { className: 'bar-title', text: v.title }));
+    labelCol.appendChild(el('div', { className: 'bar-sub', text: `posted ${DAY_NAMES_SHORT[v.weekday]} · ${v.views_per_day}/day` }));
+    row.appendChild(labelCol);
+
+    const track = document.createElement('div');
+    track.className = 'bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'bar-fill';
+    fill.style.width = Math.max(3, Math.round((v.views / maxViews) * 100)) + '%';
+    fill.style.background = colorVar;
+    track.appendChild(fill);
+    row.appendChild(track);
+
+    row.appendChild(el('div', { className: 'bar-value', text: formatCompact(v.views) }));
+    block.appendChild(row);
+  });
+  return block;
+}
+
+const CHART_COMPETITOR_COLORS = ['var(--chart-c1)', 'var(--chart-c2)', 'var(--chart-c3)', 'var(--chart-c4)'];
 
 async function loadChannelInsights() {
   const body = document.getElementById('insights-body');
@@ -2602,28 +5034,33 @@ async function loadChannelInsights() {
   } else {
     body.appendChild(el('div', { className: 'hint', text: 'YouTube OAuth isn\\'t configured on this deployment -- see the README for setup steps to enable real Analytics data.' }));
   }
+
+  const ownTopVideos = document.getElementById('own-top-videos');
+  ownTopVideos.innerHTML = '';
+  ownTopVideos.appendChild(buildTopVideosBlock(
+    'Your channel', 'var(--chart-you)', (data.heuristic || {}).recent_videos || [],
+  ));
 }
 loadChannelInsights();
 
 const aiOverviewBtn = document.getElementById('ai-overview-btn');
 const aiOverviewBody = document.getElementById('ai-overview-body');
+const aiOverviewAnalyzeContent = document.getElementById('ai-overview-analyze-content');
 aiOverviewBtn.addEventListener('click', async () => {
+  const analyzeContent = aiOverviewAnalyzeContent.checked;
   aiOverviewBtn.disabled = true;
-  aiOverviewBtn.textContent = 'Thinking...';
+  aiOverviewBtn.textContent = analyzeContent ? 'Reading competitor clips (this takes longer)...' : 'Thinking...';
   aiOverviewBody.innerHTML = '';
   try {
     const resp = await fetch('/api/channel-insights/overview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ analyze_content: analyzeContent }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       aiOverviewBody.appendChild(el('div', { className: 'hint', text: data.detail || 'Could not generate an overview.' }));
     } else if (!data.overview || !data.overview.trim()) {
-      // The API call succeeded but came back with nothing usable -- show
-      // that explicitly instead of silently appending an empty, invisible
-      // box that looks indistinguishable from the button doing nothing.
       aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Got an empty response -- try again.' }));
     } else {
       const pre = el('div', { text: data.overview });
@@ -2634,8 +5071,6 @@ aiOverviewBtn.addEventListener('click', async () => {
       pre.style.borderRadius = '8px';
       aiOverviewBody.appendChild(pre);
     }
-    // The Claude call takes 10-15s -- scroll the result into view once it
-    // lands so it isn't missed below the fold after the wait.
     aiOverviewBody.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     aiOverviewBody.appendChild(el('div', { className: 'hint', text: 'Could not generate an overview.' }));
@@ -2671,18 +5106,1295 @@ aiOverviewClearBtn.addEventListener('click', async () => {
   }
 })();
 
-const notifyTestBtn = document.getElementById('notify-test-btn');
-notifyTestBtn.addEventListener('click', async () => {
-  notifyTestBtn.disabled = true;
-  notifyTestBtn.textContent = 'Sending...';
-  const resp = await fetch('/api/notify-test', { method: 'POST' });
-  notifyTestBtn.textContent = resp.ok
-    ? '✅ Sent -- check Telegram'
-    : '❌ Failed -- check CLIPPER_BOT_API is set and message the bot first';
-  setTimeout(() => {
-    notifyTestBtn.textContent = '🔔 Test Telegram notification';
-    notifyTestBtn.disabled = false;
-  }, 3000);
+const competitorSearchInput = document.getElementById('competitor-search-input');
+const competitorSearchBtn = document.getElementById('competitor-search-btn');
+const competitorSearchStatus = document.getElementById('competitor-search-status');
+const competitorSearchResults = document.getElementById('competitor-search-results');
+const competitorSavedList = document.getElementById('competitor-saved-list');
+let savedCompetitors = [];
+
+function buildCompetitorCard(c, opts) {
+  const card = document.createElement('div');
+  card.className = 'competitor-card';
+
+  const img = document.createElement('img');
+  if (c.thumbnail) img.src = c.thumbnail;
+  card.appendChild(img);
+
+  const info = document.createElement('div');
+  info.className = 'info';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = c.channel_title;
+  info.appendChild(title);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = opts.metaText;
+  info.appendChild(meta);
+  card.appendChild(info);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = opts.btnText;
+  if (opts.btnClass) btn.className = opts.btnClass;
+  btn.disabled = !!opts.btnDisabled;
+  btn.addEventListener('click', opts.onClick);
+  card.appendChild(btn);
+
+  return card;
+}
+
+function renderSavedCompetitors() {
+  competitorSavedList.innerHTML = '';
+  if (!savedCompetitors.length) {
+    competitorSavedList.appendChild(el('div', { className: 'hint', text: 'No competitor channels added yet -- search a streamer above.' }));
+    return;
+  }
+  savedCompetitors.forEach(c => {
+    competitorSavedList.appendChild(buildCompetitorCard(
+      { channel_title: c.channel_title, thumbnail: null },
+      {
+        metaText: 'Included in the AI overview comparison',
+        btnText: 'Remove',
+        btnClass: 'remove-btn',
+        onClick: () => {
+          savedCompetitors = savedCompetitors.filter(x => x.channel_id !== c.channel_id);
+          persistCompetitors();
+        },
+      },
+    ));
+  });
+}
+
+async function persistCompetitors() {
+  renderSavedCompetitors();
+  try {
+    await fetch('/api/competitor-channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channels: savedCompetitors.map(c => ({ channel_id: c.channel_id, channel_title: c.channel_title })) }),
+    });
+  } catch (e) {
+    // best-effort -- the list still reflects the change in this tab even if the save failed
+  }
+  loadCompetitorTopVideos();
+}
+
+async function loadCompetitorTopVideos() {
+  const container = document.getElementById('competitor-top-videos');
+  if (!savedCompetitors.length) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = '';
+  container.appendChild(el('div', { className: 'hint', text: 'Loading competitor videos...' }));
+  try {
+    const resp = await fetch('/api/competitor-channels/insights');
+    const data = await resp.json();
+    const channels = data.channels || [];
+    container.innerHTML = '';
+    if (!channels.length) {
+      container.appendChild(el('div', { className: 'hint', text: 'Could not load video data for the saved competitor channel(s).' }));
+      return;
+    }
+    channels.forEach((snap, idx) => {
+      const color = CHART_COMPETITOR_COLORS[idx % CHART_COMPETITOR_COLORS.length];
+      container.appendChild(buildTopVideosBlock(
+        snap.channel_title, color, snap.recent_videos || [],
+      ));
+    });
+  } catch (e) {
+    container.innerHTML = '';
+    container.appendChild(el('div', { className: 'hint', text: 'Could not load competitor videos.' }));
+  }
+}
+
+async function loadSavedCompetitors() {
+  try {
+    const resp = await fetch('/api/competitor-channels');
+    const data = await resp.json();
+    savedCompetitors = data.channels || [];
+  } catch (e) {
+    savedCompetitors = [];
+  }
+  renderSavedCompetitors();
+  loadCompetitorTopVideos();
+}
+loadSavedCompetitors();
+
+async function runCompetitorSearch() {
+  const streamer = competitorSearchInput.value.trim();
+  if (!streamer) return;
+  competitorSearchResults.innerHTML = '';
+  competitorSearchStatus.style.display = 'block';
+  competitorSearchStatus.textContent = 'Searching YouTube...';
+  competitorSearchBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/competitor-search?streamer=${encodeURIComponent(streamer)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      competitorSearchStatus.textContent = data.detail || 'Search failed.';
+      return;
+    }
+    const results = data.channels || [];
+    if (!results.length) {
+      competitorSearchStatus.textContent = `No clipping channels found for "${streamer}".`;
+      return;
+    }
+    competitorSearchStatus.style.display = 'none';
+    results.forEach(c => {
+      const alreadyAdded = savedCompetitors.some(x => x.channel_id === c.channel_id);
+      const subsText = c.subscriber_count != null ? `${c.subscriber_count} subs · ` : '';
+      competitorSearchResults.appendChild(buildCompetitorCard(c, {
+        metaText: `${subsText}top clip: "${c.sample_video_title}" (${c.sample_video_views} views)`,
+        btnText: alreadyAdded ? 'Added' : '+ Add',
+        btnDisabled: alreadyAdded,
+        onClick: (e) => {
+          if (savedCompetitors.some(x => x.channel_id === c.channel_id)) return;
+          savedCompetitors.push({ channel_id: c.channel_id, channel_title: c.channel_title });
+          persistCompetitors();
+          e.currentTarget.textContent = 'Added';
+          e.currentTarget.disabled = true;
+        },
+      }));
+    });
+  } catch (e) {
+    competitorSearchStatus.textContent = 'Search failed -- try again.';
+  } finally {
+    competitorSearchBtn.disabled = false;
+  }
+}
+competitorSearchBtn.addEventListener('click', runCompetitorSearch);
+competitorSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runCompetitorSearch();
+});
+</script>
+</body>
+</html>
+"""
+
+GAME_RECAP_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — game clips recap</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .back-link { display: inline-block; margin-bottom: 4px; color: var(--muted); font-size: 0.85rem; text-decoration: none; }
+  .back-link:hover { color: var(--accent); }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  #status-block { margin-top: 20px; display: none; }
+  #status-msg { font-size: 0.88rem; margin-bottom: 8px; }
+  #progress-track { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: linear-gradient(135deg, var(--accent), var(--accent2)); transition: width 0.3s; }
+  #error-msg { color: var(--danger); font-size: 0.88rem; margin-top: 10px; }
+  #result-block { margin-top: 16px; display: none; }
+  #result-block video { width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
+  #result-title { font-weight: 700; font-size: 0.95rem; margin-top: 10px; }
+  #result-desc-row { margin-top: 10px; }
+  #result-desc-row textarea { width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.85rem; font-family: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; resize: vertical; }
+  #result-desc-row button { margin-top: 6px; padding: 8px 14px; font-size: 0.85rem; }
+  #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #result-actions button, #result-actions a { margin-top: 0; }
+  #result-actions a.dl-link {
+    display: inline-flex; align-items: center; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  #recent-list > div {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  #recent-list .meta { color: var(--muted); font-size: 0.75rem; }
+  #thumbnail-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  #thumbnail-modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; width: 100%; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
+  .modal p { margin: 0 0 8px; font-size: 0.95rem; }
+  .modal .hint { margin-bottom: 16px; }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .modal-actions button { margin-top: 0; width: 100%; }
+  .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topnav">
+    <a href="/">Home</a>
+    <a href="/weekly-recap">Weekly Recap</a>
+    <a href="/game-recap" class="active">Game Recap</a>
+    <a href="/analytics">Analytics</a>
+  </div>
+  <div class="card">
+    <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
+    <div class="subtitle">
+      Pulls the top English-language Twitch clips for ONE GAME this week, across every streamer
+      playing it -- not just your tracked roster -- AI-screens them the same way the regular
+      weekly recap does, then compiles up to 20 into one landscape long-form video: the first
+      ~2 minutes are the most-viewed picks (the hook), the rest play in a shuffled mix. Each clip
+      gets an intro card, a "#N StreamerName: Title" badge, and captions. Never uploads on its
+      own -- review, then hit Upload here like any other clip.
+    </div>
+
+    <label for="game-input">Game name</label>
+    <input id="game-input" type="text" placeholder="e.g. Watch Dogs: Legion" autocomplete="off">
+    <div class="hint">Must match Twitch's own game name (as it appears in a Twitch category/directory search).</div>
+
+    <label for="week-input">Specific week ending (optional)</label>
+    <input id="week-input" type="date">
+    <div class="hint">Leave blank for the trailing 7 days from now.</div>
+
+    <button id="generate-btn" type="button">Generate recap</button>
+    <div id="form-error" class="hint" style="color:var(--danger)"></div>
+
+    <div id="status-block">
+      <div id="status-msg"></div>
+      <div id="progress-track"><div id="progress-bar"></div></div>
+      <button id="cancel-btn" type="button" class="secondary">Cancel</button>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="result-block">
+      <div id="result-title"></div>
+      <video id="result-video" controls></video>
+      <div id="result-actions">
+        <a id="result-download" class="dl-link" download>Download</a>
+        <button id="mix-order-btn" type="button" class="secondary">🔀 Mix order</button>
+        <button id="thumbnail-open-btn" type="button" class="secondary">🖼 Thumbnail</button>
+        <select id="upload-privacy">
+          <option value="unlisted" selected>Unlisted</option>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+        <button id="upload-btn" type="button">📤 Upload to YouTube</button>
+        <button id="delete-btn" type="button" class="secondary">🗑 Delete from server</button>
+      </div>
+      <div id="mix-order-hint" class="hint">Reorders the already-rendered clips (most-viewed fill the first ~2min hook, the rest shuffled) without re-downloading or re-checking anything -- only works on recaps generated after this feature shipped.</div>
+      <div id="upload-status" class="hint"></div>
+      <div id="result-desc-row">
+        <label style="margin-top:0">Description (each clip's moment &amp; title, chaptered)</label>
+        <textarea id="result-desc" rows="8" readonly></textarea>
+        <button id="copy-desc-btn" type="button" class="secondary">Copy description</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label style="margin-top:0">Recent game recaps</label>
+      <div id="recent-list"></div>
+      <div id="recent-empty" class="hint">None yet.</div>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the recap -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const gameInput = document.getElementById('game-input');
+const weekInput = document.getElementById('week-input');
+const generateBtn = document.getElementById('generate-btn');
+const formError = document.getElementById('form-error');
+const statusBlock = document.getElementById('status-block');
+const statusMsg = document.getElementById('status-msg');
+const progressBar = document.getElementById('progress-bar');
+const cancelBtn = document.getElementById('cancel-btn');
+const errorMsg = document.getElementById('error-msg');
+const resultBlock = document.getElementById('result-block');
+const resultTitle = document.getElementById('result-title');
+const resultVideo = document.getElementById('result-video');
+const resultDownload = document.getElementById('result-download');
+const resultDesc = document.getElementById('result-desc');
+const copyDescBtn = document.getElementById('copy-desc-btn');
+const mixOrderBtn = document.getElementById('mix-order-btn');
+const uploadPrivacy = document.getElementById('upload-privacy');
+const uploadBtn = document.getElementById('upload-btn');
+const deleteBtn = document.getElementById('delete-btn');
+const uploadStatus = document.getElementById('upload-status');
+const recentList = document.getElementById('recent-list');
+const recentEmpty = document.getElementById('recent-empty');
+const thumbnailOpenBtn = document.getElementById('thumbnail-open-btn');
+
+let currentJobId = null;
+let currentClipFilename = null;
+let pollTimer = null;
+
+function resetView() {
+  statusBlock.style.display = 'none';
+  errorMsg.textContent = '';
+  resultBlock.style.display = 'none';
+  uploadStatus.textContent = '';
+  resultDesc.value = '';
+  currentClipFilename = null;
+}
+
+async function poll(jobId) {
+  let job;
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}`);
+    if (!resp.ok) return;
+    job = await resp.json();
+  } catch (e) {
+    return;
+  }
+  currentJobId = jobId;
+  statusBlock.style.display = 'block';
+  statusMsg.textContent = job.message || job.state;
+  progressBar.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+
+  if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    generateBtn.disabled = false;
+    cancelBtn.disabled = true;
+    mixOrderBtn.disabled = false;
+
+    if (job.error) {
+      errorMsg.textContent = job.error;
+    }
+    const clip = (job.clips || [])[0];
+    if (job.state === 'done' && clip) {
+      resultBlock.style.display = 'block';
+      resultTitle.textContent = clip.upload_title || clip.title || '';
+      resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+      resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
+      resultDesc.value = clip.description || '';
+      currentClipFilename = clip.file;
+    }
+    loadRecent();
+  }
+}
+
+function attachToJob(jobId) {
+  resetView();
+  if (pollTimer) clearInterval(pollTimer);
+  poll(jobId);
+  pollTimer = setInterval(() => poll(jobId), 2000);
+  generateBtn.disabled = true;
+  cancelBtn.disabled = false;
+  mixOrderBtn.disabled = true;
+}
+
+copyDescBtn.addEventListener('click', () => {
+  if (!resultDesc.value) return;
+  navigator.clipboard.writeText(resultDesc.value).then(() => {
+    copyDescBtn.textContent = 'Copied!';
+    setTimeout(() => { copyDescBtn.textContent = 'Copy description'; }, 1500);
+  });
+});
+
+mixOrderBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  mixOrderBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/game-recap/remix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorMsg.textContent = data.detail || 'Could not mix the clip order.';
+      mixOrderBtn.disabled = false;
+      return;
+    }
+    attachToJob(currentJobId);
+  } catch (e) {
+    errorMsg.textContent = 'Could not reach the server.';
+    mixOrderBtn.disabled = false;
+  }
+});
+
+generateBtn.addEventListener('click', async () => {
+  const game = gameInput.value.trim();
+  formError.textContent = '';
+  if (!game) {
+    formError.textContent = 'Enter a game name first.';
+    return;
+  }
+  generateBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/game-recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game, week_ending: weekInput.value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      formError.textContent = data.detail || 'Could not queue the recap.';
+      generateBtn.disabled = false;
+      return;
+    }
+    attachToJob(data.job_id);
+  } catch (e) {
+    formError.textContent = 'Could not reach the server.';
+    generateBtn.disabled = false;
+  }
+});
+
+cancelBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  cancelBtn.disabled = true;
+  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+  const job = await resp0.json().catch(() => ({}));
+  const clip = (job.clips || [])[0];
+  if (!clip) return;
+  uploadBtn.disabled = true;
+  uploadStatus.textContent = 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: uploadPrivacy.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      uploadStatus.textContent = data.detail || 'Upload failed.';
+    } else {
+      uploadStatus.textContent = `Uploaded: ${data.url}`;
+    }
+  } catch (e) {
+    uploadStatus.textContent = 'Upload failed -- could not reach the server.';
+  } finally {
+    uploadBtn.disabled = false;
+  }
+});
+
+deleteBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if (!confirm("Delete this recap from the server? This can't be undone.")) return;
+  deleteBtn.disabled = true;
+  try {
+    const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+    const job = await resp0.json().catch(() => ({}));
+    const clip = (job.clips || [])[0];
+    if (clip) {
+      await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}`, { method: 'DELETE' });
+    }
+    resetView();
+    currentJobId = null;
+    loadRecent();
+  } finally {
+    deleteBtn.disabled = false;
+  }
+});
+
+async function loadRecent() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    const items = jobs.filter(j => j.pipeline === 'game_recap');
+    recentList.innerHTML = '';
+    recentEmpty.style.display = items.length ? 'none' : 'block';
+    items.forEach(j => {
+      const row = document.createElement('div');
+      const left = document.createElement('div');
+      left.textContent = j.source_title || j.id;
+      const right = document.createElement('div');
+      right.className = 'meta';
+      right.textContent = j.state === 'error' ? '⚠ failed'
+        : ['done', 'cancelled'].includes(j.state) ? '✅ done' : '⏳ ' + j.state;
+      row.appendChild(left);
+      row.appendChild(right);
+      row.addEventListener('click', () => attachToJob(j.id));
+      recentList.appendChild(row);
+    });
+  } catch (e) {
+    // leave the list as-is on a failed background refresh
+  }
+}
+loadRecent();
+setInterval(loadRecent, 8000);
+
+// --- thumbnail modal: generate a handful of candidate downloadable
+// thumbnails for the recap's own single "clip" (the whole concatenated
+// video), same endpoints and flow as a normal clip's Thumbnail button.
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
+
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+thumbnailOpenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename) return;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+});
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
+});
+</script>
+</body>
+</html>
+"""
+
+
+WEEKLY_RECAP_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — weekly recap</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  #status-block { margin-top: 20px; display: none; }
+  #status-msg { font-size: 0.88rem; margin-bottom: 8px; }
+  #progress-track { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: linear-gradient(135deg, var(--accent), var(--accent2)); transition: width 0.3s; }
+  #error-msg { color: var(--danger); font-size: 0.88rem; margin-top: 10px; }
+  #result-block { margin-top: 16px; display: none; }
+  #result-block video { width: 100%; border-radius: 10px; margin-top: 8px; background: #000; }
+  #result-title { font-weight: 700; font-size: 0.95rem; margin-top: 10px; }
+  #result-desc-row { margin-top: 10px; }
+  #result-desc-row textarea { width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.85rem; font-family: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; resize: vertical; }
+  #result-desc-row button { margin-top: 6px; padding: 8px 14px; font-size: 0.85rem; }
+  #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #result-actions button, #result-actions a { margin-top: 0; }
+  #result-actions a.dl-link {
+    display: inline-flex; align-items: center; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  #recent-list > div {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  #recent-list .meta { color: var(--muted); font-size: 0.75rem; }
+  #thumbnail-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  #thumbnail-modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; max-width: 380px; width: 100%; box-shadow: var(--shadow); max-height: 92vh; overflow-y: auto; }
+  .modal p { margin: 0 0 8px; font-size: 0.95rem; }
+  .modal .hint { margin-bottom: 16px; }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .modal-actions button { margin-top: 0; width: 100%; }
+  .modal-actions button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
+  #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
+  #thumbnail-gallery img.selected { border-color: var(--accent); }
+  #thumbnail-edit-panel img { width: 100%; max-width: 280px; border-radius: 8px; display: block; margin: 0 auto 10px; background: var(--track); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topnav">
+    <a href="/">Home</a>
+    <a href="/weekly-recap" class="active">Weekly Recap</a>
+    <a href="/game-recap">Game Recap</a>
+    <a href="/analytics">Analytics</a>
+  </div>
+  <div class="card">
+    <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
+    <div class="subtitle">
+      Counts down that week's best Twitch clips across all tracked streamers (up to 10), ranked by
+      view count but AI-screened first so a highly-viewed clip that's mostly rambling gets skipped in
+      favor of the next one -- max 3 picks per streamer so no single streamer crowds out the rest.
+      Opens with an intro card, adds captions and a "#N streamer: title" badge to each clip, then
+      concatenates them into one landscape long-form draft (a normal video, not a Short -- no 60s cap,
+      no #Shorts tag), weakest pick first, biggest hit last. A fresh one for the current week also
+      builds automatically every Monday. Never uploads on its own -- review, then hit Upload here like
+      any other clip.
+    </div>
+
+    <label for="week-input">Specific week ending (optional)</label>
+    <input id="week-input" type="date">
+    <div class="hint">Leave blank for the trailing 7 days from now.</div>
+
+    <button id="generate-btn" type="button">Generate recap</button>
+    <div id="form-error" class="hint" style="color:var(--danger)"></div>
+
+    <div id="status-block">
+      <div id="status-msg"></div>
+      <div id="progress-track"><div id="progress-bar"></div></div>
+      <button id="cancel-btn" type="button" class="secondary">Cancel</button>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="result-block">
+      <div id="result-title"></div>
+      <video id="result-video" controls></video>
+      <div id="result-actions">
+        <a id="result-download" class="dl-link" download>Download</a>
+        <button id="thumbnail-open-btn" type="button" class="secondary">🖼 Thumbnail</button>
+        <select id="upload-privacy">
+          <option value="unlisted" selected>Unlisted</option>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+        <button id="upload-btn" type="button">📤 Upload to YouTube</button>
+        <button id="delete-btn" type="button" class="secondary">🗑 Delete from server</button>
+      </div>
+      <div id="upload-status" class="hint"></div>
+      <div id="result-desc-row">
+        <label style="margin-top:0">Description (each clip's moment &amp; title, chaptered)</label>
+        <textarea id="result-desc" rows="8" readonly></textarea>
+        <button id="copy-desc-btn" type="button" class="secondary">Copy description</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label style="margin-top:0">Recent weekly recaps</label>
+      <div id="recent-list"></div>
+      <div id="recent-empty" class="hint">None yet.</div>
+    </div>
+  </div>
+</div>
+
+<div id="thumbnail-modal-overlay">
+  <div class="modal">
+    <p>Choose a thumbnail</p>
+    <p class="hint">A real frame from the recap -- not AI-generated -- with one bold line of
+      text burned over it. Pick one below, then edit the wording if you want.</p>
+    <div id="thumbnail-gallery-panel">
+      <div id="thumbnail-gallery"></div>
+      <p class="hint" id="thumbnail-status-hint"></p>
+    </div>
+    <div id="thumbnail-edit-panel" style="display:none">
+      <img id="thumbnail-edit-preview" alt="Selected thumbnail">
+      <label>Text</label>
+      <input id="thumbnail-edit-text" type="text" maxlength="80">
+      <div class="modal-actions">
+        <button id="thumbnail-regen-btn" type="button">Regenerate with this text</button>
+        <button id="thumbnail-back-btn" type="button" class="ghost">&larr; Back to choices</button>
+      </div>
+      <a id="thumbnail-download-link" href="#" download style="display:inline-block;margin-top:12px">Download thumbnail</a>
+    </div>
+    <div class="modal-actions">
+      <button id="thumbnail-close-btn" type="button" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const weekInput = document.getElementById('week-input');
+const generateBtn = document.getElementById('generate-btn');
+const formError = document.getElementById('form-error');
+const statusBlock = document.getElementById('status-block');
+const statusMsg = document.getElementById('status-msg');
+const progressBar = document.getElementById('progress-bar');
+const cancelBtn = document.getElementById('cancel-btn');
+const errorMsg = document.getElementById('error-msg');
+const resultBlock = document.getElementById('result-block');
+const resultTitle = document.getElementById('result-title');
+const resultVideo = document.getElementById('result-video');
+const resultDownload = document.getElementById('result-download');
+const resultDesc = document.getElementById('result-desc');
+const copyDescBtn = document.getElementById('copy-desc-btn');
+const uploadPrivacy = document.getElementById('upload-privacy');
+const uploadBtn = document.getElementById('upload-btn');
+const deleteBtn = document.getElementById('delete-btn');
+const uploadStatus = document.getElementById('upload-status');
+const recentList = document.getElementById('recent-list');
+const recentEmpty = document.getElementById('recent-empty');
+const thumbnailOpenBtn = document.getElementById('thumbnail-open-btn');
+
+let currentJobId = null;
+let currentClipFilename = null;
+let pollTimer = null;
+
+function resetView() {
+  statusBlock.style.display = 'none';
+  errorMsg.textContent = '';
+  resultBlock.style.display = 'none';
+  uploadStatus.textContent = '';
+  resultDesc.value = '';
+  currentClipFilename = null;
+}
+
+async function poll(jobId) {
+  let job;
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}`);
+    if (!resp.ok) return;
+    job = await resp.json();
+  } catch (e) {
+    return;
+  }
+  currentJobId = jobId;
+  statusBlock.style.display = 'block';
+  statusMsg.textContent = job.message || job.state;
+  progressBar.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+
+  if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    generateBtn.disabled = false;
+    cancelBtn.disabled = true;
+
+    if (job.error) {
+      errorMsg.textContent = job.error;
+    }
+    const clip = (job.clips || [])[0];
+    if (job.state === 'done' && clip) {
+      resultBlock.style.display = 'block';
+      resultTitle.textContent = clip.upload_title || clip.title || '';
+      resultVideo.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+      resultDownload.href = `/api/jobs/${jobId}/clips/${clip.file}?download=1`;
+      resultDesc.value = clip.description || '';
+      currentClipFilename = clip.file;
+    }
+    loadRecent();
+  }
+}
+
+function attachToJob(jobId) {
+  resetView();
+  if (pollTimer) clearInterval(pollTimer);
+  poll(jobId);
+  pollTimer = setInterval(() => poll(jobId), 2000);
+  generateBtn.disabled = true;
+  cancelBtn.disabled = false;
+}
+
+copyDescBtn.addEventListener('click', () => {
+  if (!resultDesc.value) return;
+  navigator.clipboard.writeText(resultDesc.value).then(() => {
+    copyDescBtn.textContent = 'Copied!';
+    setTimeout(() => { copyDescBtn.textContent = 'Copy description'; }, 1500);
+  });
+});
+
+generateBtn.addEventListener('click', async () => {
+  formError.textContent = '';
+  generateBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/weekly-recap/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ week_ending: weekInput.value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      formError.textContent = data.detail || 'Could not queue the recap.';
+      generateBtn.disabled = false;
+      return;
+    }
+    attachToJob(data.job_id);
+  } catch (e) {
+    formError.textContent = 'Could not reach the server.';
+    generateBtn.disabled = false;
+  }
+});
+
+cancelBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  cancelBtn.disabled = true;
+  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+});
+
+uploadBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+  const job = await resp0.json().catch(() => ({}));
+  const clip = (job.clips || [])[0];
+  if (!clip) return;
+  uploadBtn.disabled = true;
+  uploadStatus.textContent = 'Uploading...';
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}/upload-youtube`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy_status: uploadPrivacy.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      uploadStatus.textContent = data.detail || 'Upload failed.';
+    } else {
+      uploadStatus.textContent = `Uploaded: ${data.url}`;
+    }
+  } catch (e) {
+    uploadStatus.textContent = 'Upload failed -- could not reach the server.';
+  } finally {
+    uploadBtn.disabled = false;
+  }
+});
+
+deleteBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if (!confirm("Delete this recap from the server? This can't be undone.")) return;
+  deleteBtn.disabled = true;
+  try {
+    const resp0 = await fetch(`/api/jobs/${currentJobId}`);
+    const job = await resp0.json().catch(() => ({}));
+    const clip = (job.clips || [])[0];
+    if (clip) {
+      await fetch(`/api/jobs/${currentJobId}/clips/${clip.file}`, { method: 'DELETE' });
+    }
+    resetView();
+    currentJobId = null;
+    loadRecent();
+  } finally {
+    deleteBtn.disabled = false;
+  }
+});
+
+async function loadRecent() {
+  try {
+    const resp = await fetch('/api/jobs');
+    if (!resp.ok) return;
+    const { jobs } = await resp.json();
+    const items = jobs.filter(j => j.pipeline === 'weekly_recap');
+    recentList.innerHTML = '';
+    recentEmpty.style.display = items.length ? 'none' : 'block';
+    items.forEach(j => {
+      const row = document.createElement('div');
+      const left = document.createElement('div');
+      left.textContent = j.source_title || j.id;
+      const right = document.createElement('div');
+      right.className = 'meta';
+      right.textContent = j.state === 'error' ? '⚠ failed'
+        : ['done', 'cancelled'].includes(j.state) ? '✅ done' : '⏳ ' + j.state;
+      row.appendChild(left);
+      row.appendChild(right);
+      row.addEventListener('click', () => attachToJob(j.id));
+      recentList.appendChild(row);
+    });
+  } catch (e) {
+    // leave the list as-is on a failed background refresh
+  }
+}
+loadRecent();
+setInterval(loadRecent, 8000);
+
+// --- thumbnail modal: generate a handful of candidate downloadable
+// thumbnails for the recap's own single "clip" (the whole concatenated
+// video), same endpoints and flow as a normal clip's Thumbnail button.
+const thumbnailModal = document.getElementById('thumbnail-modal-overlay');
+const thumbnailGalleryPanel = document.getElementById('thumbnail-gallery-panel');
+const thumbnailGallery = document.getElementById('thumbnail-gallery');
+const thumbnailStatusHint = document.getElementById('thumbnail-status-hint');
+const thumbnailEditPanel = document.getElementById('thumbnail-edit-panel');
+const thumbnailEditPreview = document.getElementById('thumbnail-edit-preview');
+const thumbnailEditText = document.getElementById('thumbnail-edit-text');
+const thumbnailRegenBtn = document.getElementById('thumbnail-regen-btn');
+const thumbnailDownloadLink = document.getElementById('thumbnail-download-link');
+let thumbnailText = '';
+let thumbnailSelectedIndex = null;
+let thumbnailFrameTimes = {};
+
+function closeThumbnailModal() {
+  thumbnailModal.classList.remove('open');
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+}
+
+function showThumbnailChoices() {
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailSelectedIndex = null;
+}
+
+function selectThumbnail(index) {
+  thumbnailSelectedIndex = index;
+  thumbnailGallery.querySelectorAll('img').forEach(img => {
+    img.classList.toggle('selected', Number(img.dataset.index) === index);
+  });
+  thumbnailEditText.value = thumbnailText;
+  const url = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?t=${Date.now()}`;
+  thumbnailEditPreview.src = url;
+  thumbnailDownloadLink.href = `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${index}?download=1&t=${Date.now()}`;
+  thumbnailGalleryPanel.style.display = 'none';
+  thumbnailEditPanel.style.display = '';
+}
+
+thumbnailOpenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename) return;
+  thumbnailSelectedIndex = null;
+  thumbnailFrameTimes = {};
+  thumbnailGallery.innerHTML = '';
+  thumbnailEditPanel.style.display = 'none';
+  thumbnailGalleryPanel.style.display = '';
+  thumbnailStatusHint.textContent = 'Generating thumbnail options...';
+  thumbnailModal.classList.add('open');
+
+  try {
+    const resp = await fetch(`/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      thumbnailStatusHint.textContent = data.detail || 'Could not generate thumbnails.';
+      return;
+    }
+    thumbnailText = data.text || '';
+    thumbnailStatusHint.textContent = 'Click one to pick it, then edit the text if you want.';
+    thumbnailGallery.innerHTML = '';
+    (data.thumbnails || []).forEach(t => {
+      thumbnailFrameTimes[t.index] = t.frame_time;
+      const img = document.createElement('img');
+      img.src = `${t.url}?t=${Date.now()}`;
+      img.dataset.index = t.index;
+      img.alt = `Thumbnail option ${t.index}`;
+      img.addEventListener('click', () => selectThumbnail(t.index));
+      thumbnailGallery.appendChild(img);
+    });
+    if (!(data.thumbnails || []).length) {
+      thumbnailStatusHint.textContent = 'No thumbnail candidates could be generated for this clip.';
+    }
+  } catch (e) {
+    thumbnailStatusHint.textContent = 'Could not generate thumbnails.';
+  }
+});
+
+document.getElementById('thumbnail-back-btn').addEventListener('click', showThumbnailChoices);
+document.getElementById('thumbnail-close-btn').addEventListener('click', closeThumbnailModal);
+
+thumbnailRegenBtn.addEventListener('click', async () => {
+  if (!currentJobId || !currentClipFilename || thumbnailSelectedIndex === null) return;
+  const text = thumbnailEditText.value.trim();
+  if (!text) {
+    alert('Text cannot be empty.');
+    return;
+  }
+  const frameTime = thumbnailFrameTimes[thumbnailSelectedIndex];
+  thumbnailRegenBtn.disabled = true;
+  thumbnailRegenBtn.textContent = 'Regenerating...';
+  try {
+    const resp = await fetch(
+      `/api/jobs/${currentJobId}/clips/${currentClipFilename}/thumbnails/${thumbnailSelectedIndex}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, frame_time: frameTime }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Could not regenerate thumbnail.');
+      return;
+    }
+    thumbnailText = data.text;
+    const bust = `?t=${Date.now()}`;
+    thumbnailEditPreview.src = `${data.url}${bust}`;
+    thumbnailDownloadLink.href = `${data.url}?download=1&t=${Date.now()}`;
+    const galleryImg = thumbnailGallery.querySelector(`img[data-index="${thumbnailSelectedIndex}"]`);
+    if (galleryImg) galleryImg.src = `${data.url}${bust}`;
+  } catch (e) {
+    alert('Could not regenerate thumbnail.');
+  } finally {
+    thumbnailRegenBtn.disabled = false;
+    thumbnailRegenBtn.textContent = 'Regenerate with this text';
+  }
 });
 </script>
 </body>
