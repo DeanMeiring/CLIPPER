@@ -163,3 +163,29 @@ def trim_clip(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed trimming {source_path.name}:\n{result.stderr[-2000:]}")
     return output_path
+
+
+def overlay_hook_line(source_path: Path, ass_path: Path, output_path: Path) -> Path:
+    """Burn a flash-hook .ass (captions.hook_line_ass) onto an ALREADY-
+    RENDERED clip. New file out, audio stream copied untouched -- like
+    trim_clip, this only composites a text layer onto the existing frames,
+    it never re-times, re-cuts, or re-joins anything, so it carries none of
+    the audio/video drift risk a concatenation-based intro card would."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ass = _escape_for_filter(ass_path)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(source_path),
+        "-vf", f"ass='{ass}'",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s adding the hook line to {source_path.name}") from e
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed adding the hook line to {source_path.name}:\n{result.stderr[-2000:]}")
+    return output_path

@@ -30,6 +30,14 @@ _BASE_BADGE_FONTSIZE = 62
 _BASE_BADGE_OUTLINE = 22  # box padding, via BorderStyle 3 below
 _BASE_BADGE_MARGIN = 40
 
+# The flash-hook line (see hook_line_ass, clipper/hook_line.py) is shown
+# dead-center and only for a fraction of a second, so it needs to read
+# instantly -- bigger than the karaoke captions above, which have a full
+# couple of seconds on screen per group to be read.
+_BASE_HOOK_FONTSIZE = 92
+_BASE_HOOK_OUTLINE = 10
+_BASE_HOOK_MARGIN_LR = 90
+
 
 def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     width, height = play_res
@@ -41,6 +49,9 @@ def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     badge_fontsize = max(1, round(_BASE_BADGE_FONTSIZE * scale))
     badge_outline = max(1, round(_BASE_BADGE_OUTLINE * scale))
     badge_margin = max(0, round(_BASE_BADGE_MARGIN * scale))
+    hook_fontsize = max(1, round(_BASE_HOOK_FONTSIZE * scale))
+    hook_outline = max(1, round(_BASE_HOOK_OUTLINE * scale))
+    hook_margin_lr = max(0, round(_BASE_HOOK_MARGIN_LR * scale))
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -52,6 +63,7 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
 Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
+Style: HookLine,Arial Black,{hook_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{hook_outline},4,5,{hook_margin_lr},{hook_margin_lr},0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -93,6 +105,24 @@ def rank_badge_dialogue(text: str, duration: float) -> str:
     captions (see build_ass) rather than written to a separate file, so
     both burn in during the same ffmpeg pass."""
     return f"Dialogue: 0,{_fmt_ts(0)},{_fmt_ts(duration)},RankBadge,,0,0,0,,{_escape_ass_text(text)}"
+
+
+def hook_line_ass(
+    text: str, flash_seconds: float, play_res: Tuple[int, int] = _BASE_PLAY_RES,
+) -> str:
+    """A standalone .ass file (header + one Dialogue) that flashes `text`
+    dead-center on screen for the clip's first `flash_seconds`, then
+    disappears -- the "spoil the payoff up front" hook line clip channels
+    use (see clipper/hook_line.py). Written as its own small file and
+    burned onto an ALREADY-RENDERED clip in a second ffmpeg pass, rather
+    than appended into that clip's original build_ass output, so the hook
+    line can be generated, previewed, and re-rendered on its own without
+    re-running the original render."""
+    lines = [_ass_header(play_res)]
+    lines.append(
+        f"Dialogue: 0,{_fmt_ts(0)},{_fmt_ts(flash_seconds)},HookLine,,0,0,0,,{_escape_ass_text(text.upper())}"
+    )
+    return "\n".join(lines)
 
 
 def _group_words(words: List[Word], max_words: int = 4, max_span: float = 2.2) -> List[List[Word]]:

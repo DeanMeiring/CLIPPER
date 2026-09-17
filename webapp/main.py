@@ -24,8 +24,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass, rank_badge_dialogue
+from clipper.captions import build_ass, rank_badge_dialogue, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video, usable_render_duration
+from clipper import hook_line
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
@@ -36,7 +37,7 @@ from clipper.reframe import (
     compute_layout,
     layout_from_manual_boxes,
 )
-from clipper.render import render_clip, trim_clip
+from clipper.render import render_clip, trim_clip, overlay_hook_line
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
@@ -518,6 +519,8 @@ def _remove_clip_files(out_dir: Path, filename: str) -> None:
         f"{stem}_rejected_facecam.mp4",
         f"{stem}_rejected_facecam.jpg",
         f"{stem}_source_frame.jpg",
+        f"hookline_{filename}",
+        f"_hookline_{stem}.ass",
     ):
         (out_dir / name).unlink(missing_ok=True)
 
@@ -739,6 +742,26 @@ def _load_transcript_for_regenerate(raw_dir: Path) -> Optional[dict]:
     except Exception:
         return None
     return {"video_path": video_path, "duration": duration, "words": words}
+
+
+def _clip_transcript_words(job_id: str, clip: dict) -> List[Word]:
+    """The word-level transcript that falls inside one specific finished
+    clip's start/end window -- recovered from the same _source/ cache a
+    normal render already leaves behind (_cache_transcript for the short
+    pipeline, _cache_candidates for long-VOD), reusing the exact loaders
+    "generate more clips" uses. Powers the Hook Line page without
+    re-downloading or re-transcribing anything. Returns [] if the source
+    was deleted or never cached (e.g. a job from before this existed)."""
+    raw_dir = BASE_DIR / job_id / "_source"
+    window_index = clip.get("window_index")
+    if window_index is not None:
+        candidates = _load_candidates_for_regenerate(raw_dir)
+        cand = next((c for c in (candidates or []) if c["index"] == window_index), None)
+        words = cand["words"] if cand else []
+    else:
+        data = _load_transcript_for_regenerate(raw_dir)
+        words = data["words"] if data else []
+    return [w for w in words if w.start >= clip["start"] and w.end <= clip["end"]]
 
 
 def _run_regenerate(job_id: str, req: dict) -> None:
@@ -1366,6 +1389,99 @@ def _get_job_clip(job_id: str, filename: str) -> dict:
         if clip is None:
             raise HTTPException(404, "clip not found")
         return clip
+
+
+@protected.get("/api/hook-line/clips")
+def list_hook_line_clips() -> dict:
+    """Every clip from a finished job that still has its source transcript
+    cached on disk -- the pick list for the Hook Line page. Deliberately
+    separate from the main /api/jobs listing: this is a picker over
+    ALREADY-RENDERED clips, not a job-status view. Newest jobs first."""
+    with jobs_lock:
+        snapshot = [dict(j) for j in jobs.values() if j.get("state") == "done"]
+    snapshot.sort(key=lambda j: j.get("created_at") or 0, reverse=True)
+    items = []
+    for job in snapshot:
+        if not (BASE_DIR / job["id"] / "_source").is_dir():
+            continue
+        for clip in job.get("clips") or []:
+            items.append({
+                "job_id": job["id"],
+                "source_title": job.get("source_title"),
+                "file": clip.get("file"),
+                "title": clip.get("title"),
+                "hook_caption": clip.get("hook_caption"),
+                "duration": clip.get("duration"),
+            })
+    return {"clips": items}
+
+
+class HookLineGenerateRequest(BaseModel):
+    job_id: str
+    filename: str
+
+
+@protected.post("/api/hook-line/generate")
+def generate_hook_line_text(req: HookLineGenerateRequest) -> dict:
+    """Ask Claude to write a spoiler-style flash-hook line from this clip's
+    own (already-cached) transcript -- text only, doesn't render anything."""
+    clip = _get_job_clip(req.job_id, req.filename)
+    words = _clip_transcript_words(req.job_id, clip)
+    if not words:
+        raise HTTPException(409, "No transcript available for this clip -- the source may have been deleted.")
+    try:
+        text = hook_line.generate_hook_line(words, clip.get("title") or "")
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e
+    return {"hook_text": text}
+
+
+class HookLineRenderRequest(BaseModel):
+    job_id: str
+    filename: str
+    hook_text: str
+
+
+@protected.post("/api/hook-line/render")
+def render_hook_line(req: HookLineRenderRequest) -> dict:
+    """Burn the (possibly user-edited) hook_text onto the already-rendered
+    clip as a second ffmpeg pass -- see clipper.render.overlay_hook_line.
+    Never touches the original clip file; writes a new hookline_{file}
+    alongside it, served by the existing clip-download route."""
+    clip = _get_job_clip(req.job_id, req.filename)
+    hook_text = req.hook_text.strip()
+    if not hook_text:
+        raise HTTPException(400, "hook_text is required")
+
+    out_dir = BASE_DIR / req.job_id
+    source_path = out_dir / clip["file"]
+    if not source_path.is_file():
+        raise HTTPException(404, "source clip not found on disk")
+
+    out_name = f"hookline_{clip['file']}"
+    out_path = out_dir / out_name
+    ass_path = out_dir / f"_hookline_{Path(clip['file']).stem}.ass"
+    dims = hook_line.clip_dimensions(source_path)
+    ass_path.write_text(hook_line_ass(hook_text, hook_line.FLASH_SECONDS, play_res=dims), encoding="utf-8")
+
+    tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
+    try:
+        overlay_hook_line(source_path, ass_path, tmp_path)
+        os.replace(tmp_path, out_path)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e)) from e
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    with jobs_lock:
+        job = jobs.get(req.job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        renders = [r for r in (job.get("hook_line_renders") or []) if r.get("source_file") != clip["file"]]
+        renders.append({"file": out_name, "source_file": clip["file"], "hook_text": hook_text, "created_at": time.time()})
+        job["hook_line_renders"] = renders
+    _persist(req.job_id)
+    return {"ok": True, "file": out_name}
 
 
 @protected.post("/api/jobs/{job_id}/clips/{filename}/thumbnails")
@@ -2505,6 +2621,9 @@ def delete_clip(job_id: str, filename: str) -> dict:
         else:
             job["clips"] = remaining
             job_deleted = False
+            job["hook_line_renders"] = [
+                r for r in (job.get("hook_line_renders") or []) if r.get("source_file") != filename
+            ]
             if deleted.get("window_index") is not None:
                 used_window_indices = set(job.get("used_window_indices") or [])
                 used_window_indices.discard(deleted["window_index"])
@@ -3049,6 +3168,11 @@ def weekly_recap_page() -> str:
     return WEEKLY_RECAP_HTML
 
 
+@protected.get("/hook-line", response_class=HTMLResponse)
+def hook_line_page() -> str:
+    return HOOK_LINE_HTML
+
+
 app.include_router(protected)
 
 
@@ -3266,6 +3390,7 @@ INDEX_HTML = """<!doctype html>
   <a href="/weekly-recap">Weekly Recap</a>
   <a href="/game-recap">Game Recap</a>
   <a href="/analytics">Analytics</a>
+  <a href="/hook-line">Hook Line</a>
 </div>
 <div class="card">
 
@@ -4820,6 +4945,7 @@ ANALYTICS_HTML = """<!doctype html>
   <a href="/weekly-recap">Weekly Recap</a>
   <a href="/game-recap">Game Recap</a>
   <a href="/analytics" class="active">Analytics</a>
+  <a href="/hook-line">Hook Line</a>
 </div>
 <div class="card">
 
@@ -5419,6 +5545,7 @@ GAME_RECAP_HTML = """<!doctype html>
     <a href="/weekly-recap">Weekly Recap</a>
     <a href="/game-recap" class="active">Game Recap</a>
     <a href="/analytics">Analytics</a>
+    <a href="/hook-line">Hook Line</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
@@ -6000,6 +6127,7 @@ WEEKLY_RECAP_HTML = """<!doctype html>
     <a href="/weekly-recap" class="active">Weekly Recap</a>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
+    <a href="/hook-line">Hook Line</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
@@ -6396,6 +6524,293 @@ thumbnailRegenBtn.addEventListener('click', async () => {
     thumbnailRegenBtn.textContent = 'Regenerate with this text';
   }
 });
+</script>
+</body>
+</html>
+"""
+
+
+HOOK_LINE_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — hook line</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .topnav {
+    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select, textarea {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text); font-family: inherit;
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  #preview-video, #result-video { width: 100%; max-width: 320px; border-radius: 10px; margin-top: 10px; background: #000; display: block; }
+  #error-msg { color: var(--danger); font-size: 0.88rem; margin-top: 10px; }
+  #result-block { margin-top: 16px; display: none; }
+  #result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #result-actions a, #result-actions button { margin-top: 0; }
+  #result-actions a.dl-link {
+    display: inline-flex; align-items: center; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  #empty-msg { color: var(--muted); font-size: 0.9rem; margin-top: 16px; display: none; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topnav">
+    <a href="/">Home</a>
+    <a href="/weekly-recap">Weekly Recap</a>
+    <a href="/game-recap">Game Recap</a>
+    <a href="/analytics">Analytics</a>
+    <a href="/hook-line" class="active">Hook Line</a>
+  </div>
+  <div class="card">
+    <div class="brand"><span class="logo">⚡</span><h1>Hook line</h1></div>
+    <div class="subtitle">
+      Pick a clip you've already rendered on the normal Clipping tab, then flash a spoiler line
+      ("MARLON ALMOST KNOCKS OUT JASON") dead-center for under a second right as it starts, before
+      the moment actually happens -- the curiosity-gap trick clip channels use to hook a scroll.
+      This is a separate pass over the finished clip: nothing here touches the original render, its
+      audio, or its captions.
+    </div>
+
+    <label for="clip-select">Clip</label>
+    <select id="clip-select"><option value="">Loading clips...</option></select>
+    <div class="hint">Only clips from finished jobs still on the server show up here.</div>
+    <div id="empty-msg">No finished clips available yet -- render some on the Clipping tab first.</div>
+
+    <video id="preview-video" controls preload="metadata" style="display:none"></video>
+
+    <div class="section">
+      <label for="hook-text-input">Hook line text</label>
+      <textarea id="hook-text-input" rows="2" placeholder="Generate one, or write your own"></textarea>
+      <div class="row">
+        <button id="generate-btn" class="secondary" disabled>Generate with Claude</button>
+        <button id="render-btn" disabled>Render preview</button>
+      </div>
+      <div class="hint">Flashes for well under a second, then disappears -- edit the text above before rendering if you want something different.</div>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="result-block">
+      <div class="section">
+        <label style="margin-top:0">Result</label>
+        <video id="result-video" controls preload="metadata"></video>
+        <div id="result-actions">
+          <a id="result-download" class="dl-link" href="#">Download</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const clipSelect = document.getElementById('clip-select');
+const emptyMsg = document.getElementById('empty-msg');
+const previewVideo = document.getElementById('preview-video');
+const hookTextInput = document.getElementById('hook-text-input');
+const generateBtn = document.getElementById('generate-btn');
+const renderBtn = document.getElementById('render-btn');
+const errorMsg = document.getElementById('error-msg');
+const resultBlock = document.getElementById('result-block');
+const resultVideo = document.getElementById('result-video');
+const resultDownload = document.getElementById('result-download');
+
+let clips = [];
+
+function showError(msg) {
+  errorMsg.textContent = msg || '';
+}
+
+function selectedClip() {
+  const idx = clipSelect.value;
+  return idx === '' ? null : clips[Number(idx)];
+}
+
+function onClipChange() {
+  const clip = selectedClip();
+  resultBlock.style.display = 'none';
+  showError('');
+  if (!clip) {
+    previewVideo.style.display = 'none';
+    generateBtn.disabled = true;
+    renderBtn.disabled = true;
+    return;
+  }
+  previewVideo.src = `/api/jobs/${clip.job_id}/clips/${clip.file}`;
+  previewVideo.style.display = 'block';
+  hookTextInput.value = clip.hook_caption || '';
+  generateBtn.disabled = false;
+  renderBtn.disabled = false;
+}
+
+async function loadClips() {
+  try {
+    const resp = await fetch('/api/hook-line/clips');
+    const data = await resp.json();
+    clips = data.clips || [];
+  } catch (e) {
+    clips = [];
+  }
+  clipSelect.innerHTML = '';
+  if (!clips.length) {
+    clipSelect.innerHTML = '<option value="">No clips available</option>';
+    emptyMsg.style.display = 'block';
+    return;
+  }
+  emptyMsg.style.display = 'none';
+  clipSelect.appendChild(new Option('Choose a clip...', ''));
+  clips.forEach((c, i) => {
+    const label = `${c.source_title || 'Untitled source'} — ${c.title || c.file} (${c.duration}s)`;
+    clipSelect.appendChild(new Option(label, String(i)));
+  });
+}
+
+clipSelect.addEventListener('change', onClipChange);
+
+generateBtn.addEventListener('click', async () => {
+  const clip = selectedClip();
+  if (!clip) return;
+  showError('');
+  generateBtn.disabled = true;
+  generateBtn.textContent = 'Generating...';
+  try {
+    const resp = await fetch('/api/hook-line/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: clip.job_id, filename: clip.file }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showError(data.detail || 'Could not generate a hook line.');
+      return;
+    }
+    hookTextInput.value = data.hook_text;
+  } catch (e) {
+    showError('Could not generate a hook line.');
+  } finally {
+    generateBtn.disabled = false;
+    generateBtn.textContent = 'Generate with Claude';
+  }
+});
+
+renderBtn.addEventListener('click', async () => {
+  const clip = selectedClip();
+  const hookText = hookTextInput.value.trim();
+  if (!clip) return;
+  if (!hookText) {
+    showError('Write or generate a hook line first.');
+    return;
+  }
+  showError('');
+  renderBtn.disabled = true;
+  renderBtn.textContent = 'Rendering...';
+  try {
+    const resp = await fetch('/api/hook-line/render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: clip.job_id, filename: clip.file, hook_text: hookText }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showError(data.detail || 'Could not render the hook line.');
+      return;
+    }
+    const url = `/api/jobs/${clip.job_id}/clips/${data.file}`;
+    resultVideo.src = `${url}?t=${Date.now()}`;
+    resultDownload.href = `${url}?download=1`;
+    resultBlock.style.display = 'block';
+  } catch (e) {
+    showError('Could not render the hook line.');
+  } finally {
+    renderBtn.disabled = false;
+    renderBtn.textContent = 'Render preview';
+  }
+});
+
+loadClips();
 </script>
 </body>
 </html>
