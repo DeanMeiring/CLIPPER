@@ -73,7 +73,20 @@ class MultiCamSplitLayout:
     bottom_cam_out_widths: List[int]
 
 
-Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout]
+@dataclass
+class LetterboxLayout:
+    """Show the WHOLE source frame -- no crop, no zoom -- scaled to fit the
+    target width with the leftover top/bottom filled by a blurred, zoomed-
+    in copy of the same frame as a backdrop (see render.render_clip). Used
+    for a genuine multi-person/wide IRL scene where cropping into any one
+    person would push the others out of frame entirely -- see
+    compute_layout's landscape branch and facecam_vision.detect_wide_scene.
+    Carries no fields: ffmpeg reads the source's actual dimensions itself
+    at render time, nothing here needs to precompute pixel coordinates the
+    way every other Layout does."""
+
+
+Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout, LetterboxLayout]
 
 # Detected overlay clusters beyond this are almost always detector noise
 # (Haar false-positives), not a real 4+-way co-stream -- and even a genuine
@@ -619,10 +632,26 @@ def compute_layout(
             n = len(vision_boxes[:MAX_COCAM_TILES])
             _log_layout(start, end, clusters, f"{n}-cam split (vision)")
             return layout
-        # Vision confidently found no facecam overlay -- fall through to
-        # the anchor/center-crop case below (vision only rules out an
-        # *overlay* pattern here, not a talking-head-style crop, so the
-        # Haar-based anchor logic still gets a say).
+        # Vision confidently found no facecam overlay -- but that alone
+        # doesn't say whether this is a genuine multi-person/wide IRL scene
+        # (show the whole frame -- see LetterboxLayout) or a solo talking-
+        # head shot (the anchor/center-crop logic below is already correct
+        # for that). Getting this wrong either needlessly crops one of
+        # several real people out of frame, or leaves a solo shot un-
+        # zoomed -- worth one more cheap vision call to tell them apart,
+        # only reached here (not on every clip) since most streams ARE
+        # gaming-with-facecam and never get this far.
+        try:
+            is_wide_scene = facecam_vision.detect_wide_scene(video_path, start, end)
+        except Exception as e:
+            print(f"[reframe] wide-scene classification errored, falling through: {e}", flush=True)
+            is_wide_scene = None
+        if is_wide_scene:
+            _log_layout(start, end, clusters, "wide letterbox (IRL scene, vision)")
+            return LetterboxLayout()
+        # False or None (unusable/unclear) -- fall through to the anchor/
+        # center-crop case below unchanged, the same fails-open default
+        # every other vision step in this module uses.
     else:
         def is_overlay(c: dict) -> bool:
             med_x, med_y, med_w, med_h = c["box"]

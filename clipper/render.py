@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .reframe import CropWindow, Layout, MultiCamSplitLayout, SplitLayout
+from .reframe import CropWindow, Layout, LetterboxLayout, MultiCamSplitLayout, SplitLayout
 
 
 def _escape_for_filter(path: Path) -> str:
@@ -79,6 +79,34 @@ def render_clip(
             f"{_letterbox_scale_pad(out_w, layout.bottom_out_h)}[bottom];"
             f"[top][bottom]vstack=inputs=2[stacked];"
             f"[stacked]ass='{ass}'[outv]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}",
+            "-i", str(source_video),
+            "-t", f"{duration:.3f}",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    elif isinstance(layout, LetterboxLayout):
+        # No crop at all -- the whole source frame, scaled to fit the
+        # target width/height, with a blurred/zoomed copy of the same
+        # frame filling whatever's left top/bottom instead of plain black
+        # bars. `split` feeds the same input into two parallel chains: one
+        # scaled UP to cover the full canvas then blurred (the backdrop),
+        # one scaled DOWN to fit within it losslessly (the real shot),
+        # composited centered on top. Both chains read the source's actual
+        # dimensions themselves -- nothing here needs them precomputed.
+        filter_complex = (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{out_h},gblur=sigma=20[bg2];"
+            f"[fg]scale={out_w}:-2:force_original_aspect_ratio=decrease[fg2];"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,ass='{ass}'[outv]"
         )
         cmd = [
             "ffmpeg", "-y",
