@@ -417,6 +417,73 @@ def detect_facecams(
     return _dedupe_boxes(boxes)
 
 
+_WIDE_SCENE_PROMPT = """These are frames sampled from a video clip already confirmed to have NO
+facecam/webcam overlay window composited on it (no small corner picture-in-
+picture of a streamer's own camera feed).
+
+Decide which of these better describes the shot:
+
+WIDE -- a genuine multi-person or wide IRL scene filmed as one continuous
+shot: more than one person visible and interacting (an interview, a duo/
+group conversation, people at a table or walking around), or a wide
+establishing shot where no single person should be zoomed into while
+cutting the others out of frame.
+
+SOLO -- a single person's shot (a webcam-style explainer, one streamer
+facing their own camera with nobody else consistently in frame) where
+zooming/cropping to that one person is correct, even if they move around
+some.
+
+Respond with ONLY one word: WIDE or SOLO."""
+
+
+def detect_wide_scene(
+    video_path: Path, start: float, end: float,
+    api_key: Optional[str] = None, model: str = DEFAULT_MODEL,
+) -> Optional[bool]:
+    """True if this clip (already confirmed to have no facecam overlay) is
+    a genuine multi-person/wide IRL scene that should show the WHOLE frame
+    rather than being cropped/zoomed into one person -- see
+    reframe.compute_layout's landscape branch, which otherwise anchors on
+    whichever single face recurred most and crops everyone else out. False
+    for a solo talking-head shot, where the existing face-anchored crop is
+    already correct. None if vision wasn't usable (no API key, frame
+    extraction/the call failed, or an unclear answer) -- the caller should
+    fall back to the existing crop/anchor logic unchanged, the same
+    fails-open behavior as detect_facecams."""
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    frames_b64 = _extract_frames_b64(video_path, start, end)
+    if not frames_b64:
+        return None
+
+    content: List[dict] = [{"type": "text", "text": _WIDE_SCENE_PROMPT}]
+    for b64 in frames_b64:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(model=model, max_tokens=10, messages=[{"role": "user", "content": content}])
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip().upper()
+    except Exception as e:
+        print(f"[facecam_vision] wide-scene classification failed, keeping existing crop logic: {e}", flush=True)
+        return None
+
+    if raw.startswith("WIDE"):
+        return True
+    if raw.startswith("SOLO"):
+        return False
+    print(f"[facecam_vision] wide-scene classification gave an unclear answer ({raw!r}), keeping existing crop logic", flush=True)
+    return None
+
+
 def _extract_frame_b64(video_path: Path, t_frac: float = 0.5) -> Optional[str]:
     """One frame from partway through an already-rendered (short) clip."""
     import cv2
