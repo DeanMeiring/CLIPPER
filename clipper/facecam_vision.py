@@ -96,6 +96,16 @@ where a facecam might be:
 - a face or video that's part of content being watched/browsed on screen
   (a YouTube/video player, a website, a photo, a video thumbnail) rather
   than a small overlay window composited on top of everything else
+- a real person who is simply part of the same continuous real-world shot as
+  everything else on screen -- e.g. two or more people filmed together in
+  one room/scene (an interview, a conversation, people at a table or
+  walking together), even if one of them happens to sit toward a corner or
+  edge of the frame. A genuine facecam overlay is a separately COMPOSITED
+  window: it has its own distinct border/edge, and its lighting/background
+  don't match the rest of the frame because it's a different camera feed
+  layered on top. If a person shares the same background, lighting, and
+  physical space as the rest of the shot, they are part of the main scene,
+  not an overlay -- no matter where in the frame they're standing
 - any other static graphic or texture that isn't an actual live camera feed
   of a person
 
