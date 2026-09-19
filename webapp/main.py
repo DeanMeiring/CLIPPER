@@ -31,6 +31,7 @@ from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessi
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
     MAX_COCAM_TILES,
+    LetterboxLayout,
     MultiCamSplitLayout,
     SplitLayout,
     center_crop_layout,
@@ -581,12 +582,30 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                     )
                 except OSError as e:
                     print(f"[render] could not keep the rejected render: {e}", flush=True)
+                # A rejected facecam band is itself evidence there may be no
+                # real facecam here at all -- exactly what happens when
+                # detect_facecams mistakes a person in a continuous wide IRL
+                # shot for a corner overlay (see reframe.compute_layout).
+                # Falling back to a plain crop + asking the user to draw a
+                # facecam box in that case makes no sense -- there's nothing
+                # to draw a box around. Ask once more, specifically: is this
+                # actually a wide multi-person scene? If so, letterbox it
+                # instead and skip the manual-placement prompt entirely,
+                # since there's now real evidence (a failed facecam render)
+                # backing that call, not just the original pre-render guess.
+                is_wide_scene = None
                 try:
-                    fallback_layout = center_crop_layout(video_path, target_w=1080, target_h=1920)
+                    is_wide_scene = facecam_vision.detect_wide_scene(video_path, pick.start, pick.end)
+                except Exception as e:
+                    print(f"[render] wide-scene re-check after facecam rejection errored: {e}", flush=True)
+                try:
+                    fallback_layout = (
+                        LetterboxLayout() if is_wide_scene else center_crop_layout(video_path, target_w=1080, target_h=1920)
+                    )
                     _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
-                facecam_uncertain = True
+                facecam_uncertain = not is_wide_scene
                 has_trusted_facecam = False
 
         # Always keep a raw source frame so a person can place the facecam
