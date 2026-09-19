@@ -186,7 +186,7 @@ class FacecamBoxesRequest(BaseModel):
 
 
 def _job_public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("request", "pending_regenerate", "pending_manual_facecam")}
+    return {k: v for k, v in job.items() if k not in ("request", "pending_regenerate", "pending_manual_facecam", "pending_manual_letterbox")}
 
 
 def _persist(job_id: str) -> None:
@@ -303,6 +303,7 @@ def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
         pending_manual_facecam = jobs[job_id].pop("pending_manual_facecam", None)
+        pending_manual_letterbox = jobs[job_id].pop("pending_manual_letterbox", None)
         pending_weekly_recap = jobs[job_id].pop("pending_weekly_recap", None)
         pending_game_recap = jobs[job_id].pop("pending_game_recap", None)
         pending_game_recap_remix = jobs[job_id].pop("pending_game_recap_remix", None)
@@ -311,6 +312,9 @@ def _run_job(job_id: str) -> None:
         return
     if pending_manual_facecam is not None:
         _run_manual_facecam_render(job_id, pending_manual_facecam)
+        return
+    if pending_manual_letterbox is not None:
+        _run_manual_letterbox_render(job_id, pending_manual_letterbox)
         return
     if pending_weekly_recap is not None:
         _run_weekly_recap_job(job_id, week_ending=pending_weekly_recap.get("week_ending"))
@@ -950,6 +954,67 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
     _set(job_id, state="done", message=message)
 
 
+def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
+    """Re-render one clip as a plain letterboxed wide shot (see
+    reframe.LetterboxLayout) -- the escape hatch for a clip auto-detection
+    still got wrong: it thought there was a facecam here (see _render_all's
+    post-render rejection path) when there really isn't, e.g. a genuine
+    multi-person IRL scene it misread. Skips compute_layout/vision entirely
+    -- a human who looked at the clip and said "this isn't a facecam" is
+    more reliable than another detection pass would be. Reuses the clip's
+    already-downloaded source and existing caption (.ass) file, same as
+    _run_manual_facecam_render; only the layout and rendered video change."""
+    out_dir = BASE_DIR / job_id
+    raw_dir = out_dir / "_source"
+    cancel = lambda: _check_cancel(job_id)  # noqa: E731
+    filenames = list(req.get("filenames") or [])
+
+    with jobs_lock:
+        by_file = {c.get("file"): c for c in (jobs[job_id].get("clips") or [])}
+
+    updated, failed = [], []
+    for i, filename in enumerate(filenames):
+        cancel()
+        clip = by_file.get(filename)
+        label = (clip or {}).get("title") or filename
+        _set(job_id, state="rendering", message=f'Re-rendering as an IRL scene: "{label}"')
+        _progress(job_id, i / max(len(filenames), 1))
+        try:
+            if clip is None:
+                raise RuntimeError("no longer part of this job's clips")
+            if not clip.get("source_video"):
+                raise RuntimeError("predates manual facecam fixes -- use Generate more clips instead")
+            video_path = raw_dir / clip["source_video"]
+            if not video_path.exists():
+                raise RuntimeError("its downloaded source is gone")
+            ass_path = out_dir / f"_{Path(filename).stem}.ass"
+            if not ass_path.exists():
+                raise RuntimeError("its caption file is missing")
+            _render_atomic(video_path, clip["start"], clip["end"], LetterboxLayout(), ass_path, out_dir / filename)
+        except Exception as e:  # noqa: BLE001 - one clip failing shouldn't lose the rest of the batch
+            print(f"[render] manual IRL re-render of {filename} failed: {e}", flush=True)
+            failed.append(f"{filename}: {e}")
+            continue
+        updated.append(filename)
+        with jobs_lock:
+            for c in jobs[job_id].get("clips") or []:
+                if c.get("file") == filename:
+                    c["facecam_uncertain"] = False
+                    c["facecam_trusted"] = False
+                    c["facecam_manual"] = False
+                    c["is_irl_scene"] = True
+        _persist(job_id)
+
+    _progress(job_id, 1.0)
+    if not updated:
+        _set(job_id, state="error", error="Couldn't re-render as an IRL scene -- " + "; ".join(failed))
+        return
+    message = f"Done -- {len(updated)} clip(s) re-rendered as an IRL scene."
+    if failed:
+        message += " Skipped " + "; ".join(failed)
+    _set(job_id, state="done", message=message)
+
+
 def _keepalive_loop(stop_event: threading.Event) -> None:
     """Railway's sleepApplication only watches HTTP traffic to the service
     -- a background job running with nobody polling looks idle to it even
@@ -1264,6 +1329,43 @@ def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> d
         }
         job["state"] = "queued"
         job["message"] = f"Queued -- re-rendering {len(filenames)} clip(s) with your facecam placement"
+        job["progress"] = 0.0
+        job["error"] = None
+        cancel_events[job_id] = threading.Event()
+    _persist(job_id)
+    job_queue.put(job_id)
+    return {"ok": True}
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/mark-irl")
+def mark_clip_irl(job_id: str, filename: str) -> dict:
+    """Re-render one clip as a plain letterboxed wide shot -- the override
+    for when auto-detection (see reframe.compute_layout,
+    facecam_vision.detect_wide_scene) still thought there was a facecam
+    here and there really isn't, e.g. a genuine multi-person IRL scene it
+    misread. No boxes needed, unlike facecam-boxes -- there's nothing to
+    draw a box around. Only ever targets the one clip clicked: unlike
+    facecam placement, "this is IRL" doesn't generalize to other clips in
+    the same job the way one fixed camera layout does."""
+    if Path(filename).name != filename:
+        raise HTTPException(400, "bad filename")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if not clip.get("source_video"):
+            raise HTTPException(409, "this clip predates manual facecam fixes -- try Generate more clips instead")
+        raw_dir = BASE_DIR / job_id / "_source"
+        if not (raw_dir / clip["source_video"]).exists():
+            raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
+        job["pending_manual_letterbox"] = {"filenames": [filename]}
+        job["state"] = "queued"
+        job["message"] = "Queued -- re-rendering as an IRL scene"
         job["progress"] = 0.0
         job["error"] = None
         cancel_events[job_id] = threading.Event()
@@ -3576,6 +3678,7 @@ INDEX_HTML = """<!doctype html>
     <div class="modal-actions" style="margin-top:12px">
       <button id="facecam-go-btn" type="button">Re-render with these boxes</button>
       <button id="facecam-clear-btn" type="button" class="ghost">Clear boxes</button>
+      <button id="facecam-irl-btn" type="button" class="ghost">This isn't a facecam -- it's an IRL scene</button>
       <button id="facecam-cancel-btn" type="button" class="ghost">Skip for now</button>
     </div>
   </div>
@@ -4124,7 +4227,10 @@ async function openFacecamModal(jobId, clip, othersMissing) {
   facecamDrawStart = null;
   facecamPendingSourceBoxes = clip.facecam_boxes || lastFacecamSourceBoxes;
   let why;
-  if (clip.facecam_uncertain) {
+  if (clip.is_irl_scene) {
+    facecamModalTitle.textContent = `IRL scene -- "${clip.title}"`;
+    why = "This clip is set to render as a wide IRL shot, no facecam. Draw a box below if it actually does have one.";
+  } else if (clip.facecam_uncertain) {
     facecamModalTitle.textContent = `Fix the facecam position -- "${clip.title}"`;
     why = 'Detection found a facecam here but the automatic check rejected where it landed, so this clip shipped without one.';
   } else if (clip.facecam_manual) {
@@ -4313,6 +4419,31 @@ facecamGoBtn.addEventListener('click', async () => {
   } finally {
     facecamGoBtn.disabled = false;
     facecamGoBtn.textContent = 'Re-render with these boxes';
+  }
+});
+
+const facecamIrlBtn = document.getElementById('facecam-irl-btn');
+facecamIrlBtn.addEventListener('click', async () => {
+  if (!facecamJobId || !facecamFilename) return;
+  const jobId = facecamJobId;
+  const filename = facecamFilename;
+  facecamIrlBtn.disabled = true;
+  facecamIrlBtn.textContent = 'Starting...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/mark-irl`, { method: 'POST' });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || 'Could not start the re-render.');
+      return;
+    }
+    facecamModal.classList.remove('open');
+    facecamJobId = null;
+    facecamFilename = null;
+    loadJobsList();
+    attachToJob(jobId);
+  } finally {
+    facecamIrlBtn.disabled = false;
+    facecamIrlBtn.textContent = "This isn't a facecam -- it's an IRL scene";
   }
 });
 
@@ -4712,7 +4843,8 @@ async function poll(jobId) {
         // a modal that can only ever fail.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
-        fixBtn.textContent = c.facecam_uncertain ? '🎯 Fix facecam'
+        fixBtn.textContent = c.is_irl_scene ? '🎬 IRL scene'
+          : c.facecam_uncertain ? '🎯 Fix facecam'
           : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam' : '🎯 Add facecam';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
         secondaryRow.appendChild(fixBtn);
