@@ -3624,9 +3624,9 @@ INDEX_HTML = """<!doctype html>
     <p>What mood are you looking for?</p>
     <p class="hint">This becomes the instruction Claude uses when picking clips -- pick one, or skip to let it judge freely.</p>
     <div class="modal-actions">
-      <button type="button" class="mood-btn" data-mood="the funniest moments -- genuine comedy, banter, or jokes that land">😂 Funny</button>
-      <button type="button" class="mood-btn" data-mood="insane clutch plays -- high-pressure moments where they pull off something incredible at the last second">🔥 Insane clutch</button>
-      <button type="button" class="mood-btn" data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;">🤯 Crazy moment</button>
+      <button type="button" class="mood-btn" data-mood="moments that actually land as funny -- a good joke, a punchline, or a genuinely funny exchange">😂 Funny</button>
+      <button type="button" class="mood-btn" data-mood="clutch plays -- high-pressure moments where they pull off something at the last second">🔥 Insane clutch</button>
+      <button type="button" class="mood-btn" data-mood="unexpected moments -- something happens that nobody in the moment saw coming">🤯 Crazy moment</button>
       <button type="button" class="mood-btn" data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh">💀 Dark humor</button>
       <button id="mood-skip-btn" type="button" class="ghost">Skip -- no preference</button>
     </div>
@@ -3639,9 +3639,9 @@ INDEX_HTML = """<!doctype html>
     <p class="hint">Reuses the already-downloaded source -- no re-download needed.</p>
     <label>Mood (optional)</label>
     <div class="modal-actions" style="margin-bottom:12px">
-      <button type="button" class="mood-btn regen-mood-btn" data-mood="the funniest moments -- genuine comedy, banter, or jokes that land">😂 Funny</button>
-      <button type="button" class="mood-btn regen-mood-btn" data-mood="insane clutch plays -- high-pressure moments where they pull off something incredible at the last second">🔥 Insane clutch</button>
-      <button type="button" class="mood-btn regen-mood-btn" data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;">🤯 Crazy moment</button>
+      <button type="button" class="mood-btn regen-mood-btn" data-mood="moments that actually land as funny -- a good joke, a punchline, or a genuinely funny exchange">😂 Funny</button>
+      <button type="button" class="mood-btn regen-mood-btn" data-mood="clutch plays -- high-pressure moments where they pull off something at the last second">🔥 Insane clutch</button>
+      <button type="button" class="mood-btn regen-mood-btn" data-mood="unexpected moments -- something happens that nobody in the moment saw coming">🤯 Crazy moment</button>
       <button type="button" class="mood-btn regen-mood-btn" data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh">💀 Dark humor</button>
     </div>
     <label>Focus (optional)</label>

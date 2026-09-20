@@ -200,17 +200,52 @@ clip -- only pick it if the content itself earns it.
 """
 
 
-_GROUP_BANTER_NOTE = """
+_GROUP_REACTION_NOTE = """
 A transcript that reads messily -- overlapping speech, interruptions, cut-off
 sentences, unclear who's talking -- is often just what it looks like in text
-when MULTIPLE PEOPLE are reacting/bantering together, not a sign the moment
-itself is weak. Group banter between multiple streamers (a collab/co-op
-moment, everyone reacting to the same thing at once) is frequently the
-funniest, highest-energy content on a stream precisely because of that
-back-and-forth chaos. Don't undervalue or skip a candidate just because its
-transcript is harder to read than a single person talking cleanly -- judge
-it by whether the energy and content would land as a clip, not by how
-cleanly it transcribes."""
+when MULTIPLE PEOPLE are reacting to the same thing at once, not a sign the
+moment itself is weak. A collab/co-op moment where everyone reacts together
+is frequently the funniest, most reaction-worthy content on a stream
+precisely because of that back-and-forth. Don't undervalue or skip a
+candidate just because its transcript is harder to read than a single
+person talking cleanly -- judge it by whether the moment itself would land
+as a clip, not by how cleanly it transcribes."""
+
+
+# Real clip-channel titles were pulled for this (Sept 2026): "JYNXZI DONATES
+# 100K TO ALVEUS SANCTUARY 😭", "Kai Cenat Knew He Messed Up 😭", "Ludwig
+# Admits To Being Performative 😳", "Kai Cenat Recreates His Viral Clip In
+# Front Of Tyla 😂" -- all a blunt statement of the actual event (name +
+# specific verb + specific object), plain title case, at most one trailing
+# emoji, no hype adjectives. Confirmed root cause of the AI-sounding output:
+# words like "banter"/"chaos"/"energy" used to live in the SELECTION
+# reasoning above (see _GROUP_REACTION_NOTE's history) immediately before
+# the model writes title/description/hook_caption -- it was echoing back
+# whatever vocabulary sat right above it in the prompt. This note has to
+# stay free of every word on its own banned list for that same reason.
+_HUMAN_VOICE_NOTE = """
+Real clip-channel titles and descriptions are blunt statements of what
+literally happened, not marketing copy -- e.g. "JYNXZI DONATES 100K TO
+ALVEUS SANCTUARY 😭", "Kai Cenat Knew He Messed Up 😭", "Ludwig Admits To
+Being Performative 😳". Name + specific concrete verb + specific object, in
+plain title case. At most one word in ALL CAPS if a single word genuinely
+earns the emphasis -- most real examples use none. At most one emoji, at
+the very end, only if it actually fits -- never more than one, never
+mid-sentence, never in the description.
+
+Do NOT reach for generic online-commentary filler words -- including but
+not limited to "banter", "chaos", "insane", "wild", "epic", "vibes",
+"energy", "unbelievable", "iconic", "legendary" -- unless the transcript
+itself uses that exact word. These read as AI-generated because they
+describe a vague vibe instead of naming the specific thing that happened.
+Say what specifically occurred instead: who did what to whom, what was
+said, what broke, what was won or lost.
+
+The description should be a single direct sentence stating what happens,
+the way someone fast-captioning a clip for their own channel would write
+it -- not a summary paragraph. Never open with "In this clip," "Watch as,"
+"This hilarious moment," or similar throat-clearing -- start with the
+actual subject and verb."""
 
 
 def _strategy_notes_block(strategy_notes: Optional[str]) -> str:
@@ -264,7 +299,8 @@ timestamp markers every ~10 seconds -- use them to anchor your start/end times,
 interpolating between markers for precision.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}{loud_line}{strategy_line}{_GROUP_BANTER_NOTE}
+{source_line}{focus_line}{loud_line}{strategy_line}{_GROUP_REACTION_NOTE}
+{_HUMAN_VOICE_NOTE}
 
 Pick up to {n_clips} clips. Each clip must:
 - be between {min_len:.0f} and {max_len:.0f} seconds long
@@ -280,9 +316,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "start": 12.5,
     "end": 58.0,
     "title": "short internal label, not shown on screen",
-    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
-    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
+    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip -- see the style note above: name + concrete action, not a vibe word",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- see the style note above for real examples: plain title case, name the creator/streamer if identifiable for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
+    "description": "the actual post description to upload alongside the clip -- one direct sentence stating what happens (see the style note above), credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
     "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
@@ -371,7 +407,8 @@ Not every candidate window is actually a good clip -- some chat spikes are
 noise, or a reaction to something off-screen that doesn't work without
 context. Pick only the ones that would genuinely work as a standalone
 short-form clip.
-{_GROUP_BANTER_NOTE}
+{_GROUP_REACTION_NOTE}
+{_HUMAN_VOICE_NOTE}
 
 Pick up to {n_clips} windows. For each one you pick, give a start/end IN
 SECONDS LOCAL TO THAT WINDOW (0 to its duration) -- use the whole window or
@@ -388,9 +425,9 @@ double-quote characters that appear inside a string value, e.g. \" ):
     "start": 4.0,
     "end": 52.0,
     "title": "short internal label, not shown on screen",
-    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
-    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
+    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip -- see the style note above: name + concrete action, not a vibe word",
+    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- see the style note above for real examples: plain title case, name the creator/streamer if identifiable for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
+    "description": "the actual post description to upload alongside the clip -- one direct sentence stating what happens (see the style note above), credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
     "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
   }}
 ]
