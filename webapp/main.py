@@ -1496,6 +1496,59 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
 
 
+class TrimClipRequest(BaseModel):
+    trim_start: float = 0.0
+    trim_end: float = 0.0
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/trim")
+def trim_clip_in_place(job_id: str, filename: str, req: TrimClipRequest) -> dict:
+    """Permanently shave a beat off either end of an already-rendered clip
+    -- unlike the upload-time trim above (which only shortens a throwaway
+    copy for that one YouTube post), this overwrites the kept file on disk,
+    so every future preview/download/upload sees the shorter cut."""
+    if Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(400, "bad filename")
+    if req.trim_start <= 0 and req.trim_end <= 0:
+        raise HTTPException(400, "Nothing to trim -- set a start or end amount")
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        duration = float(clip.get("duration") or 0)
+
+    path = BASE_DIR / job_id / filename
+    if not path.is_file():
+        raise HTTPException(404, "clip file not found on disk")
+
+    tmp_path = path.with_name(f".{path.stem}.trimming{path.suffix}")
+    try:
+        trim_clip(path, tmp_path, req.trim_start, req.trim_end, duration)
+    except (RuntimeError, ValueError) as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not trim the clip: {e}") from e
+
+    new_duration = duration - req.trim_start - req.trim_end
+    os.replace(tmp_path, path)
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            for c in job.get("clips") or []:
+                if c.get("file") == filename:
+                    c["duration"] = new_duration
+                    break
+    _persist(job_id)
+
+    return {"ok": True, "duration": new_duration}
+
+
 def _thumbnail_default_text(clip: dict) -> str:
     text = (clip.get("hook_caption") or clip.get("upload_title") or clip.get("title") or "").strip()
     return text.upper()
@@ -3411,11 +3464,11 @@ INDEX_HTML = """<!doctype html>
   .job-row button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; flex-shrink: 0; }
   .job-row .job-delete { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .job-row .job-delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); opacity: 1; }
-  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay, #thumbnail-modal-overlay {
+  #stop-modal-overlay, #mood-modal-overlay, #regen-modal-overlay, #facecam-modal-overlay, #youtube-upload-modal-overlay, #thumbnail-modal-overlay, #trim-modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
     align-items: center; justify-content: center; z-index: 100; padding: 16px;
   }
-  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open { display: flex; }
+  #stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open, #trim-modal-overlay.open { display: flex; }
   #thumbnail-gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
   #thumbnail-gallery img { width: 100%; border-radius: 8px; display: block; cursor: pointer; border: 3px solid transparent; background: var(--track); }
   #thumbnail-gallery img.selected { border-color: var(--accent); }
@@ -3728,6 +3781,32 @@ INDEX_HTML = """<!doctype html>
     <div class="modal-actions" style="margin-top:16px">
       <button id="youtube-upload-go-btn" type="button">Upload</button>
       <button id="youtube-upload-cancel-btn" type="button" class="ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="trim-modal-overlay">
+  <div class="modal" style="max-height:92vh;overflow:auto">
+    <p>Trim clip</p>
+    <p class="hint">This permanently shortens the saved file -- captions are burned into the pixels already, so they carry over untouched. Can't be undone.</p>
+    <video id="trim-preview" controls preload="metadata" style="width:100%;max-height:40vh;border-radius:8px;background:var(--track);display:block;object-fit:contain"></video>
+    <p class="hint">Play the video above, pause where you want to cut, then use the buttons below -- or type seconds directly.</p>
+    <div class="row">
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the start (s)</label>
+        <input id="trim-start" type="number" value="0" min="0" step="0.5">
+        <button id="trim-set-start-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
+      </div>
+      <div>
+        <label style="margin-top:6px;font-size:0.7rem">Off the end (s)</label>
+        <input id="trim-end" type="number" value="0" min="0" step="0.5">
+        <button id="trim-set-end-btn" type="button" style="margin-top:4px;width:100%">Set to current position</button>
+      </div>
+    </div>
+    <p class="hint" id="trim-hint"></p>
+    <div class="modal-actions" style="margin-top:16px">
+      <button id="trim-go-btn" type="button">Trim</button>
+      <button id="trim-cancel-btn" type="button" class="ghost">Cancel</button>
     </div>
   </div>
 </div>
@@ -4574,6 +4653,111 @@ youtubeUploadGoBtn.addEventListener('click', async () => {
   }
 });
 
+const trimModal = document.getElementById('trim-modal-overlay');
+const trimPreview = document.getElementById('trim-preview');
+const trimStartInput = document.getElementById('trim-start');
+const trimEndInput = document.getElementById('trim-end');
+const trimHint = document.getElementById('trim-hint');
+const trimSetStartBtn = document.getElementById('trim-set-start-btn');
+const trimSetEndBtn = document.getElementById('trim-set-end-btn');
+const trimGoBtn = document.getElementById('trim-go-btn');
+let trimJobId = null;
+let trimFilename = null;
+let trimDuration = 0;
+
+function refreshTrimHint() {
+  const trimStart = Math.max(0, parseFloat(trimStartInput.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(trimEndInput.value) || 0);
+  const resultSeconds = trimDuration - trimStart - trimEnd;
+  if (resultSeconds < 1) {
+    trimHint.textContent =
+      `Clip is ${trimDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.`;
+    trimGoBtn.disabled = true;
+  } else {
+    trimHint.textContent =
+      `Clip is ${trimDuration.toFixed(1)}s -- trimming to ${resultSeconds.toFixed(1)}s.`;
+    trimGoBtn.disabled = false;
+  }
+}
+trimStartInput.addEventListener('input', refreshTrimHint);
+trimEndInput.addEventListener('input', refreshTrimHint);
+
+trimSetStartBtn.addEventListener('click', () => {
+  trimStartInput.value = trimPreview.currentTime.toFixed(1);
+  refreshTrimHint();
+});
+trimSetEndBtn.addEventListener('click', () => {
+  const remaining = Math.max(0, trimDuration - trimPreview.currentTime);
+  trimEndInput.value = remaining.toFixed(1);
+  refreshTrimHint();
+});
+
+function openTrimModal(jobId, clip) {
+  trimJobId = jobId;
+  trimFilename = clip.file;
+  trimDuration = clip.duration || 0;
+  trimPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
+  trimPreview.onloadedmetadata = () => {
+    if (trimPreview.duration && isFinite(trimPreview.duration)) {
+      trimDuration = trimPreview.duration;
+    }
+    refreshTrimHint();
+  };
+  trimStartInput.value = '0';
+  trimEndInput.value = '0';
+  refreshTrimHint();
+  trimModal.classList.add('open');
+}
+
+function closeTrimModal() {
+  trimModal.classList.remove('open');
+  trimJobId = null;
+  trimFilename = null;
+  trimPreview.pause();
+  trimPreview.removeAttribute('src');
+  trimPreview.load();
+}
+
+document.getElementById('trim-cancel-btn').addEventListener('click', closeTrimModal);
+
+trimGoBtn.addEventListener('click', async () => {
+  if (!trimJobId || !trimFilename) return;
+  const jobId = trimJobId;
+  const filename = trimFilename;
+  const trimStart = Math.max(0, parseFloat(trimStartInput.value) || 0);
+  const trimEnd = Math.max(0, parseFloat(trimEndInput.value) || 0);
+  if (trimStart <= 0 && trimEnd <= 0) {
+    alert('Set a start or end amount to trim first.');
+    return;
+  }
+  if (trimStart + trimEnd >= trimDuration) {
+    alert('That trim would cut the whole clip -- leave at least a second.');
+    return;
+  }
+  if (!confirm('This permanently shortens the saved clip and can\\'t be undone. Continue?')) return;
+  trimGoBtn.disabled = true;
+  trimGoBtn.textContent = 'Trimming...';
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/trim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trim_start: trimStart, trim_end: trimEnd }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.detail || 'Trim failed.');
+      return;
+    }
+    closeTrimModal();
+    poll(jobId);
+  } catch (e) {
+    alert('Trim failed.');
+  } finally {
+    trimGoBtn.disabled = false;
+    trimGoBtn.textContent = 'Trim';
+  }
+});
+
 function closeThumbnailModal() {
   thumbnailModal.classList.remove('open');
   thumbnailJobId = null;
@@ -4688,7 +4872,7 @@ thumbnailRegenBtn.addEventListener('click', async () => {
 // leaving a button to be noticed. Each clip is offered once per page
 // load, so "Skip for now" is respected -- the button stays on the clip.
 function maybePromptFacecam(jobId, job) {
-  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open')) return;
+  if (document.querySelector('#stop-modal-overlay.open, #mood-modal-overlay.open, #regen-modal-overlay.open, #facecam-modal-overlay.open, #youtube-upload-modal-overlay.open, #thumbnail-modal-overlay.open, #trim-modal-overlay.open')) return;
   const next = (job.clips || []).find(c => c.facecam_uncertain && c.source_frame && !facecamPrompted.has(`${jobId}/${c.file}`));
   if (!next) return;
   facecamPrompted.add(`${jobId}/${next.file}`);
@@ -4829,6 +5013,12 @@ async function poll(jobId) {
       thumbBtn.textContent = '🖼 Thumbnail';
       thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
       secondaryRow.appendChild(thumbBtn);
+
+      const trimBtn = document.createElement('button');
+      trimBtn.type = 'button';
+      trimBtn.textContent = '✂️ Trim';
+      trimBtn.addEventListener('click', () => openTrimModal(jobId, c));
+      secondaryRow.appendChild(trimBtn);
 
       if (!c.is_recap) {
         // Always offered, even with neither field set -- a clip old
