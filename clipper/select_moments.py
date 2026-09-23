@@ -302,7 +302,10 @@ Transcript:
             continue
         if end - start < min_len * 0.6:  # allow a little slack vs. exact min_len
             continue
-        if end - start > max_len * 1.2:
+        # max_len is a hard ceiling, unlike min_len: a Shorts clip even a few
+        # seconds over 60s lands as a regular video when uploaded through the
+        # app (see channel_insights.MAX_SHORT_SECONDS).
+        if end - start > max_len:
             end = start + max_len
         title = str(item.get("title", "")).strip() or "Untitled clip"
         picks.append(ClipPick(
@@ -419,7 +422,7 @@ Candidate windows:
             continue
         if end - start < min_len * 0.6:
             continue
-        if end - start > max_len * 1.2:
+        if end - start > max_len:  # hard ceiling -- see select_clips
             end = start + max_len
         title = str(item.get("title", "")).strip() or "Untitled clip"
         seen_indices.add(idx)

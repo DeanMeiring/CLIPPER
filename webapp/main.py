@@ -1724,6 +1724,16 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     if not path.is_file():
         raise HTTPException(404, "clip file not found on disk")
 
+    is_recap = bool(clip.get("is_recap"))
+    posted_duration = round(float(clip.get("duration") or 0) - req.trim_start - req.trim_end, 2)
+    if not is_recap and posted_duration > MAX_SHORT_SECONDS:
+        raise HTTPException(
+            400,
+            f"This clip would upload at {posted_duration:.1f}s. Uploads from the app over {MAX_SHORT_SECONDS}s "
+            f"land as regular videos, not Shorts -- trim at least {posted_duration - MAX_SHORT_SECONDS:.1f}s off, "
+            "or download it and post it from your phone.",
+        )
+
     trimmed_path = None
     if req.trim_start > 0 or req.trim_end > 0:
         trimmed_path = path.with_name(f".{path.stem}.trimmed{path.suffix}")
@@ -1736,7 +1746,6 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     else:
         upload_path = path
 
-    is_recap = bool(clip.get("is_recap"))
     try:
         video_id = youtube_upload.upload_video(
             access_token, upload_path,
@@ -1757,7 +1766,6 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         clip_id = _registry_id(job_id, clip)
         if clip_registry.get_record(_clip_registry_path, clip_id) is None:
             _backfill_clip_record(job_id, job, clip)
-        posted_duration = round(float(clip.get("duration") or 0) - req.trim_start - req.trim_end, 2)
         clip_registry.link_video(_clip_registry_path, clip_id, video_id, "upload", posted_duration=posted_duration)
     with jobs_lock:
         for c in (jobs.get(job_id) or {}).get("clips") or []:
@@ -1765,7 +1773,10 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
                 c["youtube_video_id"] = video_id
     _persist(job_id)
 
-    return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
+    # A youtu.be link can open a Short in the regular player, which looks
+    # just like a failed Shorts upload -- link Shorts to the Shorts player.
+    url = f"https://youtu.be/{video_id}" if is_recap else f"https://youtube.com/shorts/{video_id}"
+    return {"ok": True, "video_id": video_id, "url": url}
 
 
 def _thumbnail_default_text(clip: dict) -> str:
@@ -4769,11 +4780,16 @@ let youtubeUploadFilename = null;
 // truth for what ffmpeg will actually trim against, not whatever got
 // rounded into the job's metadata at render time.
 let youtubeUploadDuration = 0;
+let youtubeUploadIsShort = true;
 let thumbnailJobId = null;
 let thumbnailFilename = null;
 let thumbnailText = '';
 let thumbnailSelectedIndex = null;
 let thumbnailFrameTimes = {};
+
+// Matches channel_insights.MAX_SHORT_SECONDS -- the server refuses longer
+// Shorts uploads too; this just says so before the click.
+const SHORTS_MAX_SECONDS = 60;
 
 function refreshYoutubeUploadTrimHint() {
   const trimStart = Math.max(0, parseFloat(youtubeUploadTrimStart.value) || 0);
@@ -4782,6 +4798,11 @@ function refreshYoutubeUploadTrimHint() {
   if (resultSeconds < 1) {
     youtubeUploadTrimHint.textContent =
       `Clip is ${youtubeUploadDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.`;
+    youtubeUploadGoBtn.disabled = true;
+  } else if (youtubeUploadIsShort && resultSeconds > SHORTS_MAX_SECONDS + 0.05) {
+    youtubeUploadTrimHint.textContent =
+      `Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploads from the app over ${SHORTS_MAX_SECONDS}s land as regular videos, `
+      + `not Shorts. Trim at least ${(resultSeconds - SHORTS_MAX_SECONDS).toFixed(1)}s more.`;
     youtubeUploadGoBtn.disabled = true;
   } else {
     youtubeUploadTrimHint.textContent =
@@ -4806,6 +4827,7 @@ function openYoutubeUploadModal(jobId, clip) {
   youtubeUploadJobId = jobId;
   youtubeUploadFilename = clip.file;
   youtubeUploadDuration = clip.duration || 0;
+  youtubeUploadIsShort = !clip.is_recap;
   youtubeUploadTitleHint.textContent = `"${clip.upload_title || clip.title}"`;
   youtubeUploadPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
   youtubeUploadPreview.onloadedmetadata = () => {
@@ -5052,7 +5074,9 @@ async function poll(jobId) {
 
     if (c.youtube_video_id) {
       const posted = document.createElement('a');
-      posted.href = `https://youtu.be/${encodeURIComponent(c.youtube_video_id)}`;
+      posted.href = c.is_recap
+        ? `https://youtu.be/${encodeURIComponent(c.youtube_video_id)}`
+        : `https://youtube.com/shorts/${encodeURIComponent(c.youtube_video_id)}`;
       posted.target = '_blank';
       posted.rel = 'noopener';
       posted.textContent = '✅ Posted to YouTube';
@@ -5745,7 +5769,7 @@ function buildVideoTable(videos) {
   videos.forEach(v => {
     const row = el('tr', { className: v.too_new_to_judge ? 'thin' : '' });
     const titleCell = el('td');
-    const link = el('a', { text: v.title, href: `https://youtu.be/${encodeURIComponent(v.id)}` });
+    const link = el('a', { text: v.title, href: `https://youtube.com/shorts/${encodeURIComponent(v.id)}` });
     link.target = '_blank';
     link.rel = 'noopener';
     titleCell.appendChild(link);
