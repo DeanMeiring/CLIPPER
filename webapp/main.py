@@ -15,6 +15,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
@@ -53,6 +54,9 @@ from clipper.trending import (
 from clipper.notify import send_telegram
 from clipper.channel_insights import get_channel_snapshot, MAX_SHORT_SECONDS
 from clipper import channel_strategy
+from clipper import clip_features
+from clipper import clip_performance
+from clipper import clip_registry
 from clipper.channel_strategy import get_ai_overview
 from clipper import competitor_discovery
 from clipper import competitor_content
@@ -78,6 +82,9 @@ _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
 _reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
 _recap_episode_path = BASE_DIR / "_recap_episode_number.json"
 _game_recap_episode_path = BASE_DIR / "_game_recap_episode_numbers.json"
+# Outlives the jobs themselves -- see clipper/clip_registry.py.
+_clip_registry_path = BASE_DIR / "_clip_registry.json"
+_retention_curves_path = BASE_DIR / "_retention_curves.json"
 
 
 def _load_strategy_notes() -> Optional[str]:
@@ -555,6 +562,7 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         facecam_uncertain = False
         source_frame_name = None
         has_trusted_facecam = False
+        final_layout = layout
         if isinstance(layout, (SplitLayout, MultiCamSplitLayout)):
             has_trusted_facecam = True
             # This briefly ran on single-cam only, on the theory that a check
@@ -607,6 +615,7 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
                         LetterboxLayout() if is_wide_scene else center_crop_layout(video_path, target_w=1080, target_h=1920)
                     )
                     _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
+                    final_layout = fallback_layout
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
                 facecam_uncertain = not is_wide_scene
@@ -624,6 +633,8 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         if _save_source_still(video_path, pick.start, pick.end, source_frame_path):
             source_frame_name = source_frame_path.name
             print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
+
+        _record_clip(job_id, pick, clip_words, out_path, final_layout)
 
         clips_meta.append({
             "file": out_path.name,
@@ -664,6 +675,251 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         _set(job_id, clips=list(clips_meta))
         _progress(job_id, render_base + render_span * (i / len(render_items)))
     return clips_meta
+
+
+def _layout_name(layout) -> str:
+    if isinstance(layout, MultiCamSplitLayout):
+        return "multicam"
+    if isinstance(layout, SplitLayout):
+        return "split"
+    if isinstance(layout, LetterboxLayout):
+        return "letterbox"
+    return "crop"
+
+
+def _registry_id(job_id: str, clip: dict) -> str:
+    return clip_registry.clip_id_for(job_id, clip["start"], clip["end"], clip.get("window_index"))
+
+
+def _record_clip(job_id: str, pick, clip_words: List[Word], out_path: Path, layout) -> None:
+    """Save what this clip looks like to the clip registry, so its posted
+    video's performance can later be compared against it. Never allowed to
+    fail the render it's recording -- a clip with no record just sits out
+    the comparisons."""
+    try:
+        with jobs_lock:
+            job = jobs.get(job_id) or {}
+            source_title, pipeline = job.get("source_title"), job.get("pipeline")
+        clip_registry.upsert(_clip_registry_path, {
+            "clip_id": clip_registry.clip_id_for(job_id, pick.start, pick.end, getattr(pick, "window_index", None)),
+            "job_id": job_id,
+            "file": out_path.name,
+            "created_at": time.time(),
+            "source_title": source_title,
+            "pipeline": pipeline,
+            "start": pick.start,
+            "end": pick.end,
+            "duration": round(pick.end - pick.start, 2),
+            "title": pick.title,
+            "hook_caption": pick.hook_caption,
+            "upload_title": pick.upload_title,
+            "reason": pick.reason,
+            "layout": _layout_name(layout),
+            "features": clip_features.measure_clip(clip_words, pick.start, pick.end, out_path),
+        })
+    except Exception as e:  # noqa: BLE001 - recording must never fail a render
+        print(f"[clip_registry] could not record {out_path.name}: {e}", flush=True)
+
+
+def _cached_words(raw_dir: Path) -> dict:
+    """Word lists straight from a job's transcript caches, keyed by
+    candidate-window index (None for the single-transcript pipeline).
+    Cache files only -- the regenerate loaders fall back to re-running
+    Whisper when a cache is missing, far too slow to do across old jobs."""
+    result: dict = {}
+    try:
+        transcript = raw_dir / "transcript.json"
+        if transcript.exists():
+            data = json.loads(transcript.read_text(encoding="utf-8"))
+            result[None] = [Word(**w) for w in data["words"]]
+        candidates = raw_dir / "candidates.json"
+        if candidates.exists():
+            for c in json.loads(candidates.read_text(encoding="utf-8")):
+                result[c["index"]] = [Word(**w) for w in c["words"]]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"[clip_registry] unreadable transcript cache in {raw_dir}: {e}", flush=True)
+    return result
+
+
+def _backfill_clip_record(job_id: str, job: dict, clip: dict, words_by_window: Optional[dict] = None) -> None:
+    """A registry record for a clip rendered before the registry existed,
+    built from what its job still has on disk. Speech timing comes from the
+    cached transcript; audio is measured later by _measure_missing_audio,
+    and only for clips that actually got posted."""
+    if words_by_window is None:
+        words_by_window = _cached_words(BASE_DIR / job_id / "_source")
+    words = words_by_window.get(clip.get("window_index"))
+    features = {}
+    if words is not None:
+        clip_words = [w for w in words if w.start >= clip["start"] and w.end <= clip["end"]]
+        features = clip_features.speech_features(clip_words, clip["start"], clip["end"])
+    clip_registry.upsert(_clip_registry_path, {
+        "clip_id": _registry_id(job_id, clip),
+        "job_id": job_id,
+        "file": clip.get("file"),
+        # The real render time was never stored, and job.created_at resets
+        # on every "generate more" -- unknown beats a wrong timestamp that
+        # could rule out a genuine title match.
+        "created_at": None,
+        "source_title": job.get("source_title"),
+        "pipeline": job.get("pipeline"),
+        "start": clip["start"],
+        "end": clip["end"],
+        "duration": clip.get("duration") or round(clip["end"] - clip["start"], 2),
+        "title": clip.get("title"),
+        "hook_caption": clip.get("hook_caption"),
+        "upload_title": clip.get("upload_title"),
+        "reason": clip.get("reason"),
+        # Crop vs. auto-letterbox was never stored per clip, so this can't
+        # be reconstructed -- these clips just sit out the layout comparison.
+        "layout": None,
+        "features": features,
+    })
+
+
+def _backfill_clip_registry() -> None:
+    known = {r["clip_id"] for r in clip_registry.all_records(_clip_registry_path)}
+    with jobs_lock:
+        job_items = [(job_id, dict(job), list(job.get("clips") or [])) for job_id, job in jobs.items()]
+    for job_id, job, clips in job_items:
+        missing = [
+            c for c in clips
+            if not c.get("is_recap") and c.get("start") is not None and c.get("end") is not None
+            and _registry_id(job_id, c) not in known
+        ]
+        if not missing:
+            continue
+        words_by_window = _cached_words(BASE_DIR / job_id / "_source")
+        for c in missing:
+            _backfill_clip_record(job_id, job, c, words_by_window)
+
+
+def _measure_missing_audio(records: list) -> None:
+    """Audio features for posted clips that don't have them yet (clips
+    backfilled from before the registry existed). Posted clips only: they're
+    the only ones a measurement can be compared against, and each costs an
+    ffmpeg pass. A clip whose audio can't be read is marked so it isn't
+    retried on every page load."""
+    for r in records:
+        features = r.get("features") or {}
+        if not r.get("video_id") or "opening_vs_median_db" in features or features.get("audio_unavailable"):
+            continue
+        path = BASE_DIR / (r.get("job_id") or "") / (r.get("file") or "")
+        if not r.get("job_id") or not r.get("file") or not path.is_file():
+            continue
+        audio = clip_features.audio_features(path, r.get("duration") or 0.0)
+        clip_registry.update_fields(
+            _clip_registry_path, r["clip_id"],
+            features={**features, **(audio or {"audio_unavailable": True})},
+        )
+
+
+def _published_ts(published_at: Optional[str]) -> Optional[float]:
+    if not published_at:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(published_at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _load_retention_curves(access_token: str, channel_id: str, videos: list) -> dict:
+    """Retention curves for these videos, reusing the on-disk copy while
+    it's fresh -- a Short's curve barely moves once it's a week old, so
+    re-asking YouTube for all ~50 on every page load would only add seconds
+    of waiting."""
+    try:
+        cache = json.loads(_retention_curves_path.read_text(encoding="utf-8")) if _retention_curves_path.exists() else {}
+    except (OSError, ValueError):
+        cache = {}
+    now = time.time()
+
+    def is_stale(v: dict) -> bool:
+        entry = cache.get(v["id"])
+        if entry is None:
+            return True
+        max_age = 6 * 3600 if (v.get("age_days") or 0) < 7 else 3 * 86400
+        return now - entry.get("fetched_at", 0) > max_age
+
+    def fetch(v: dict):
+        # A day early: Analytics days aren't UTC days, and a start date
+        # after the real publish date would cut off the first day's views.
+        published = (_published_ts(v.get("published_at")) or now) - 86400
+        start_date = datetime.date.fromtimestamp(published).isoformat()
+        try:
+            return v["id"], youtube_analytics.get_retention_curve(access_token, channel_id, v["id"], start_date)
+        except Exception as e:  # noqa: BLE001 - one missing curve shouldn't blank the rest
+            print(f"[clip_performance] retention curve for {v['id']} failed: {e}", flush=True)
+            return v["id"], None
+
+    todo = [v for v in videos if is_stale(v)]
+    if todo:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for video_id, curve in pool.map(fetch, todo):
+                if curve is not None:
+                    cache[video_id] = {"fetched_at": now, "curve": curve}
+        wanted = {v["id"] for v in videos}
+        cache = {video_id: entry for video_id, entry in cache.items() if video_id in wanted}
+        try:
+            tmp = _retention_curves_path.with_name(f".{_retention_curves_path.name}.tmp-{threading.get_ident()}")
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            tmp.replace(_retention_curves_path)
+        except OSError as e:
+            print(f"[clip_performance] could not save the retention cache: {e}", flush=True)
+    return {video_id: entry["curve"] for video_id, entry in cache.items()}
+
+
+_clip_performance_cache: dict = {}
+# Long enough that the Analyze page and the AI overview button share one
+# fetch, short enough that a clip posted a few minutes ago shows up.
+_CLIP_PERFORMANCE_TTL_SECONDS = 600
+
+
+def _gather_clip_performance(refresh: bool = False) -> dict:
+    """The connected channel's recent Shorts with their real retention
+    curves, matched back to the clips this app made -- see
+    clipper/clip_performance.py for what gets compared."""
+    cached = _clip_performance_cache.get("data")
+    if not refresh and cached and time.time() - _clip_performance_cache.get("at", 0) < _CLIP_PERFORMANCE_TTL_SECONDS:
+        return cached
+    if not youtube_oauth.is_configured():
+        return {"available": False, "reason": "YouTube OAuth isn't configured on this deployment -- retention curves only come from a connected channel's own Analytics."}
+    access_token = _youtube_token_store.get_valid_access_token()
+    if not access_token:
+        return {"available": False, "reason": "Connect your YouTube account (Channel insights, above) -- retention curves only exist for your own channel's videos."}
+    own = youtube_analytics.get_own_channel(access_token)
+    if not own:
+        return {"available": False, "reason": "The connected Google account has no YouTube channel."}
+    snapshot = get_channel_snapshot(own["id"], sample_size=50)
+    if not snapshot:
+        return {"available": False, "reason": "Couldn't list your channel's uploads -- is YOUTUBE_API_KEY set?"}
+    videos = snapshot.get("recent_videos") or []
+
+    _backfill_clip_registry()
+    match_input = [
+        {
+            "id": v["id"], "title": v["title"], "duration_seconds": v.get("duration_seconds"),
+            "published_ts": _published_ts(v.get("published_at")),
+        }
+        for v in videos
+    ]
+    for clip_id, video_id, posted in clip_registry.match_uploads(clip_registry.all_records(_clip_registry_path), match_input):
+        clip_registry.link_video(_clip_registry_path, clip_id, video_id, "title_match", posted_duration=posted)
+    _measure_missing_audio(clip_registry.all_records(_clip_registry_path))
+    records = clip_registry.all_records(_clip_registry_path)
+
+    metrics = youtube_analytics.get_video_retention(access_token, own["id"], lookback_days=365, max_videos=200)
+    curves = _load_retention_curves(access_token, own["id"], videos)
+    data = {
+        "available": True,
+        "channel_title": own["title"],
+        "clips_recorded": len(records),
+        "clips_linked": sum(1 for r in records if r.get("video_id")),
+        "generated_at": time.time(),
+        **clip_performance.build_stats(videos, metrics, curves, records),
+    }
+    _clip_performance_cache.update(at=time.time(), data=data)
+    return data
 
 
 def _cache_candidates(raw_dir: Path, candidates: list) -> None:
@@ -936,6 +1192,7 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
             failed.append(f"{filename}: {e}")
             continue
         updated.append(filename)
+        clip_registry.update_fields(_clip_registry_path, _registry_id(job_id, clip), layout=_layout_name(layout))
         with jobs_lock:
             for c in jobs[job_id].get("clips") or []:
                 if c.get("file") == filename:
@@ -996,6 +1253,7 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
             failed.append(f"{filename}: {e}")
             continue
         updated.append(filename)
+        clip_registry.update_fields(_clip_registry_path, _registry_id(job_id, clip), layout="letterbox")
         with jobs_lock:
             for c in jobs[job_id].get("clips") or []:
                 if c.get("file") == filename:
@@ -1492,6 +1750,20 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     finally:
         if trimmed_path is not None:
             trimmed_path.unlink(missing_ok=True)
+
+    # Link the posted video back to this clip so its real retention can be
+    # compared against what the clip looked like (see /api/clip-performance).
+    if not is_recap:
+        clip_id = _registry_id(job_id, clip)
+        if clip_registry.get_record(_clip_registry_path, clip_id) is None:
+            _backfill_clip_record(job_id, job, clip)
+        posted_duration = round(float(clip.get("duration") or 0) - req.trim_start - req.trim_end, 2)
+        clip_registry.link_video(_clip_registry_path, clip_id, video_id, "upload", posted_duration=posted_duration)
+    with jobs_lock:
+        for c in (jobs.get(job_id) or {}).get("clips") or []:
+            if c.get("file") == filename:
+                c["youtube_video_id"] = video_id
+    _persist(job_id)
 
     return {"ok": True, "video_id": video_id, "url": f"https://youtu.be/{video_id}"}
 
@@ -3156,15 +3428,39 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
                     ],
                 })
 
+    # Same numbers the "What your Shorts actually do" panel shows (cached,
+    # so this usually costs nothing extra) -- the overview has to cite
+    # them rather than form its own impression of the channel.
+    performance_text = None
+    try:
+        performance = _gather_clip_performance()
+        if performance.get("available"):
+            performance_text = clip_performance.render_prompt_text(performance)
+    except Exception as e:  # noqa: BLE001 - the overview still works from the channel data without it
+        print(f"[channel_strategy] clip performance unavailable for the overview: {e}", flush=True)
+
     try:
         overview = get_ai_overview(
             snapshot, data.get("analytics"), focus=req.focus,
             competitors=competitor_snapshots, content_analyses=content_analyses,
+            performance_text=performance_text,
         )
     except Exception as e:
         raise HTTPException(502, f"Could not generate an overview: {e}") from e
     channel_strategy.save_overview(_channel_strategy_path, overview, channel_title=snapshot.get("channel_title"))
     return {"overview": overview}
+
+
+@protected.get("/api/clip-performance")
+def clip_performance_report(refresh: bool = False) -> dict:
+    """What the channel's posted Shorts actually did -- real retention
+    curves, and how uploads with different measured traits compare. Backs
+    the "What your Shorts actually do" panel and feeds the AI overview."""
+    try:
+        return _gather_clip_performance(refresh=refresh)
+    except Exception as e:  # noqa: BLE001 - show the reason on the page instead of a bare 500
+        traceback.print_exc()
+        return {"available": False, "reason": f"Could not load clip performance: {e}"}
 
 
 @protected.delete("/api/channel-insights/overview")
@@ -4754,6 +5050,16 @@ async function poll(jobId) {
       div.appendChild(em);
     }
 
+    if (c.youtube_video_id) {
+      const posted = document.createElement('a');
+      posted.href = `https://youtu.be/${encodeURIComponent(c.youtube_video_id)}`;
+      posted.target = '_blank';
+      posted.rel = 'noopener';
+      posted.textContent = '✅ Posted to YouTube';
+      posted.style.display = 'block';
+      div.appendChild(posted);
+    }
+
     // Watchable right here -- downloading is now an extra, optional step
     // (the button below), not the only way to see what got rendered.
     const preview = document.createElement('video');
@@ -5087,6 +5393,26 @@ ANALYTICS_HTML = """<!doctype html>
   .bar-track { flex: 1; height: 20px; background: var(--track); border-radius: 4px; }
   .bar-fill { height: 16px; margin-top: 2px; border-radius: 0 4px 4px 0; min-width: 3px; }
   .bar-value { flex: 0 0 auto; min-width: 46px; text-align: right; font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
+  .stat-tile { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .stat-label { font-size: 0.72rem; color: var(--muted); }
+  .stat-value { font-size: 1.35rem; font-weight: 650; margin-top: 2px; }
+  .stat-sub { font-size: 0.68rem; color: var(--muted); margin-top: 2px; }
+  .table-scroll { overflow-x: auto; margin-top: 10px; }
+  .perf-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  .perf-table th, .perf-table td {
+    padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border);
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  .perf-table th:first-child, .perf-table td:first-child { text-align: left; white-space: normal; }
+  .perf-table thead th { color: var(--muted); font-weight: 600; font-size: 0.72rem; }
+  .perf-table tr.group-name th { text-align: left; padding-top: 14px; font-weight: 700; color: var(--text); }
+  .perf-table tr.thin td { color: var(--muted); }
+  @media (max-width: 480px) {
+    .perf-table th, .perf-table td { padding: 5px 4px; }
+  }
+  details.perf-videos { margin-top: 16px; }
+  details.perf-videos summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -5106,6 +5432,14 @@ ANALYTICS_HTML = """<!doctype html>
 <div class="section">
   <label style="margin-top:0">📈 Channel insights — best day to post</label>
   <div id="insights-body"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🎯 What your Shorts actually do</label>
+  <p class="hint">Real retention from YouTube Analytics for your recent Shorts, and how clips with different
+    traits compare. Clips made here are matched to the video you posted, by the upload button or by title.</p>
+  <div id="clip-perf-body"><div class="hint">Loading...</div></div>
+  <button id="clip-perf-refresh-btn" type="button">↻ Refresh from YouTube</button>
 </div>
 
 <div class="section">
@@ -5319,6 +5653,177 @@ async function loadChannelInsights() {
   ));
 }
 loadChannelInsights();
+
+function fmtFraction(f) { return f == null ? '–' : `${Math.round(f * 100)}%`; }
+function fmtPercent(p) { return p == null ? '–' : `${Math.round(p)}%`; }
+function fmtCount(n) { return n == null ? '–' : Number(n).toLocaleString(); }
+
+function statTile(label, value, sub) {
+  const tile = el('div', { className: 'stat-tile' });
+  tile.appendChild(el('div', { className: 'stat-label', text: label }));
+  tile.appendChild(el('div', { className: 'stat-value', text: value }));
+  if (sub) tile.appendChild(el('div', { className: 'stat-sub', text: sub }));
+  return tile;
+}
+
+// Share of views still watching at four checkpoints -- one series, so one
+// hue and no legend; every bar carries its value at the tip, and the title
+// attribute spells out what the number means on hover.
+function buildDropOffBlock(s) {
+  const block = el('div', { className: 'chart-block' });
+  const titleRow = el('div', { className: 'chart-title' });
+  titleRow.style.flexWrap = 'wrap';
+  titleRow.appendChild(el('span', { text: 'Where viewers leave' }));
+  titleRow.appendChild(el('span', { className: 'hint', text: 'share of views still watching, averaged over your Shorts' }));
+  block.appendChild(titleRow);
+  const points = [
+    ['At 1 second', s.watch_1s],
+    ['At 3 seconds', s.watch_3s],
+    ['Halfway', s.watch_mid],
+    ['Near the end', s.watch_end],
+  ];
+  const scaleMax = Math.max(1, ...points.map(p => p[1] || 0));
+  points.forEach(([label, value]) => {
+    const row = el('div', { className: 'bar-row' });
+    row.title = `${fmtFraction(value)} of views were still watching ${label.toLowerCase()}`;
+    const labelCol = el('div', { className: 'bar-label' });
+    labelCol.appendChild(el('div', { className: 'bar-title', text: label }));
+    row.appendChild(labelCol);
+    const track = el('div', { className: 'bar-track' });
+    const fill = el('div', { className: 'bar-fill' });
+    fill.style.width = Math.max(1, Math.round(((value || 0) / scaleMax) * 100)) + '%';
+    fill.style.background = 'var(--chart-you)';
+    track.appendChild(fill);
+    row.appendChild(track);
+    row.appendChild(el('div', { className: 'bar-value', text: fmtFraction(value) }));
+    block.appendChild(row);
+  });
+  return block;
+}
+
+function buildComparisonTable(groups) {
+  const wrap = el('div', { className: 'table-scroll' });
+  const table = el('table', { className: 'perf-table' });
+  const head = el('thead');
+  const headRow = el('tr');
+  ['', 'Shorts', 'At 3s', 'Watched', 'Median views'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = el('tbody');
+  groups.forEach(g => {
+    const nameRow = el('tr', { className: 'group-name' });
+    const nameCell = el('th', { text: g.name + (g.made_here_only ? ' (clips made here only)' : '') });
+    nameCell.colSpan = 5;
+    nameRow.appendChild(nameCell);
+    body.appendChild(nameRow);
+    g.buckets.forEach(b => {
+      const row = el('tr', { className: b.enough ? '' : 'thin' });
+      row.appendChild(el('td', { text: b.label + (b.enough ? '' : ' *') }));
+      row.appendChild(el('td', { text: String(b.n) }));
+      row.appendChild(el('td', { text: fmtFraction(b.watch_3s) }));
+      row.appendChild(el('td', { text: fmtPercent(b.avg_view_pct) }));
+      row.appendChild(el('td', { text: fmtCount(b.median_views) }));
+      body.appendChild(row);
+    });
+  });
+  table.appendChild(body);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function buildVideoTable(videos) {
+  const details = el('details', { className: 'perf-videos' });
+  details.appendChild(el('summary', { text: `Every Short in this analysis (${videos.length})` }));
+  const wrap = el('div', { className: 'table-scroll' });
+  const table = el('table', { className: 'perf-table' });
+  const head = el('thead');
+  const headRow = el('tr');
+  ['Title', 'At 3s', 'Watched', 'Views', 'Length', 'Posted', 'Made here'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = el('tbody');
+  videos.forEach(v => {
+    const row = el('tr', { className: v.too_new_to_judge ? 'thin' : '' });
+    const titleCell = el('td');
+    const link = el('a', { text: v.title, href: `https://youtu.be/${encodeURIComponent(v.id)}` });
+    link.target = '_blank';
+    link.rel = 'noopener';
+    titleCell.appendChild(link);
+    if (v.too_new_to_judge) titleCell.appendChild(el('span', { className: 'hint', text: ' (too new to judge)' }));
+    row.appendChild(titleCell);
+    row.appendChild(el('td', { text: fmtFraction(v.retention ? v.retention.watch_3s : null) }));
+    row.appendChild(el('td', { text: fmtPercent(v.avg_view_pct) }));
+    row.appendChild(el('td', { text: fmtCount(v.views) }));
+    row.appendChild(el('td', { text: v.duration != null ? `${Math.round(v.duration)}s` : '–' }));
+    row.appendChild(el('td', { text: v.published_at ? new Date(v.published_at).toLocaleDateString() : '–' }));
+    const madeHere = !v.made_here ? '–' : (v.clip && v.clip.link_method === 'upload' ? '✓ uploaded here' : '✓ title match');
+    row.appendChild(el('td', { text: madeHere }));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  wrap.appendChild(table);
+  details.appendChild(wrap);
+  return details;
+}
+
+async function loadClipPerformance(refresh) {
+  const body = document.getElementById('clip-perf-body');
+  const refreshBtn = document.getElementById('clip-perf-refresh-btn');
+  refreshBtn.disabled = true;
+  // Keep the previous numbers on screen (dimmed) while refetching instead
+  // of blanking the panel.
+  body.style.opacity = '0.5';
+  let data;
+  try {
+    const resp = await fetch('/api/clip-performance' + (refresh ? '?refresh=true' : ''));
+    data = await resp.json();
+  } catch (e) {
+    data = { available: false, reason: 'Could not load clip performance.' };
+  }
+  body.style.opacity = '';
+  refreshBtn.disabled = false;
+  body.innerHTML = '';
+  if (!data.available) {
+    body.appendChild(el('div', { className: 'hint', text: data.reason || 'Not available.' }));
+    return;
+  }
+  const s = data.summary;
+  body.appendChild(el('div', {
+    className: 'hint',
+    text: `${s.shorts} Shorts with settled numbers (${s.with_retention} with a retention curve, ${s.too_new} too new to judge) · `
+      + `${data.clips_linked} of ${data.clips_recorded} clips made here matched to a posted video`,
+  }));
+  if (!s.shorts) {
+    body.appendChild(el('div', { className: 'hint', text: 'Nothing settled to analyze yet -- Shorts need about 2 days before their numbers mean much.' }));
+    return;
+  }
+  const tiles = el('div', { className: 'stat-row' });
+  tiles.appendChild(statTile('Median views', fmtCount(s.median_views)));
+  tiles.appendChild(statTile('Watched on average', fmtPercent(s.avg_view_pct), 'of each Short, replays included'));
+  tiles.appendChild(statTile('Still watching at 3s', fmtFraction(s.watch_3s), 'per view'));
+  if (s.opening_vs_similar != null) {
+    tiles.appendChild(statTile('First 3s vs similar videos', s.opening_vs_similar.toFixed(2), '0.5 = typical for the length'));
+  }
+  body.appendChild(tiles);
+  if (s.watch_1s != null) {
+    body.appendChild(buildDropOffBlock(s));
+    if (s.typical_steepest_drop_at != null) {
+      body.appendChild(el('div', { className: 'hint', text: `The single biggest drop usually lands ${s.typical_steepest_drop_at}s in.` }));
+    }
+  }
+  if (data.groups && data.groups.length) {
+    const note = el('div', {
+      className: 'hint',
+      text: 'Rows marked * (greyed out) have fewer than 5 Shorts behind them -- too few to read anything into yet.',
+    });
+    note.style.marginTop = '14px';
+    body.appendChild(note);
+    body.appendChild(buildComparisonTable(data.groups));
+  }
+  if (data.videos && data.videos.length) body.appendChild(buildVideoTable(data.videos));
+}
+loadClipPerformance(false);
+document.getElementById('clip-perf-refresh-btn').addEventListener('click', () => loadClipPerformance(true));
 
 const aiOverviewBtn = document.getElementById('ai-overview-btn');
 const aiOverviewBody = document.getElementById('ai-overview-body');
