@@ -1698,6 +1698,11 @@ class YouTubeUploadRequest(BaseModel):
     # carries them along for free.
     trim_start: float = 0.0
     trim_end: float = 0.0
+    # Claude's generated title/description, as edited in the upload modal --
+    # None (not sent, e.g. an older client) falls back to the clip's stored
+    # values; an empty description is a deliberate clear, not "unset".
+    title: Optional[str] = None
+    description: Optional[str] = None
 
 
 @protected.post("/api/jobs/{job_id}/clips/{filename}/upload-youtube")
@@ -1705,7 +1710,8 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     """Post one already-rendered, already-hand-picked clip straight to the
     connected YouTube channel -- the manual "I've decided this one's going
     up" action, never a bulk or automatic publish. Uses the clip's
-    already-generated upload_title/description as-is."""
+    already-generated upload_title/description, or the edited versions from
+    the upload modal if the creator changed them before posting."""
     with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
@@ -1723,6 +1729,11 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     path = BASE_DIR / job_id / filename
     if not path.is_file():
         raise HTTPException(404, "clip file not found on disk")
+
+    title = (req.title if req.title is not None else clip.get("upload_title") or clip.get("title") or filename).strip()
+    if not title:
+        raise HTTPException(400, "Title cannot be empty.")
+    description = req.description if req.description is not None else (clip.get("description") or "")
 
     is_recap = bool(clip.get("is_recap"))
     posted_duration = round(float(clip.get("duration") or 0) - req.trim_start - req.trim_end, 2)
@@ -1749,8 +1760,8 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
     try:
         video_id = youtube_upload.upload_video(
             access_token, upload_path,
-            title=clip.get("upload_title") or clip.get("title") or filename,
-            description=clip.get("description") or "",
+            title=title,
+            description=description,
             privacy_status=req.privacy_status,
             is_short=not is_recap,
         )
@@ -1771,6 +1782,10 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         for c in (jobs.get(job_id) or {}).get("clips") or []:
             if c.get("file") == filename:
                 c["youtube_video_id"] = video_id
+                # Reflect what's actually live -- the modal may have edited
+                # these from what Claude originally generated.
+                c["upload_title"] = title
+                c["description"] = description
     _persist(job_id)
 
     # A youtu.be link can open a Short in the regular player, which looks
@@ -3994,8 +4009,12 @@ INDEX_HTML = """<!doctype html>
 <div id="youtube-upload-modal-overlay">
   <div class="modal" style="max-height:92vh;overflow:auto">
     <p>Upload to YouTube</p>
-    <p class="hint" id="youtube-upload-title-hint"></p>
     <video id="youtube-upload-preview" controls preload="metadata" style="width:100%;max-height:40vh;border-radius:8px;background:var(--track);display:block;object-fit:contain"></video>
+    <label>Title</label>
+    <input id="youtube-upload-title-input" type="text" maxlength="100">
+    <p class="hint" id="youtube-upload-title-counter"></p>
+    <label>Description</label>
+    <textarea id="youtube-upload-description-input" rows="3"></textarea>
     <label class="privacy-option">
       <input type="radio" name="youtube-privacy" value="unlisted" checked>
       <span>
@@ -4755,7 +4774,9 @@ facecamIrlBtn.addEventListener('click', async () => {
 });
 
 const youtubeUploadModal = document.getElementById('youtube-upload-modal-overlay');
-const youtubeUploadTitleHint = document.getElementById('youtube-upload-title-hint');
+const youtubeUploadTitleInput = document.getElementById('youtube-upload-title-input');
+const youtubeUploadTitleCounter = document.getElementById('youtube-upload-title-counter');
+const youtubeUploadDescriptionInput = document.getElementById('youtube-upload-description-input');
 const youtubeUploadPreview = document.getElementById('youtube-upload-preview');
 const youtubeUploadGoBtn = document.getElementById('youtube-upload-go-btn');
 const youtubeUploadTrimStart = document.getElementById('youtube-upload-trim-start');
@@ -4823,12 +4844,23 @@ youtubeUploadSetEndBtn.addEventListener('click', () => {
   refreshYoutubeUploadTrimHint();
 });
 
+function refreshYoutubeUploadTitleCounter() {
+  const len = youtubeUploadTitleInput.value.length;
+  youtubeUploadTitleCounter.textContent = `${len}/100`;
+}
+youtubeUploadTitleInput.addEventListener('input', refreshYoutubeUploadTitleCounter);
+
+// Claude's generated title/description are sometimes wrong (misheard name,
+// wrong game, an awkward hook) -- editable here so a bad one doesn't have
+// to be caught after it's already live, or force posting by hand instead.
 function openYoutubeUploadModal(jobId, clip) {
   youtubeUploadJobId = jobId;
   youtubeUploadFilename = clip.file;
   youtubeUploadDuration = clip.duration || 0;
   youtubeUploadIsShort = !clip.is_recap;
-  youtubeUploadTitleHint.textContent = `"${clip.upload_title || clip.title}"`;
+  youtubeUploadTitleInput.value = clip.upload_title || clip.title || '';
+  youtubeUploadDescriptionInput.value = clip.description || '';
+  refreshYoutubeUploadTitleCounter();
   youtubeUploadPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
   youtubeUploadPreview.onloadedmetadata = () => {
     if (youtubeUploadPreview.duration && isFinite(youtubeUploadPreview.duration)) {
@@ -4864,13 +4896,21 @@ youtubeUploadGoBtn.addEventListener('click', async () => {
     alert('That trim would cut the whole clip -- leave at least a second.');
     return;
   }
+  const title = youtubeUploadTitleInput.value.trim();
+  if (!title) {
+    alert('Title cannot be empty.');
+    return;
+  }
   youtubeUploadGoBtn.disabled = true;
   youtubeUploadGoBtn.textContent = (trimStart || trimEnd) ? 'Trimming & uploading...' : 'Uploading...';
   try {
     const resp = await fetch(`/api/jobs/${jobId}/clips/${filename}/upload-youtube`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ privacy_status: privacyStatus, trim_start: trimStart, trim_end: trimEnd }),
+      body: JSON.stringify({
+        privacy_status: privacyStatus, trim_start: trimStart, trim_end: trimEnd,
+        title, description: youtubeUploadDescriptionInput.value,
+      }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
