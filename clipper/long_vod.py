@@ -217,6 +217,7 @@ def select_and_map(
     api_key: Optional[str],
     source_title: str,
     strategy_notes: Optional[str] = None,
+    performance_notes: Optional[str] = None,
 ) -> List[Tuple[Path, WindowPick]]:
     """Run Claude selection over the candidates and pair each pick with its
     downloaded video file, ready for the existing render pipeline."""
@@ -227,6 +228,7 @@ def select_and_map(
     picks = select_from_candidate_windows(
         select_input, n_clips=n_clips, min_len=min_len, max_len=max_len,
         focus=focus, api_key=api_key, source_title=source_title, strategy_notes=strategy_notes,
+        performance_notes=performance_notes,
     )
     by_index = {c["index"]: c for c in candidates}
     return [(by_index[p.window_index]["video_path"], p) for p in picks if p.window_index in by_index]

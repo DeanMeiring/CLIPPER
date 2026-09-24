@@ -76,6 +76,7 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
                 "layout": record.get("layout"),
                 "link_method": record.get("link_method"),
                 "hook_caption": record.get("hook_caption"),
+                "hook_text": record.get("hook_text"),
             }
         rows.append(row)
     return rows
@@ -141,6 +142,14 @@ _LAYOUT_LABELS = {
 }
 
 
+def _hook_text(row: dict) -> Optional[str]:
+    clip = row.get("clip")
+    if not clip:
+        return None
+    # Clips made before hook text existed have no field -- they had none.
+    return "yes" if clip.get("hook_text") else "no"
+
+
 def _layout(row: dict) -> Optional[str]:
     clip = row.get("clip")
     if not clip or not clip.get("layout"):
@@ -159,11 +168,12 @@ GROUPS: List[tuple] = [
     ("opening_loudness", "Opening loudness vs the rest of the clip", _opening_loudness,
      ["louder than the rest", "about the same", "quieter than the rest"]),
     ("layout", "Layout", _layout, list(_LAYOUT_LABELS.values())),
+    ("hook_text", "Hook text on screen for the first 3s", _hook_text, ["yes", "no"]),
 ]
 
 # Groups built from this app's own measurements -- only clips made here and
 # matched to a posted video can fill these.
-MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout"}
+MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text"}
 
 
 def _mean(values: list) -> Optional[float]:

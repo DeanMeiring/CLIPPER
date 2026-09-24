@@ -5,9 +5,10 @@ screen (e.g. "MARLON ALMOST KNOCKS OUT JASON"). The curiosity-gap trick
 common on streamer-clip channels.
 
 Deliberately kept separate from the main clip-selection/render pipeline
-(clipper/select_moments.py already writes a milder `hook_caption` per clip,
-but that's just UI/thumbnail text today, never burned into the video) --
-see webapp/main.py's /hook-line page, which lets the user pick an existing
+(clipper/select_moments.py also writes a milder `hook_caption` per clip, which
+the main render boxes at the top of the clip's first 3 seconds unless the job
+turned hook text off -- see captions.build_ass) -- see webapp/main.py's
+/hook-line page, which lets the user pick an existing
 finished clip, generate/edit this line, and render it as its own pass via
 clipper.render.overlay_hook_line. Nothing here touches the original render.
 """
