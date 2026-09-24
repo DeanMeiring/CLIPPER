@@ -271,6 +271,7 @@ def _build_prompt(
     thumbnail_videos: Optional[list] = None,
     top_performers: Optional[list] = None,
     top_performer_basis: str = "none",
+    performance_text: Optional[str] = None,
 ) -> str:
     lines = [
         f"Channel: {snapshot.get('channel_title', 'unknown')}",
@@ -373,6 +374,14 @@ def _build_prompt(
     else:
         lines.append("\n(No connected Analytics account -- only public view counts above, no retention/traffic data.)")
 
+    if performance_text:
+        lines.append(
+            "\nCLIP PERFORMANCE DATA -- this channel's own posted Shorts, measured from their real "
+            "YouTube retention curves, plus traits this app measured on the clips it made. This is "
+            "the strongest evidence here; prefer it over any general rule of thumb:"
+        )
+        lines.append(performance_text)
+
     competitor_block = _format_competitor_block(competitors) if competitors else ""
     content_block = _format_content_analysis_block(content_analyses) if content_analyses else ""
 
@@ -446,6 +455,16 @@ def _build_prompt(
         "difference.\n"
         if (long_form_block or thumbnail_videos) else ""
     )
+    numbers_section = (
+        "\nWHAT YOUR NUMBERS SAY: the 2-3 biggest differences in the CLIP PERFORMANCE DATA\n"
+        "between groups that each have 5+ Shorts, each stated with both groups' numbers and\n"
+        "sizes (e.g. \"20-30s clips: 58% still watching at 3s, n=11, vs 45-60s: 41%, n=8\"),\n"
+        "then the one thing to change because of the biggest one. Weigh the at-3s number\n"
+        "first, then % watched, then views. If no comparison has 5+ Shorts on both sides,\n"
+        "say exactly that and which comparison is closest -- never build a conclusion on a\n"
+        "TOO FEW group. This section may run to 3-4 sentences.\n"
+        if performance_text else ""
+    )
 
     return f"""You're a short-form YouTube strategy advisor looking at one creator's own
 channel data below. Give concrete, specific advice grounded in what's
@@ -454,28 +473,22 @@ that isn't backed by this data.
 {focus_line}
 {data_block}{competitor_section}{content_section}{thumbnails_note}{top_performer_thumbnails_note}
 
-SHORTS RETENTION GROUND TRUTH (use these as the actual bar when judging a
-retention number above, not vague intuition -- these are the real signals
-that separate a Short that holds its audience from one that doesn't):
-- The hook is won or lost in the first 1-3 seconds -- roughly half of all
-  drop-off happens there. The open needs to already BE the moment (or
-  promise one immediately), never a slow lead-in or setup before anything
-  happens.
-- A visual change (a cut, zoom, camera angle, or text-overlay swap) roughly
-  every 1.5-4 seconds keeps attention; long static stretches with nothing
-  changing on screen are where retention bleeds out mid-clip.
-- Length vs. retention is a real tradeoff, not just "shorter is better":
-  15-30s clips typically hold 70-90%+ retention on a strong moment; 30-60s
-  needs tighter pacing to hold up; past ~90s retention drops off hard
-  unless the moment is genuinely exceptional. A weak retention number on a
-  clip pushing toward this app's 180s cap is itself a signal the clip may
-  simply be too long for its own content, not just weakly edited.
-- Burned-in captions measurably help retention (many viewers watch muted) --
-  worth flagging as a fix if a low-retention clip doesn't already have them.
-- As a rough retention bar for THIS content type: under ~40% average
-  view percentage is a real content problem worth digging into, 40-60% is
-  middling, 60%+ is strong and shouldn't be reframed as a problem just
-  because it's not higher.
+HOW TO JUDGE THE NUMBERS:
+- A Short is won or lost in its opening seconds: a viewer who swipes away
+  never sees the moment. The "still watching at 1s/3s" numbers and the
+  first-3-seconds score against similar-length videos (0.5 = typical)
+  measure exactly that -- when they're given, they're the first place to
+  look, ahead of views.
+- For Shorts, "% of the video watched" counts replays and can pass 100%.
+  Judge it against this channel's own spread and the vs-similar-videos
+  score, never against a fixed good/bad threshold.
+- Long stretches where nothing changes on screen -- no cut, no zoom, no
+  one talking -- are where viewers drift mid-clip.
+- Every clip this app renders is 60s or under and already has burned-in
+  captions, so "keep it under a minute" and "add captions" are never the fix.
+- The levers this creator actually controls per clip: where it starts (the
+  first words and first frame), how long it runs, stretches with no
+  talking, and the title.
 
 A common frustration this creator has: a clip they personally thought was
 weak takes off, while one they were proud of gets almost nothing. There
@@ -496,22 +509,21 @@ check them in this order:
   insight this creator can get, since it means fix the title/packaging,
   not the clip.
 - CONTENT problem: views came in but retention is weak (people bailed
-  early) -- diagnose WHICH lever from the ground truth above is most
-  likely the cause (a slow/no hook in the first few seconds, too little
-  visual change to hold attention, the clip simply running long for what
-  the moment can sustain, or missing captions) rather than a generic "the
+  early) -- diagnose WHICH lever from HOW TO JUDGE THE NUMBERS above is
+  most likely the cause (a slow open that loses people in the first
+  seconds, a long stretch with no talking or nothing changing, or the clip
+  running long for what the moment can sustain) rather than a generic "the
   hook, pacing, or payoff isn't landing."
 
 Do not give generic, boilerplate advice ("post more consistently",
-"engage with your audience", "use eye-catching thumbnails") unless you can
-tie it to a specific number or title in the data above -- if a claim
-doesn't cite something concrete from this data, cut it instead of padding
-the answer with it.
+"engage with your audience", "use eye-catching thumbnails"). Every claim
+about this channel has to quote a specific number, title, or group from the
+data above -- if a claim can't, cut it instead of padding the answer with it.
 
-Based on this data, answer in exactly {4 + bool(competitor_block) + bool(content_block) + bool(long_form_section)} short sections (plain text, no
+Based on this data, answer in exactly {4 + bool(performance_text) + bool(competitor_block) + bool(content_block) + bool(long_form_section)} short sections (plain text, no
 markdown headers or bullet symbols, just a label then 1-2 sentences --
 stay terse, this is a quick read not a report):
-
+{numbers_section}
 BEST TIME TO POST: which day(s) actually look strongest, and how
 confident that is given how much data there is.
 
@@ -530,11 +542,11 @@ channel overall. Without that list, say what type of clip and title/hook
 to make more of from the data available, and what to stop clipping.
 
 FORMAT NOTES: one concrete format or editing change grounded in the
-retention/traffic signals and the ground truth above (e.g. tighten the
-hook, cut clip length down, add captions, increase cut frequency) --
-whichever one the actual numbers point to, not a generic tip.
+retention/traffic numbers above (e.g. start closer to the first words, cut
+clip length down, trim a stretch with no talking) -- whichever one the
+actual numbers point to, quoting the number, not a generic tip.
 {competitor_patterns_section}{content_patterns_section}{long_form_section}
-Hard limit: under {220 + (40 if competitor_block else 0) + (40 if content_block else 0) + (40 if long_form_section else 0)} words total, and every section must be a complete
+Hard limit: under {220 + (60 if performance_text else 0) + (40 if competitor_block else 0) + (40 if content_block else 0) + (40 if long_form_section else 0)} words total, and every section must be a complete
 thought -- if you're running long, cut detail, not sentences."""
 
 
@@ -650,6 +662,7 @@ def get_ai_overview(
     model: str = DEFAULT_MODEL,
     competitors: Optional[list] = None,
     content_analyses: Optional[list] = None,
+    performance_text: Optional[str] = None,
 ) -> str:
     import anthropic
 
@@ -669,7 +682,7 @@ def get_ai_overview(
     top_performers, basis = _select_top_performers(snapshot.get("recent_videos") or [])
     prompt = _build_prompt(
         snapshot, analytics, focus, competitors, content_analyses, thumbnail_videos,
-        top_performers, basis,
+        top_performers, basis, performance_text,
     )
 
     content: list = [{"type": "text", "text": prompt}]

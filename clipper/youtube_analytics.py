@@ -68,6 +68,39 @@ def get_video_retention(access_token: str, channel_id: str, lookback_days: int =
     return result
 
 
+def get_retention_curve(access_token: str, channel_id: str, video_id: str, start_date: str) -> list:
+    """One video's audience-retention curve: 100 points across the video's
+    length, each [elapsed fraction, audienceWatchRatio,
+    relativeRetentionPerformance]. audienceWatchRatio is viewers watching
+    at that point per view (a replayed Short can push it above 1);
+    relativeRetentionPerformance ranks that point against YouTube videos
+    of similar length (0.5 = typical). Empty list when YouTube doesn't have
+    enough views on the video to report a curve yet. The third value is
+    None if YouTube rejects the comparison metric -- the watch ratio alone
+    still gives the curve."""
+    import requests
+
+    params = {
+        "ids": f"channel=={channel_id}",
+        "startDate": start_date,
+        "endDate": datetime.date.today().isoformat(),
+        "dimensions": "elapsedVideoTimeRatio",
+        "filters": f"video=={video_id}",
+    }
+    try:
+        data = _get(ANALYTICS_URL, access_token, {**params, "metrics": "audienceWatchRatio,relativeRetentionPerformance"})
+    except requests.HTTPError as e:
+        if e.response is None or e.response.status_code != 400:
+            raise
+        data = _get(ANALYTICS_URL, access_token, {**params, "metrics": "audienceWatchRatio"})
+    rows = [
+        [float(r[0]), float(r[1]), float(r[2]) if len(r) > 2 and r[2] is not None else None]
+        for r in (data.get("rows") or [])
+    ]
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def get_insights(access_token: str, channel_id: str, lookback_days: int = 90) -> dict:
     """Best day-of-week (by views), retention, and top traffic sources over
     the last `lookback_days`, from the channel's real Analytics data."""
