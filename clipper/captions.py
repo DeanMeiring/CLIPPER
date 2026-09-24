@@ -1,8 +1,9 @@
 """Build a burned-in, word-highlight ("karaoke") .ass subtitle file for one clip."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .transcribe import Word
 
@@ -38,6 +39,18 @@ _BASE_HOOK_FONTSIZE = 92
 _BASE_HOOK_OUTLINE = 10
 _BASE_HOOK_MARGIN_LR = 90
 
+# The hook text (see build_ass's hook_text) sits in a white box near the top
+# for a clip's first few seconds -- where Shorts viewers decide whether to
+# swipe -- clear of the bottom captions and of the Shorts UI along the
+# bottom edge. Boxed rather than outlined so it stays readable over any
+# gameplay, and a different look from the captions so it doesn't read as
+# one more spoken line.
+HOOK_TEXT_SECONDS = 3.0
+_BASE_HOOK_TEXT_FONTSIZE = 64
+_BASE_HOOK_TEXT_BOX = 18  # box padding, via BorderStyle 3 below
+_BASE_HOOK_TEXT_MARGIN_LR = 80
+_BASE_HOOK_TEXT_MARGIN_V = 250
+
 
 def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     width, height = play_res
@@ -52,6 +65,10 @@ def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     hook_fontsize = max(1, round(_BASE_HOOK_FONTSIZE * scale))
     hook_outline = max(1, round(_BASE_HOOK_OUTLINE * scale))
     hook_margin_lr = max(0, round(_BASE_HOOK_MARGIN_LR * scale))
+    hook_text_fontsize = max(1, round(_BASE_HOOK_TEXT_FONTSIZE * scale))
+    hook_text_box = max(1, round(_BASE_HOOK_TEXT_BOX * scale))
+    hook_text_margin_lr = max(0, round(_BASE_HOOK_TEXT_MARGIN_LR * scale))
+    hook_text_margin_v = max(0, round(_BASE_HOOK_TEXT_MARGIN_V * scale))
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -64,6 +81,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
 Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
 Style: HookLine,Arial Black,{hook_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{hook_outline},4,5,{hook_margin_lr},{hook_margin_lr},0,1
+Style: HookText,Arial Black,{hook_text_fontsize},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,{hook_text_box},0,8,{hook_text_margin_lr},{hook_text_margin_lr},{hook_text_margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -96,6 +114,17 @@ def _escape_ass_text(text: str) -> str:
     for bad, safe in _ASS_UNSAFE_CHARS.items():
         text = text.replace(bad, safe)
     return text
+
+
+# Color emoji need a font the render container doesn't have, so they'd burn
+# in as empty boxes.
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]+")
+
+
+def clean_hook_text(text: Optional[str]) -> str:
+    """The hook caption as it can actually be burned in: emoji removed,
+    whitespace collapsed. Empty when nothing usable is left."""
+    return " ".join(_EMOJI.sub(" ", text or "").split())
 
 
 def rank_badge_dialogue(text: str, duration: float) -> str:
@@ -145,9 +174,15 @@ def _group_words(words: List[Word], max_words: int = 4, max_span: float = 2.2) -
 def build_ass(
     clip_words: List[Word], clip_start: float, output_path: Path,
     play_res: Tuple[int, int] = _BASE_PLAY_RES,
+    hook_text: Optional[str] = None,
 ) -> Path:
     """clip_words are absolute-time Word objects that fall within the clip;
     clip_start is subtracted so the .ass timeline starts at 0 for this clip.
+
+    hook_text, when given, is shown boxed near the top for the clip's first
+    HOOK_TEXT_SECONDS. It goes in this same file (not a second pass like
+    hook_line_ass) so it burns in with the captions, and a later re-render
+    from this file -- a manual facecam fix -- keeps it.
 
     play_res should match the actual output frame size (width, height) --
     it's both the coordinate system the Style/Dialogue margins below are
@@ -168,6 +203,12 @@ def build_ass(
         text = "".join(parts).strip()
         lines.append(
             f"Dialogue: 0,{_fmt_ts(g_start)},{_fmt_ts(g_end)},Caption,,0,0,0,,{text}"
+        )
+    hook = clean_hook_text(hook_text)
+    if hook:
+        lines.append(
+            f"Dialogue: 1,{_fmt_ts(0)},{_fmt_ts(HOOK_TEXT_SECONDS)},HookText,,0,0,0,,"
+            f"{{\\fad(0,200)}}{_escape_ass_text(hook)}"
         )
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path

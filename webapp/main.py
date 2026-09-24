@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass, rank_badge_dialogue, hook_line_ass
+from clipper.captions import build_ass, clean_hook_text, rank_badge_dialogue, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video, usable_render_duration
 from clipper import hook_line
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
@@ -116,6 +116,22 @@ def _load_strategy_notes() -> Optional[str]:
              " as weaker evidence than what the transcript itself shows."
     )
     return f"(Channel analysis {age}{staleness})\n{entry['overview']}"
+
+
+def _load_performance_notes() -> Optional[str]:
+    """The measured comparisons from the Analyze page's "What your Shorts
+    actually do" panel (cached, so usually free), for the AI to cite. None
+    when they're unavailable -- everything that uses them works without."""
+    try:
+        performance = _gather_clip_performance()
+    except Exception as e:  # noqa: BLE001 - never worth failing a job or an overview over
+        print(f"[clip_performance] unavailable: {e}", flush=True)
+        return None
+    if not performance.get("available") or not performance.get("summary", {}).get("shorts"):
+        return None
+    return clip_performance.render_prompt_text(performance)
+
+
 # CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
 # in-memory is fine -- a login round-trip through Google takes seconds, not
 # something that needs to survive a restart.
@@ -159,18 +175,21 @@ class JobRequest(BaseModel):
     source: str
     focus: Optional[str] = None
     num_clips: int = 5
-    min_len: float = 20.0
+    min_len: float = 15.0
     max_len: float = 90.0
     # YouTube's auto-caption timestamps lag the actual audio noticeably --
     # Whisper aligns word timing to the audio itself, so default to it for
     # captions that don't look delayed. Slower, but accurate.
     whisper: bool = True
+    # Burn each clip's hook_caption into its first few seconds (see
+    # captions.build_ass). Kept per job so "generate more" matches.
+    hook_text: bool = True
 
 
 class RegenerateRequest(BaseModel):
     focus: Optional[str] = None
     num_clips: int = 3
-    min_len: float = 20.0
+    min_len: float = 15.0
     max_len: float = 90.0
     reset_used: bool = False
 
@@ -342,6 +361,7 @@ def _run_job(job_id: str) -> None:
     # the upload button, so clamp here rather than let a job silently
     # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
+    _set(job_id, hook_text=req.hook_text)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -388,7 +408,7 @@ def _run_job(job_id: str) -> None:
         mapped = select_and_map(
             candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, api_key=None, source_title=source_title,
-            strategy_notes=_load_strategy_notes(),
+            strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -426,7 +446,7 @@ def _run_job(job_id: str) -> None:
             words, dl.duration,
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
-            strategy_notes=_load_strategy_notes(),
+            strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -436,7 +456,7 @@ def _run_job(job_id: str) -> None:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
 
-    clips_meta = _render_all(job_id, out_dir, render_items, render_base, [])
+    clips_meta = _render_all(job_id, out_dir, render_items, render_base, [], hook_text=req.hook_text)
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
@@ -537,12 +557,16 @@ def _remove_clip_files(out_dir: Path, filename: str) -> None:
         (out_dir / name).unlink(missing_ok=True)
 
 
-def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list) -> list:
+def _render_all(
+    job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
+    hook_text: bool = True,
+) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
     progress/state as it goes. Shared by a fresh run and a regenerate run --
     they only differ in what render_items contains and whether clips_meta
-    starts empty or with clips from a prior run."""
+    starts empty or with clips from a prior run. hook_text burns each pick's
+    hook_caption into the top of its first few seconds."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -556,7 +580,8 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
         layout = compute_layout(video_path, pick.start, pick.end, target_w=1080, target_h=1920)
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
-        build_ass(clip_words, pick.start, ass_path)
+        burned_hook = clean_hook_text(pick.hook_caption) if hook_text else ""
+        build_ass(clip_words, pick.start, ass_path, hook_text=burned_hook)
         _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
         facecam_uncertain = False
@@ -634,7 +659,7 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             source_frame_name = source_frame_path.name
             print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
 
-        _record_clip(job_id, pick, clip_words, out_path, final_layout)
+        _record_clip(job_id, pick, clip_words, out_path, final_layout, burned_hook)
 
         clips_meta.append({
             "file": out_path.name,
@@ -643,6 +668,8 @@ def _render_all(job_id: str, out_dir: Path, render_items: list, render_base: flo
             "duration": round(pick.end - pick.start, 2),
             "title": pick.title,
             "hook_caption": pick.hook_caption,
+            # What's actually burned into the video's opening, if anything.
+            "hook_text": burned_hook or None,
             "upload_title": pick.upload_title,
             "description": pick.description,
             "reason": pick.reason,
@@ -691,7 +718,9 @@ def _registry_id(job_id: str, clip: dict) -> str:
     return clip_registry.clip_id_for(job_id, clip["start"], clip["end"], clip.get("window_index"))
 
 
-def _record_clip(job_id: str, pick, clip_words: List[Word], out_path: Path, layout) -> None:
+def _record_clip(
+    job_id: str, pick, clip_words: List[Word], out_path: Path, layout, hook_text: str = "",
+) -> None:
     """Save what this clip looks like to the clip registry, so its posted
     video's performance can later be compared against it. Never allowed to
     fail the render it's recording -- a clip with no record just sits out
@@ -715,6 +744,7 @@ def _record_clip(job_id: str, pick, clip_words: List[Word], out_path: Path, layo
             "upload_title": pick.upload_title,
             "reason": pick.reason,
             "layout": _layout_name(layout),
+            "hook_text": hook_text or None,
             "features": clip_features.measure_clip(clip_words, pick.start, pick.end, out_path),
         })
     except Exception as e:  # noqa: BLE001 - recording must never fail a render
@@ -1053,7 +1083,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
 
     num_clips = max(1, int(req.get("num_clips") or 3))
     focus = req.get("focus") or None
-    min_len = float(req.get("min_len") or 20.0)
+    min_len = float(req.get("min_len") or 15.0)
     max_len = min(float(req.get("max_len") or 90.0), MAX_SHORT_SECONDS)
     reset_used = bool(req.get("reset_used"))
 
@@ -1063,6 +1093,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         source_title = job.get("source_title") or ""
         source_duration = job.get("duration") or 0.0
         existing_clips = list(job.get("clips") or [])
+        hook_text = job.get("hook_text", True)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1111,7 +1142,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         mapped = select_and_map(
             candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
             focus=focus, api_key=None, source_title=source_title,
-            strategy_notes=_load_strategy_notes(),
+            strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -1129,7 +1160,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             cached["words"], cached["duration"],
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
             focus=focus, source_title=source_title, loud_moments=loud_moments,
-            strategy_notes=_load_strategy_notes(),
+            strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
         )
 
         def _overlaps_used(p) -> bool:
@@ -1144,7 +1175,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         _set(job_id, state="error", error="Claude didn't return any new, non-overlapping moments this time -- try a different focus.")
         return
 
-    clips_meta = _render_all(job_id, out_dir, render_items, 0.15, existing_clips)
+    clips_meta = _render_all(job_id, out_dir, render_items, 0.15, existing_clips, hook_text=hook_text)
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
 
@@ -3454,16 +3485,9 @@ def channel_insights_overview(req: OverviewRequest) -> dict:
                     ],
                 })
 
-    # Same numbers the "What your Shorts actually do" panel shows (cached,
-    # so this usually costs nothing extra) -- the overview has to cite
-    # them rather than form its own impression of the channel.
-    performance_text = None
-    try:
-        performance = _gather_clip_performance()
-        if performance.get("available"):
-            performance_text = clip_performance.render_prompt_text(performance)
-    except Exception as e:  # noqa: BLE001 - the overview still works from the channel data without it
-        print(f"[channel_strategy] clip performance unavailable for the overview: {e}", flush=True)
+    # The overview has to cite these numbers rather than form its own
+    # impression of the channel.
+    performance_text = _load_performance_notes()
 
     try:
         overview = get_ai_overview(
@@ -3889,7 +3913,7 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div>
     <label>Min length (s)</label>
-    <input id="min_len" type="number" value="20">
+    <input id="min_len" type="number" value="15">
   </div>
   <div>
     <label>Max length (s)</label>
@@ -3901,6 +3925,11 @@ INDEX_HTML = """<!doctype html>
 <div class="checkbox-row">
   <input id="whisper" type="checkbox" checked>
   <label for="whisper">Accurate captions (Whisper)<div class="hint">Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).</div></label>
+</div>
+
+<div class="checkbox-row">
+  <input id="hook_text" type="checkbox" checked>
+  <label for="hook_text">Hook text on screen<div class="hint">Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.</div></label>
 </div>
 
 <div class="actions">
@@ -4417,6 +4446,7 @@ async function submitJob() {
     min_len: parseFloat(document.getElementById('min_len').value),
     max_len: parseFloat(document.getElementById('max_len').value),
     whisper: document.getElementById('whisper').checked,
+    hook_text: document.getElementById('hook_text').checked,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',

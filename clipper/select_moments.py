@@ -7,12 +7,32 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .cut_points import Cut, refine_cut
 from .loud_moments import LoudMoment
 from .transcribe import Word
 
-# Check https://docs.claude.com/en/docs/about-claude/models for current model
-# ids -- override anytime with the CLIPPER_MODEL env var without touching code.
-DEFAULT_MODEL = os.environ.get("CLIPPER_MODEL", "claude-sonnet-4-5")
+# Picking and cutting the clips decides whether a Short holds viewers, so it
+# has its own model setting rather than sharing CLIPPER_MODEL with the
+# lighter tasks (facecam checks, hook lines, recaps) -- several of those send
+# max_tokens=10 requests that a model with thinking on would spend entirely
+# on thinking. Check https://docs.claude.com/en/docs/about-claude/models for
+# current ids; override with CLIPPER_SELECT_MODEL without touching code.
+DEFAULT_MODEL = os.environ.get("CLIPPER_SELECT_MODEL", "claude-opus-5")
+# Used when DEFAULT_MODEL can't serve a pick at all (not enabled for this API
+# key, rate limited, request rejected, declined even after the server-side
+# fallback), so a job still gets its clips.
+_BACKUP_MODEL = os.environ.get("CLIPPER_MODEL", "claude-sonnet-4-5")
+
+# Model generations that take adaptive thinking; anything older (an old
+# override, the backup model) gets the plain request it always got.
+_ADAPTIVE_THINKING_PREFIXES = (
+    "claude-opus-5", "claude-fable-5", "claude-sonnet-5",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-6",
+)
+# Models whose safety classifiers can decline a request. With server-side
+# fallbacks the API reruns a declined request on Anthropic's recommended
+# fallback model inside the same call instead of returning the refusal.
+_SERVER_FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
 
 
 @dataclass
@@ -70,12 +90,39 @@ def _salvage_json_array(raw: str) -> Optional[list]:
     return items or None
 
 
-def _ask_claude_for_json_once(client, prompt: str, model: str, max_tokens: int) -> list:
-    resp = client.messages.create(
+class ClaudeDeclined(RuntimeError):
+    """Claude's safety classifiers declined the request (after any
+    server-side fallback) -- sending the same prompt again won't change that."""
+
+
+def _request_options(model: str) -> dict:
+    options: dict = {"max_tokens": 8192}
+    if model.startswith(_ADAPTIVE_THINKING_PREFIXES):
+        # max_tokens caps thinking and the JSON answer together.
+        options.update(max_tokens=32000, thinking={"type": "adaptive"})
+    if model in _SERVER_FALLBACK_MODELS:
+        options.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+    return options
+
+
+def _ask_claude_for_json_once(client, prompt: str, model: str) -> list:
+    # Streamed because with thinking on, a pick over a long stream's
+    # transcript can run for minutes: a non-streamed request has to finish
+    # inside the SDK's 10-minute timeout, a streamed one only has to keep
+    # sending events.
+    with client.beta.messages.stream(
         model=model,
-        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
-    )
+        **_request_options(model),
+    ) as stream:
+        resp = stream.get_final_message()
+    if resp.stop_reason == "refusal":
+        category = getattr(getattr(resp, "stop_details", None), "category", None)
+        raise ClaudeDeclined(
+            f"Claude declined to pick clips from this transcript (category: {category or 'not given'})."
+        )
+    if any(getattr(entry, "type", None) == "fallback_message" for entry in (getattr(resp.usage, "iterations", None) or [])):
+        print(f"[select_moments] {model} declined; served by fallback model {resp.model}", flush=True)
     if resp.stop_reason == "max_tokens":
         print("[select_moments] response hit max_tokens -- may be truncated", flush=True)
     raw = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
@@ -111,7 +158,23 @@ def _ask_claude_for_json_once(client, prompt: str, model: str, max_tokens: int) 
         raise RuntimeError(f"Model did not return valid JSON:\n{raw[:500]}") from e
 
 
-def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_tokens: int = 8192) -> list:
+def _ask_with_one_retry(client, prompt: str, model: str) -> list:
+    try:
+        return _ask_claude_for_json_once(client, prompt, model)
+    except ClaudeDeclined:
+        raise
+    except RuntimeError as e:
+        # A response with no usable JSON and nothing for the salvage pass
+        # to recover from is rare but confirmed to happen (seen in
+        # practice: the model's output cut off right after the opening
+        # ```json fence, before a single field). Rather than failing the
+        # whole job over what's likely a one-off bad generation, retry
+        # once with a fresh sample before giving up for real.
+        print(f"[select_moments] first attempt failed ({e}), retrying once", flush=True)
+        return _ask_claude_for_json_once(client, prompt, model)
+
+
+def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str) -> list:
     try:
         import anthropic
     except ImportError as e:
@@ -128,16 +191,19 @@ def _ask_claude_for_json(prompt: str, api_key: Optional[str], model: str, max_to
 
     client = anthropic.Anthropic(api_key=api_key)
     try:
-        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
-    except RuntimeError as e:
-        # A response with no usable JSON and nothing for the salvage pass
-        # to recover from is rare but confirmed to happen (seen in
-        # practice: the model's output cut off right after the opening
-        # ```json fence, before a single field). Rather than failing the
-        # whole job over what's likely a one-off bad generation, retry
-        # once with a fresh sample before giving up for real.
-        print(f"[select_moments] first attempt failed ({e}), retrying once", flush=True)
-        return _ask_claude_for_json_once(client, prompt, model, max_tokens)
+        return _ask_with_one_retry(client, prompt, model)
+    except (
+        ClaudeDeclined,
+        anthropic.NotFoundError, anthropic.PermissionDeniedError, anthropic.BadRequestError,
+        anthropic.RateLimitError, anthropic.OverloadedError, anthropic.InternalServerError,
+    ) as e:
+        if _BACKUP_MODEL == model:
+            raise
+        print(
+            f"[select_moments] {model} couldn't serve this pick ({type(e).__name__}: {e}) "
+            f"-- using {_BACKUP_MODEL} instead", flush=True,
+        )
+        return _ask_with_one_retry(client, prompt, _BACKUP_MODEL)
 
 
 def _chunk_transcript(words: List[Word], mark_every: float = 10.0) -> str:
@@ -238,54 +304,102 @@ matches this analysis.
 """
 
 
+def _performance_block(performance_notes: Optional[str]) -> str:
+    if not performance_notes:
+        return ""
+    return f"""
+Measured results from THIS channel's own posted Shorts -- real retention
+curves and view counts, compared across what the clips had in common. A
+comparison marked TOO FEW has under 5 uploads behind it and can't support a
+conclusion on its own. Where one with enough uploads shows a clear
+difference (clip length, how fast the first words start, title style,
+layout), lean your picks, cuts and titles toward what worked for this
+audience, even over the general guidance below:
+{performance_notes}
+"""
+
+
+def _clip_rules(min_len: float, max_len: float) -> str:
+    return f"""What decides whether a Short gets watched: viewers choose within the first
+second or two whether to keep watching or swipe away. So each clip must:
+- open on its hook. The first words spoken ARE the hook: start on the line
+  that makes a scrolling viewer stop -- the setup that creates tension, or
+  the most surprising thing said -- never on a greeting, filler ("uh",
+  "okay so", "chat"), dead air, or the tail of an unrelated sentence
+- be the tightest cut that still holds the setup and the payoff. On
+  streamer-clip channels most breakout Shorts run 15-35 seconds (median
+  around 25); go longer only when the story needs it, never to pad
+- end right after the payoff lands (the punchline, the reaction, the
+  result), with no trailing chatter -- a tight ending also loops cleanly
+  back into the hook
+- make sense to someone who has never watched this streamer and missed the
+  rest of the stream
+- be between {min_len:.0f} and {max_len:.0f} seconds long, and not overlap any other clip"""
+
+
+# Field-by-field instructions shared by both prompts' JSON shape. A plain
+# string (not an f-string), so its braces and quotes need no escaping.
+_PICK_FIELDS = """    "start_words": "the exact first 3-6 words spoken in the clip, copied verbatim from the transcript -- the clip is cut on these words, so start/end only need to be roughly right",
+    "end_words": "the exact last 3-6 words spoken in the clip, copied verbatim from the transcript",
+    "title": "short internal label, not shown on screen",
+    "hook_caption": "text burned onto the top of the video for its first 3 seconds: 3-7 words telling a scrolling viewer why to stay -- who, and the tension or setup of this specific moment. Not a generic 'wait for it', and not the punchline itself. Normal sentence case with at most one word in ALL CAPS, no emoji (they can't be rendered), no hashtags, and not a copy of upload_title",
+    "upload_title": "the title to post the clip with. What the biggest recent Shorts on streamer-clip channels (Jynxzi, Stable Ronaldo and similar) have in common: the streamer's name comes first, it's about 6 words, and it says the specific thing that happens instead of teasing it; many end with one emoji (😭 🤣 😂 🤯 👀) and some put one word in ALL CAPS for emphasis. Questions and vague clickbait ('you won't believe...') are rare among them -- avoid both. Style examples, not to copy: 'Stable Ronaldo Chooses the Wrong ENDING In GTA V 🤯', 'Jynxzi *ATTEMPTS* to do MATH 🤣', 'Bodycam turns Jynxzi Evil'. Use the name viewers know the streamer by, from the transcript or source title; if you can't tell who it is, lead with the most specific thing that happens. No hashtags, under 60 characters",
+    "description": "the post description: 1-2 short sentences on who's in it, what happens and why it's worth watching (credit the streamer by name), then 3-5 hashtags (#shorts, the streamer, the game or topic). No links",
+    "reason": "one sentence on why this moment holds a viewer past the first few seconds, noting if this channel's own data factored in\""""
+
+
+def _log_cut(rough_start: float, rough_end: float, cut: Cut) -> None:
+    def how(anchored: bool) -> str:
+        return "on the quoted words" if anchored else "snapped to the nearest phrase"
+    print(
+        f"[select_moments] rough {rough_start:.1f}-{rough_end:.1f}s -> cut {cut.start:.2f}-{cut.end:.2f}s "
+        f"(start {how(cut.anchored_start)}, end {how(cut.anchored_end)})", flush=True,
+    )
+
+
 def select_clips(
     words: List[Word],
     video_duration: float,
     n_clips: int = 5,
-    min_len: float = 20.0,
-    max_len: float = 90.0,
+    min_len: float = 15.0,
+    max_len: float = 60.0,
     focus: Optional[str] = None,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
     loud_moments: Optional[List[LoudMoment]] = None,
     strategy_notes: Optional[str] = None,
+    performance_notes: Optional[str] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
     transcript_text = _chunk_transcript(words)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
     loud_line = _loud_moments_block(loud_moments)
+    performance_line = _performance_block(performance_notes)
     strategy_line = _strategy_notes_block(strategy_notes)
 
-    prompt = f"""You are picking highlight clips from a video transcript for short-form
-content (YouTube Shorts / TikTok / Reels). The transcript below has [mm:ss]
-timestamp markers every ~10 seconds -- use them to anchor your start/end times,
-interpolating between markers for precision.
+    prompt = f"""You are picking highlight clips from a stream/video transcript for YouTube
+Shorts (also posted to TikTok and Reels). The transcript below has [mm:ss]
+timestamp markers every ~10 seconds.
 
 Video length: {video_duration:.0f} seconds.
-{source_line}{focus_line}{loud_line}{strategy_line}{_GROUP_BANTER_NOTE}
+{source_line}{focus_line}{loud_line}{performance_line}{strategy_line}{_GROUP_BANTER_NOTE}
 
-Pick up to {n_clips} clips. Each clip must:
-- be between {min_len:.0f} and {max_len:.0f} seconds long
-- work as a standalone moment (a hook, a punchline, a strong claim, a story
-  beat with a payoff, a surprising fact) -- not a random mid-sentence cut
-- not overlap with any other clip you pick
-- start right at (or just before) the moment that hooks attention, not mid-thought
+Pick up to {n_clips} clips.
+
+{_clip_rules(min_len, max_len)}
 
 Respond with ONLY a JSON array, no other text, in this exact shape (escape any
-double-quote characters that appear inside a string value, e.g. \" ):
+double-quote characters that appear inside a string value):
 [
   {{
     "start": 12.5,
-    "end": 58.0,
-    "title": "short internal label, not shown on screen",
-    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them from the transcript or source title for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
-    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
+    "end": 38.0,
+{_PICK_FIELDS}
   }}
 ]
+"start" and "end" are seconds, read off the markers.
 
 Transcript:
 {transcript_text}
@@ -296,21 +410,20 @@ Transcript:
     picks: List[ClipPick] = []
     for item in data:
         try:
-            start = max(0.0, float(item["start"]))
-            end = min(video_duration, float(item["end"]))
+            rough_start, rough_end = float(item["start"]), float(item["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if end - start < min_len * 0.6:  # allow a little slack vs. exact min_len
+        cut = refine_cut(
+            words, rough_start, rough_end, item.get("start_words"), item.get("end_words"),
+            video_duration, min_len, max_len,
+        )
+        if cut is None:
             continue
-        # max_len is a hard ceiling, unlike min_len: a Shorts clip even a few
-        # seconds over 60s lands as a regular video when uploaded through the
-        # app (see channel_insights.MAX_SHORT_SECONDS).
-        if end - start > max_len:
-            end = start + max_len
+        _log_cut(rough_start, rough_end, cut)
         title = str(item.get("title", "")).strip() or "Untitled clip"
         picks.append(ClipPick(
-            start=round(start, 2),
-            end=round(end, 2),
+            start=cut.start,
+            end=cut.end,
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
             upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
@@ -331,13 +444,14 @@ Transcript:
 def select_from_candidate_windows(
     windows: List[dict],
     n_clips: int = 5,
-    min_len: float = 20.0,
-    max_len: float = 90.0,
+    min_len: float = 15.0,
+    max_len: float = 60.0,
     focus: Optional[str] = None,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     source_title: Optional[str] = None,
     strategy_notes: Optional[str] = None,
+    performance_notes: Optional[str] = None,
 ) -> List[WindowPick]:
     """Pick the best clips from a set of pre-filtered candidate windows
     (long-VOD pipeline) instead of one continuous transcript.
@@ -352,6 +466,7 @@ def select_from_candidate_windows(
 
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource VOD title: {source_title}\n" if source_title else ""
+    performance_line = _performance_block(performance_notes)
     strategy_line = _strategy_notes_block(strategy_notes)
 
     blocks = []
@@ -364,39 +479,36 @@ def select_from_candidate_windows(
         )
     windows_text = "\n".join(blocks)
 
-    prompt = f"""You are picking the best highlight clips from a set of CANDIDATE windows
-that were already pre-filtered out of a much longer livestream VOD (chat
-activity spikes and/or moments viewers already clipped). Each candidate
-window below is its own short segment with its own transcript, timestamped
-LOCALLY from 0 at the start of that window -- not the VOD's absolute time.
-{source_line}{focus_line}{strategy_line}
+    prompt = f"""You are picking the best highlight clips for YouTube Shorts (also posted to
+TikTok and Reels) from a set of CANDIDATE windows that were already
+pre-filtered out of a much longer livestream VOD (chat activity spikes
+and/or moments viewers already clipped). Each candidate window below is its
+own short segment with its own transcript, timestamped LOCALLY from 0 at the
+start of that window -- not the VOD's absolute time.
+{source_line}{focus_line}{performance_line}{strategy_line}
 Not every candidate window is actually a good clip -- some chat spikes are
 noise, or a reaction to something off-screen that doesn't work without
 context. Pick only the ones that would genuinely work as a standalone
 short-form clip.
 {_GROUP_BANTER_NOTE}
 
-Pick up to {n_clips} windows. For each one you pick, give a start/end IN
-SECONDS LOCAL TO THAT WINDOW (0 to its duration) -- use the whole window or
-trim it tighter around the actual moment. Each clip must:
-- be between {min_len:.0f} and {max_len:.0f} seconds long
-- work as a standalone moment, not a random mid-sentence cut
-- start right at (or just before) the moment that hooks attention
+Pick up to {n_clips} windows, at most one clip per window. Use the whole
+window or trim it tighter around the actual moment.
+
+{_clip_rules(min_len, max_len)}
 
 Respond with ONLY a JSON array, no other text, in this exact shape (escape any
-double-quote characters that appear inside a string value, e.g. \" ):
+double-quote characters that appear inside a string value):
 [
   {{
     "window_index": 3,
     "start": 4.0,
-    "end": 52.0,
-    "title": "short internal label, not shown on screen",
-    "hook_caption": "punchy 4-8 word on-screen hook text for the first second of the clip",
-    "upload_title": "the actual title to post the clip with on YouTube Shorts/Instagram Reels -- written like real clip-channel titles: attention-grabbing, often a question or a bold claim, can use ALL CAPS for emphasis on 1-2 key words, mention the creator/streamer by name if you can identify them for searchability and credit, no hashtags, under 90 characters. If channel performance notes are given above, mirror the hook style/phrasing they show working for this audience",
-    "description": "the actual post description to upload alongside the clip -- 1-3 short sentences giving context on what happens and why it's worth watching, credit the creator/streamer by name if identifiable, end with 3-6 relevant hashtags (e.g. #shorts, the game/topic, the creator's name), no links",
-    "reason": "one sentence on why this moment works as a clip, noting if the channel performance notes above factored into picking it over another candidate"
+    "end": 31.0,
+{_PICK_FIELDS}
   }}
 ]
+"start" and "end" are seconds LOCAL TO THAT WINDOW (0 to its duration), read
+off its markers.
 
 Candidate windows:
 {windows_text}
@@ -416,20 +528,22 @@ Candidate windows:
         if idx in seen_indices:
             continue
         try:
-            start = max(0.0, float(item["start"]))
-            end = min(window["duration"], float(item["end"]))
+            rough_start, rough_end = float(item["start"]), float(item["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if end - start < min_len * 0.6:
+        cut = refine_cut(
+            window["words"], rough_start, rough_end, item.get("start_words"), item.get("end_words"),
+            window["duration"], min_len, max_len,
+        )
+        if cut is None:
             continue
-        if end - start > max_len:  # hard ceiling -- see select_clips
-            end = start + max_len
+        _log_cut(rough_start, rough_end, cut)
         title = str(item.get("title", "")).strip() or "Untitled clip"
         seen_indices.add(idx)
         picks.append(WindowPick(
             window_index=idx,
-            start=round(start, 2),
-            end=round(end, 2),
+            start=cut.start,
+            end=cut.end,
             title=title,
             hook_caption=str(item.get("hook_caption", "")).strip(),
             upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
