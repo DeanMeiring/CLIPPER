@@ -46,6 +46,15 @@ _BASE_HOOK_MARGIN_LR = 90
 # gameplay, and a different look from the captions so it doesn't read as
 # one more spoken line.
 HOOK_TEXT_SECONDS = 3.0
+
+# Short-form captions (build_ass's punchy mode): a few words at a time,
+# bigger, each group popping in as it's spoken -- the fast-changing text
+# Shorts viewers are used to, instead of calmer four-word lines.
+_BASE_POP_FONTSIZE = 86
+_BASE_POP_OUTLINE = 7
+_POP_MAX_WORDS = 3
+_POP_MAX_SPAN = 1.0
+_POP_IN = "{\\fscx75\\fscy75\\t(0,90,\\fscx100\\fscy100)}"
 _BASE_HOOK_TEXT_FONTSIZE = 64
 _BASE_HOOK_TEXT_BOX = 18  # box padding, via BorderStyle 3 below
 _BASE_HOOK_TEXT_MARGIN_LR = 80
@@ -69,6 +78,8 @@ def _ass_header(play_res: Tuple[int, int] = _BASE_PLAY_RES) -> str:
     hook_text_box = max(1, round(_BASE_HOOK_TEXT_BOX * scale))
     hook_text_margin_lr = max(0, round(_BASE_HOOK_TEXT_MARGIN_LR * scale))
     hook_text_margin_v = max(0, round(_BASE_HOOK_TEXT_MARGIN_V * scale))
+    pop_fontsize = max(1, round(_BASE_POP_FONTSIZE * scale))
+    pop_outline = max(1, round(_BASE_POP_OUTLINE * scale))
     return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -81,6 +92,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Caption,Arial Black,{fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},2,2,{margin_lr},{margin_lr},{margin_v},1
 Style: RankBadge,Arial Black,{badge_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,{badge_outline},0,7,{badge_margin},{badge_margin},{badge_margin},1
 Style: HookLine,Arial Black,{hook_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{hook_outline},4,5,{hook_margin_lr},{hook_margin_lr},0,1
+Style: CaptionPop,Arial Black,{pop_fontsize},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{pop_outline},2,2,{margin_lr},{margin_lr},{margin_v},1
 Style: HookText,Arial Black,{hook_text_fontsize},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,{hook_text_box},0,8,{hook_text_margin_lr},{hook_text_margin_lr},{hook_text_margin_v},1
 
 [Events]
@@ -175,6 +187,7 @@ def build_ass(
     clip_words: List[Word], clip_start: float, output_path: Path,
     play_res: Tuple[int, int] = _BASE_PLAY_RES,
     hook_text: Optional[str] = None,
+    punchy: bool = False,
 ) -> Path:
     """clip_words are absolute-time Word objects that fall within the clip;
     clip_start is subtracted so the .ass timeline starts at 0 for this clip.
@@ -192,7 +205,9 @@ def build_ass(
     landscape recap) so captions land where the style values expect them
     rather than however libass happens to stretch a mismatched canvas."""
     lines = [_ass_header(play_res)]
-    for group in _group_words(clip_words):
+    groups = _group_words(clip_words, _POP_MAX_WORDS, _POP_MAX_SPAN) if punchy else _group_words(clip_words)
+    style, pop = ("CaptionPop", _POP_IN) if punchy else ("Caption", "")
+    for group in groups:
         g_start = group[0].start - clip_start
         g_end = group[-1].end - clip_start
         # \k tags highlight one word at a time (centiseconds per word)
@@ -202,7 +217,7 @@ def build_ass(
             parts.append(f"{{\\k{dur_cs}}}{_escape_ass_text(w.text.upper())} ")
         text = "".join(parts).strip()
         lines.append(
-            f"Dialogue: 0,{_fmt_ts(g_start)},{_fmt_ts(g_end)},Caption,,0,0,0,,{text}"
+            f"Dialogue: 0,{_fmt_ts(g_start)},{_fmt_ts(g_end)},{style},,0,0,0,,{pop}{text}"
         )
     hook = clean_hook_text(hook_text)
     if hook:
