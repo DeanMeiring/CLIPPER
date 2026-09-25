@@ -623,7 +623,18 @@ def _render_all(
         else:
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
         build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True)
-        _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
+        try:
+            _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
+        except RuntimeError as e:
+            if plan is None:
+                raise
+            # The edits are a bonus; a failed edit pass costs this clip its
+            # edits, never the clip -- or the rest of the job.
+            print(f"[edit_plan] edited render of {out_path.name} failed, rendering it without edits: {e}", flush=True)
+            plan = None
+            caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
+            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True)
+            _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
         facecam_uncertain = False
         source_frame_name = None

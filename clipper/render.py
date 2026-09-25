@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -232,6 +233,91 @@ def _has_audio(path: Path) -> bool:
     return r.returncode == 0 and bool(json.loads(r.stdout or "{}").get("streams"))
 
 
+def _frame_rate(path: Path) -> str:
+    """The video's frame rate as an ffmpeg rational, sanity-checked --
+    stream recordings can report nonsense (a 1/1000000 timebase read as
+    1,000,000 fps), which x264 then refuses to encode sensibly."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        stream = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            num, _, den = str(stream.get(key) or "0/0").partition("/")
+            if float(den or 0) > 0 and 10 <= float(num) / float(den) <= 120:
+                return f"{num}/{den}"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return "30"
+
+
+# The edit passes cap x264's threads: on a many-core host it defaults to
+# dozens, each holding full-size frames, which alone costs >1.5 GB per encode.
+_EDIT_THREADS = "8"
+
+
+def _run_ffmpeg(cmd: list, what: str, timeout: int = 600) -> None:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s {what}") from e
+    if result.returncode != 0:
+        # The real error is usually early, before ffmpeg's progress lines.
+        err = result.stderr
+        detail = err if len(err) <= 3000 else f"{err[:1500]}\n...\n{err[-1500:]}"
+        raise RuntimeError(f"ffmpeg failed {what} (exit {result.returncode}):\n{detail}")
+
+
+def apply_edits(base: Path, plan, ass_path: Path, output_path: Path, out_w: int = 1080, out_h: int = 1920) -> Path:
+    """Cut, reorder and zoom an already-rendered, caption-less clip per the
+    plan, then burn in captions timed to the edited timeline.
+
+    Each piece is its own small ffmpeg run (seek, zoom, encode), and the
+    pieces are then joined and captioned in one more. Doing it all in one
+    filtergraph -- every piece trimmed out of a single decoded stream --
+    lets the decoder race ahead of the encoder and queue uncompressed
+    1080x1920 frames for the pieces not yet reached: ~4-5 GB on a 45s clip,
+    which is what failed real jobs on the 8 GB server."""
+    audio = _has_audio(base)
+    fps = _frame_rate(base)
+    work = output_path.with_name(f".{output_path.stem}.pieces")
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        listing = []
+        for i, piece in enumerate(plan.pieces):
+            seg = work / f"{i:02d}.mp4"
+            vf = "setsar=1"
+            if piece.zoom > 1.0:
+                zw, zh = int(round(out_w * piece.zoom / 2)) * 2, int(round(out_h * piece.zoom / 2)) * 2
+                vf = f"scale={zw}:{zh},crop={out_w}:{out_h},setsar=1"
+            fade = min(0.012, piece.length / 4)
+            _run_ffmpeg([
+                "ffmpeg", "-y", "-ss", f"{piece.start:.3f}", "-i", str(base), "-t", f"{piece.length:.3f}",
+                "-vf", f"{vf},fps={fps}",
+                *([
+                    "-af", f"afade=t=in:d={fade:.3f},afade=t=out:st={max(0.0, piece.length - fade):.3f}:d={fade:.3f}",
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                ] if audio else ["-an"]),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-threads", _EDIT_THREADS, "-r", fps,
+                str(seg),
+            ], f"cutting piece {i} of {output_path.name}")
+            listing.append(f"file '{seg.name}'")
+        (work / "list.txt").write_text("\n".join(listing) + "\n", encoding="utf-8")
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(work / "list.txt"),
+            "-vf", f"ass='{_escape_for_filter(ass_path)}'",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", _EDIT_THREADS, "-r", fps,
+            *(["-c:a", "aac", "-b:a", "160k"] if audio else ["-an"]),
+            "-movflags", "+faststart",
+            str(output_path),
+        ], f"joining {output_path.name}", timeout=900)
+        return output_path
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def render_edited(
     source_video: Path,
     start: float,
@@ -244,9 +330,9 @@ def render_edited(
     out_h: int = 1920,
 ) -> Path:
     """Render a clip with its pacing edits (edit_plan.EditPlan): the layout
-    rendered clean first, then its kept pieces joined in plan order -- zoomed
-    where the plan says -- and the captions, already timed to the edited
-    timeline, burned in last so they're never zoomed or cut mid-word.
+    rendered clean first, then apply_edits joins its kept pieces in plan
+    order -- zoomed where the plan says -- and burns in the captions, already
+    timed to the edited timeline, so they're never zoomed or cut mid-word.
 
     A trivial plan (nothing cut, zoomed or teased) is a single render_clip
     pass, exactly as before edits existed."""
@@ -257,40 +343,6 @@ def render_edited(
     try:
         # Near-lossless: this is an intermediate that gets encoded once more.
         render_clip(source_video, start, end, layout, None, base, out_w, out_h, crf=14)
-        audio = _has_audio(base)
-        parts, labels = [], []
-        for i, piece in enumerate(plan.pieces):
-            v = f"[0:v]trim=start={piece.start:.3f}:end={piece.end:.3f},setpts=PTS-STARTPTS"
-            if piece.zoom > 1.0:
-                zw, zh = int(round(out_w * piece.zoom / 2)) * 2, int(round(out_h * piece.zoom / 2)) * 2
-                v += f",scale={zw}:{zh},crop={out_w}:{out_h}"
-            parts.append(f"{v}[v{i}];")
-            labels.append(f"[v{i}]")
-            if audio:
-                fade = min(0.012, piece.length / 4)
-                parts.append(
-                    f"[0:a]atrim=start={piece.start:.3f}:end={piece.end:.3f},asetpts=PTS-STARTPTS,"
-                    f"afade=t=in:d={fade:.3f},afade=t=out:st={max(0.0, piece.length - fade):.3f}:d={fade:.3f}[a{i}];"
-                )
-                labels.append(f"[a{i}]")
-        n = len(plan.pieces)
-        parts.append(f"{''.join(labels)}concat=n={n}:v=1:a={1 if audio else 0}[cv]{'[ca]' if audio else ''};")
-        parts.append(f"[cv]ass='{_escape_for_filter(ass_path)}'[outv]")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(base),
-            "-filter_complex", "".join(parts),
-            "-map", "[outv]", *(["-map", "[ca]"] if audio else []),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            *(["-c:a", "aac", "-b:a", "160k"] if audio else []),
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s editing {output_path.name}") from e
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed editing {output_path.name}:\n{result.stderr[-2000:]}")
-        return output_path
+        return apply_edits(base, plan, ass_path, output_path, out_w, out_h)
     finally:
         base.unlink(missing_ok=True)
