@@ -39,7 +39,8 @@ from clipper.reframe import (
     compute_layout,
     layout_from_manual_boxes,
 )
-from clipper.render import render_clip, trim_clip, overlay_hook_line
+from clipper.render import render_clip, render_edited, trim_clip, overlay_hook_line
+from clipper.edit_plan import EditPlan, Piece, clip_levels, plan_edit, remap_words
 from clipper import facecam_vision
 from clipper.select_moments import select_clips
 from clipper.transcribe import Word, get_transcript
@@ -184,6 +185,10 @@ class JobRequest(BaseModel):
     # Burn each clip's hook_caption into its first few seconds (see
     # captions.build_ass). Kept per job so "generate more" matches.
     hook_text: bool = True
+    # Cut quiet pauses and punch in on audio spikes (see clipper/edit_plan.py).
+    pacing: bool = True
+    # Open each clip on a ~1.4s flash of its loudest late moment.
+    teaser: bool = False
 
 
 class RegenerateRequest(BaseModel):
@@ -361,7 +366,7 @@ def _run_job(job_id: str) -> None:
     # the upload button, so clamp here rather than let a job silently
     # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
-    _set(job_id, hook_text=req.hook_text)
+    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -456,14 +461,17 @@ def _run_job(job_id: str) -> None:
         _set(job_id, state="error", error="Model returned no usable picks.")
         return
 
-    clips_meta = _render_all(job_id, out_dir, render_items, render_base, [], hook_text=req.hook_text)
+    clips_meta = _render_all(
+        job_id, out_dir, render_items, render_base, [],
+        hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser,
+    )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
 
 
 def _render_atomic(
     video_path: Path, start: float, end: float, layout, ass_path: Path, out_path: Path,
-    out_w: int = 1080, out_h: int = 1920,
+    out_w: int = 1080, out_h: int = 1920, plan: Optional[EditPlan] = None,
 ) -> None:
     """Render to a temp file alongside the target, then move it into place
     in one step.
@@ -480,7 +488,9 @@ def _render_atomic(
     new one, never a partial."""
     tmp_path = out_path.with_name(f".{out_path.stem}.partial{out_path.suffix}")
     try:
-        render_clip(video_path, start, end, layout, ass_path, tmp_path, out_w=out_w, out_h=out_h)
+        # With a plan, the .ass was written for the edited timeline, so the
+        # edits must be applied again on every re-render of this clip.
+        render_edited(video_path, start, end, layout, plan, ass_path, tmp_path, out_w=out_w, out_h=out_h)
         os.replace(tmp_path, out_path)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -557,16 +567,42 @@ def _remove_clip_files(out_dir: Path, filename: str) -> None:
         (out_dir / name).unlink(missing_ok=True)
 
 
+def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, teaser: bool) -> Optional[EditPlan]:
+    """This clip's pacing edits, or None to render it straight through.
+    Never fails a render: any problem planning just means no edits."""
+    if not pacing and not teaser:
+        return None
+    try:
+        levels = clip_levels(video_path, pick.start, pick.end)
+        plan = plan_edit(clip_words, pick.start, pick.end, levels, teaser=teaser, max_len=MAX_SHORT_SECONDS)
+        if not pacing:
+            # Teaser only: the clip itself plays through uncut and unzoomed.
+            whole = Piece(0.0, round(pick.end - pick.start, 3))
+            plan = EditPlan(([plan.pieces[0]] if plan.teaser else []) + [whole], teaser=plan.teaser)
+    except Exception as e:  # noqa: BLE001 - a clip without edits beats no clip
+        print(f"[edit_plan] planning failed, rendering without edits: {e}", flush=True)
+        return None
+    if plan.is_trivial(pick.end - pick.start):
+        return None
+    print(
+        f"[edit_plan] {pick.start:.1f}-{pick.end:.1f}s: cut {plan.cut_seconds:.1f}s of pauses "
+        f"({len(plan.cuts)} cut(s)), {plan.zooms} zoom(s), teaser={'yes' if plan.teaser else 'no'} "
+        f"-> {plan.duration:.1f}s", flush=True,
+    )
+    return plan
+
+
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
-    hook_text: bool = True,
+    hook_text: bool = True, pacing: bool = True, teaser: bool = False,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
     progress/state as it goes. Shared by a fresh run and a regenerate run --
     they only differ in what render_items contains and whether clips_meta
     starts empty or with clips from a prior run. hook_text burns each pick's
-    hook_caption into the top of its first few seconds."""
+    hook_caption into the top of its first few seconds; pacing and teaser
+    control the edits in clipper/edit_plan.py."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -581,8 +617,13 @@ def _render_all(
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         burned_hook = clean_hook_text(pick.hook_caption) if hook_text else ""
-        build_ass(clip_words, pick.start, ass_path, hook_text=burned_hook)
-        _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
+        plan = _plan_edit(video_path, pick, clip_words, pacing, teaser)
+        if plan is not None:
+            caption_words, caption_start, out_duration = remap_words(clip_words, pick.start, plan), 0.0, plan.duration
+        else:
+            caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
+        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True)
+        _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
 
         facecam_uncertain = False
         source_frame_name = None
@@ -639,7 +680,7 @@ def _render_all(
                     fallback_layout = (
                         LetterboxLayout() if is_wide_scene else center_crop_layout(video_path, target_w=1080, target_h=1920)
                     )
-                    _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path)
+                    _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path, plan=plan)
                     final_layout = fallback_layout
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
@@ -659,13 +700,21 @@ def _render_all(
             source_frame_name = source_frame_path.name
             print(f"[render] saved the source frame for manual facecam placement as {source_frame_name}", flush=True)
 
-        _record_clip(job_id, pick, clip_words, out_path, final_layout, burned_hook)
+        _record_clip(
+            job_id, pick, caption_words, caption_start, out_duration, out_path, final_layout, burned_hook, plan,
+        )
 
         clips_meta.append({
             "file": out_path.name,
             "start": pick.start,
             "end": pick.end,
-            "duration": round(pick.end - pick.start, 2),
+            # Length of the finished video -- shorter than end - start once
+            # pauses are cut, a little longer with a teaser.
+            "duration": round(out_duration, 2),
+            "score": getattr(pick, "score", None),
+            # Kept so a facecam/IRL re-render applies the same edits the
+            # clip's caption file was timed for.
+            "edit_plan": plan.to_dict() if plan else None,
             "title": pick.title,
             "hook_caption": pick.hook_caption,
             # What's actually burned into the video's opening, if anything.
@@ -719,7 +768,8 @@ def _registry_id(job_id: str, clip: dict) -> str:
 
 
 def _record_clip(
-    job_id: str, pick, clip_words: List[Word], out_path: Path, layout, hook_text: str = "",
+    job_id: str, pick, words: List[Word], words_start: float, out_duration: float, out_path: Path, layout,
+    hook_text: str = "", plan: Optional[EditPlan] = None,
 ) -> None:
     """Save what this clip looks like to the clip registry, so its posted
     video's performance can later be compared against it. Never allowed to
@@ -738,14 +788,21 @@ def _record_clip(
             "pipeline": pipeline,
             "start": pick.start,
             "end": pick.end,
-            "duration": round(pick.end - pick.start, 2),
+            "duration": round(out_duration, 2),
             "title": pick.title,
             "hook_caption": pick.hook_caption,
             "upload_title": pick.upload_title,
             "reason": pick.reason,
             "layout": _layout_name(layout),
             "hook_text": hook_text or None,
-            "features": clip_features.measure_clip(clip_words, pick.start, pick.end, out_path),
+            "score": getattr(pick, "score", None),
+            "edits": (
+                {"cut_seconds": round(plan.cut_seconds, 2), "zooms": plan.zooms, "teaser": plan.teaser}
+                if plan else None
+            ),
+            # Measured on the finished video (edited timeline), since that's
+            # what viewers actually see.
+            "features": clip_features.measure_clip(words, words_start, words_start + out_duration, out_path),
         })
     except Exception as e:  # noqa: BLE001 - recording must never fail a render
         print(f"[clip_registry] could not record {out_path.name}: {e}", flush=True)
@@ -1094,6 +1151,8 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         source_duration = job.get("duration") or 0.0
         existing_clips = list(job.get("clips") or [])
         hook_text = job.get("hook_text", True)
+        pacing = job.get("pacing", True)
+        teaser = job.get("teaser", False)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1175,7 +1234,10 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         _set(job_id, state="error", error="Claude didn't return any new, non-overlapping moments this time -- try a different focus.")
         return
 
-    clips_meta = _render_all(job_id, out_dir, render_items, 0.15, existing_clips, hook_text=hook_text)
+    clips_meta = _render_all(
+        job_id, out_dir, render_items, 0.15, existing_clips,
+        hook_text=hook_text, pacing=pacing, teaser=teaser,
+    )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
 
@@ -1217,7 +1279,8 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
             if not ass_path.exists():
                 raise RuntimeError("its caption file is missing")
             layout = layout_from_manual_boxes(video_path, boxes, target_w=1080, target_h=1920)
-            _render_atomic(video_path, clip["start"], clip["end"], layout, ass_path, out_dir / filename)
+            _render_atomic(video_path, clip["start"], clip["end"], layout, ass_path, out_dir / filename,
+                           plan=EditPlan.from_dict(clip.get("edit_plan")))
         except Exception as e:  # noqa: BLE001 - one clip failing shouldn't lose the rest of the batch
             print(f"[render] manual facecam re-render of {filename} failed: {e}", flush=True)
             failed.append(f"{filename}: {e}")
@@ -1278,7 +1341,8 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
             ass_path = out_dir / f"_{Path(filename).stem}.ass"
             if not ass_path.exists():
                 raise RuntimeError("its caption file is missing")
-            _render_atomic(video_path, clip["start"], clip["end"], LetterboxLayout(), ass_path, out_dir / filename)
+            _render_atomic(video_path, clip["start"], clip["end"], LetterboxLayout(), ass_path, out_dir / filename,
+                           plan=EditPlan.from_dict(clip.get("edit_plan")))
         except Exception as e:  # noqa: BLE001 - one clip failing shouldn't lose the rest of the batch
             print(f"[render] manual IRL re-render of {filename} failed: {e}", flush=True)
             failed.append(f"{filename}: {e}")
@@ -3824,6 +3888,8 @@ INDEX_HTML = """<!doctype html>
   .creator-card img { width: 100%; height: 72px; object-fit: cover; border-radius: 6px; background: var(--track); display: block; }
   .creator-card .name { font-size: 0.78rem; font-weight: 700; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .creator-card .meta { font-size: 0.7rem; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .score-badge { display: inline-block; margin-left: 8px; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); vertical-align: middle; }
+  .score-badge.best { background: #fff4cc; border-color: #f2c200; color: #5c4700; }
   .live-badge { display: inline-block; background: var(--danger); color: #fff; font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-top: 6px; letter-spacing: 0.03em; }
   #recommend-vod-btn { padding: 8px 16px; }
   .recommend-card { display: flex; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
@@ -3917,7 +3983,7 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div>
     <label>Max length (s)</label>
-    <input id="max_len" type="number" value="60" max="60">
+    <input id="max_len" type="number" value="45" max="60">
     <div class="hint">Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.</div>
   </div>
 </div>
@@ -3925,6 +3991,16 @@ INDEX_HTML = """<!doctype html>
 <div class="checkbox-row">
   <input id="whisper" type="checkbox" checked>
   <label for="whisper">Accurate captions (Whisper)<div class="hint">Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).</div></label>
+</div>
+
+<div class="checkbox-row">
+  <input id="pacing" type="checkbox" checked>
+  <label for="pacing">Tighten pacing<div class="hint">Cuts quiet pauses out of each clip and zooms in on loud reactions, so it never goes slow.</div></label>
+</div>
+
+<div class="checkbox-row">
+  <input id="teaser" type="checkbox">
+  <label for="teaser">Payoff teaser<div class="hint">Opens each clip on a 1-second flash of its biggest moment, then plays it from the start. A strong hook, but try it on a few clips before making it a habit.</div></label>
 </div>
 
 <div class="checkbox-row">
@@ -4447,6 +4523,8 @@ async function submitJob() {
     max_len: parseFloat(document.getElementById('max_len').value),
     whisper: document.getElementById('whisper').checked,
     hook_text: document.getElementById('hook_text').checked,
+    pacing: document.getElementById('pacing').checked,
+    teaser: document.getElementById('teaser').checked,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',
@@ -5125,6 +5203,8 @@ async function poll(jobId) {
   }
 
   clipsEl.innerHTML = '';
+  const scored = (job.clips || []).filter(c => typeof c.score === 'number' && !c.is_recap);
+  const bestScore = scored.length > 1 ? Math.max(...scored.map(c => c.score)) : null;
   (job.clips || []).forEach(c => {
     const div = document.createElement('div');
     div.className = 'clip';
@@ -5134,6 +5214,14 @@ async function poll(jobId) {
     strong.textContent = c.title;
     heading.appendChild(strong);
     heading.appendChild(document.createTextNode(` (${c.duration}s)`));
+    if (typeof c.score === 'number') {
+      const best = bestScore !== null && c.score === bestScore;
+      const badge = document.createElement('span');
+      badge.className = 'score-badge' + (best ? ' best' : '');
+      badge.textContent = best ? `⭐ Post this one first · ${c.score}/10` : `${c.score}/10`;
+      badge.title = c.reason || '';
+      heading.appendChild(badge);
+    }
     div.appendChild(heading);
 
     if (c.hook_caption) {

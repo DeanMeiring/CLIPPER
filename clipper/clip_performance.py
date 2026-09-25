@@ -77,6 +77,8 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
                 "link_method": record.get("link_method"),
                 "hook_caption": record.get("hook_caption"),
                 "hook_text": record.get("hook_text"),
+                "score": record.get("score"),
+                "edits": record.get("edits"),
             }
         rows.append(row)
     return rows
@@ -150,6 +152,28 @@ def _hook_text(row: dict) -> Optional[str]:
     return "yes" if clip.get("hook_text") else "no"
 
 
+def _paced(row: dict) -> Optional[str]:
+    clip = row.get("clip")
+    if not clip:
+        return None
+    # Clips made before pacing edits existed had none.
+    return "yes" if (clip.get("edits") or {}).get("cut_seconds", 0) > 0 else "no"
+
+
+def _teaser(row: dict) -> Optional[str]:
+    clip = row.get("clip")
+    if not clip:
+        return None
+    return "yes" if (clip.get("edits") or {}).get("teaser") else "no"
+
+
+def _score(row: dict) -> Optional[str]:
+    clip = row.get("clip")
+    if not clip or clip.get("score") is None:
+        return None
+    return "8-10" if clip["score"] >= 8 else "5-7" if clip["score"] >= 5 else "1-4"
+
+
 def _layout(row: dict) -> Optional[str]:
     clip = row.get("clip")
     if not clip or not clip.get("layout"):
@@ -169,11 +193,14 @@ GROUPS: List[tuple] = [
      ["louder than the rest", "about the same", "quieter than the rest"]),
     ("layout", "Layout", _layout, list(_LAYOUT_LABELS.values())),
     ("hook_text", "Hook text on screen for the first 3s", _hook_text, ["yes", "no"]),
+    ("paced", "Pauses cut out", _paced, ["yes", "no"]),
+    ("teaser", "Opens on a payoff teaser", _teaser, ["yes", "no"]),
+    ("score", "Claude's score when it picked the clip", _score, ["8-10", "5-7", "1-4"]),
 ]
 
 # Groups built from this app's own measurements -- only clips made here and
 # matched to a posted video can fill these.
-MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text"}
+MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text", "paced", "teaser", "score"}
 
 
 def _mean(values: list) -> Optional[float]:

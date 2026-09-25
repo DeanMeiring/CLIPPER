@@ -1,8 +1,10 @@
 """Cut, crop, and burn captions into a single output clip via ffmpeg."""
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from .reframe import CropWindow, Layout, LetterboxLayout, MultiCamSplitLayout, SplitLayout
 
@@ -35,14 +37,17 @@ def render_clip(
     start: float,
     end: float,
     layout: Layout,
-    ass_path: Path,
+    ass_path: Optional[Path],
     output_path: Path,
     out_w: int = 1080,
     out_h: int = 1920,
+    crf: int = 20,
 ) -> Path:
+    """ass_path None renders without captions -- the base for render_edited,
+    which burns them in after its own cuts."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     duration = max(0.1, end - start)
-    ass = _escape_for_filter(ass_path)
+    burn = f"ass='{_escape_for_filter(ass_path)}'" if ass_path else "null"
 
     if isinstance(layout, MultiCamSplitLayout):
         top = layout.top
@@ -57,7 +62,7 @@ def render_clip(
             tile_labels.append(f"[{label}]")
         parts.append(f"{''.join(tile_labels)}hstack=inputs={len(tile_labels)}[bottom];")
         parts.append("[top][bottom]vstack=inputs=2[stacked];")
-        parts.append(f"[stacked]ass='{ass}'[outv]")
+        parts.append(f"[stacked]{burn}[outv]")
         filter_complex = "".join(parts)
         cmd = [
             "ffmpeg", "-y",
@@ -66,7 +71,7 @@ def render_clip(
             "-t", f"{duration:.3f}",
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-c:a", "aac", "-b:a", "160k",
             "-movflags", "+faststart",
             str(output_path),
@@ -78,7 +83,7 @@ def render_clip(
             f"[0:v]crop={bottom.w}:{bottom.h}:{bottom.x}:{bottom.y},"
             f"{_letterbox_scale_pad(out_w, layout.bottom_out_h)}[bottom];"
             f"[top][bottom]vstack=inputs=2[stacked];"
-            f"[stacked]ass='{ass}'[outv]"
+            f"[stacked]{burn}[outv]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -87,7 +92,7 @@ def render_clip(
             "-t", f"{duration:.3f}",
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-c:a", "aac", "-b:a", "160k",
             "-movflags", "+faststart",
             str(output_path),
@@ -106,7 +111,7 @@ def render_clip(
             f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h},gblur=sigma=20[bg2];"
             f"[fg]scale={out_w}:-2:force_original_aspect_ratio=decrease[fg2];"
-            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,ass='{ass}'[outv]"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,{burn}[outv]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -115,7 +120,7 @@ def render_clip(
             "-t", f"{duration:.3f}",
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-c:a", "aac", "-b:a", "160k",
             "-movflags", "+faststart",
             str(output_path),
@@ -125,7 +130,7 @@ def render_clip(
         vf = (
             f"crop={crop.w}:{crop.h}:{crop.x}:{crop.y},"
             f"scale={out_w}:{out_h},"
-            f"ass='{ass}'"
+            f"{burn}"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -133,7 +138,7 @@ def render_clip(
             "-i", str(source_video),
             "-t", f"{duration:.3f}",
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-c:a", "aac", "-b:a", "160k",
             "-movflags", "+faststart",
             str(output_path),
@@ -217,3 +222,75 @@ def overlay_hook_line(source_path: Path, ass_path: Path, output_path: Path) -> P
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed adding the hook line to {source_path.name}:\n{result.stderr[-2000:]}")
     return output_path
+
+
+def _has_audio(path: Path) -> bool:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    return r.returncode == 0 and bool(json.loads(r.stdout or "{}").get("streams"))
+
+
+def render_edited(
+    source_video: Path,
+    start: float,
+    end: float,
+    layout: Layout,
+    plan,
+    ass_path: Path,
+    output_path: Path,
+    out_w: int = 1080,
+    out_h: int = 1920,
+) -> Path:
+    """Render a clip with its pacing edits (edit_plan.EditPlan): the layout
+    rendered clean first, then its kept pieces joined in plan order -- zoomed
+    where the plan says -- and the captions, already timed to the edited
+    timeline, burned in last so they're never zoomed or cut mid-word.
+
+    A trivial plan (nothing cut, zoomed or teased) is a single render_clip
+    pass, exactly as before edits existed."""
+    if plan is None or plan.is_trivial(end - start):
+        return render_clip(source_video, start, end, layout, ass_path, output_path, out_w, out_h)
+
+    base = output_path.with_name(f".{output_path.stem}.base{output_path.suffix}")
+    try:
+        # Near-lossless: this is an intermediate that gets encoded once more.
+        render_clip(source_video, start, end, layout, None, base, out_w, out_h, crf=14)
+        audio = _has_audio(base)
+        parts, labels = [], []
+        for i, piece in enumerate(plan.pieces):
+            v = f"[0:v]trim=start={piece.start:.3f}:end={piece.end:.3f},setpts=PTS-STARTPTS"
+            if piece.zoom > 1.0:
+                zw, zh = int(round(out_w * piece.zoom / 2)) * 2, int(round(out_h * piece.zoom / 2)) * 2
+                v += f",scale={zw}:{zh},crop={out_w}:{out_h}"
+            parts.append(f"{v}[v{i}];")
+            labels.append(f"[v{i}]")
+            if audio:
+                fade = min(0.012, piece.length / 4)
+                parts.append(
+                    f"[0:a]atrim=start={piece.start:.3f}:end={piece.end:.3f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=in:d={fade:.3f},afade=t=out:st={max(0.0, piece.length - fade):.3f}:d={fade:.3f}[a{i}];"
+                )
+                labels.append(f"[a{i}]")
+        n = len(plan.pieces)
+        parts.append(f"{''.join(labels)}concat=n={n}:v=1:a={1 if audio else 0}[cv]{'[ca]' if audio else ''};")
+        parts.append(f"[cv]ass='{_escape_for_filter(ass_path)}'[outv]")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(base),
+            "-filter_complex", "".join(parts),
+            "-map", "[outv]", *(["-map", "[ca]"] if audio else []),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *(["-c:a", "aac", "-b:a", "160k"] if audio else []),
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"ffmpeg timed out after {e.timeout:.0f}s editing {output_path.name}") from e
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed editing {output_path.name}:\n{result.stderr[-2000:]}")
+        return output_path
+    finally:
+        base.unlink(missing_ok=True)

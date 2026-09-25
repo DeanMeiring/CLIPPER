@@ -44,6 +44,9 @@ class ClipPick:
     upload_title: str
     description: str
     reason: str
+    # 1-10, Claude's own call on how well this clip will hold viewers,
+    # relative to the other picks in the batch; None if it gave none.
+    score: Optional[int] = None
 
 
 @dataclass
@@ -60,6 +63,9 @@ class WindowPick:
     upload_title: str
     description: str
     reason: str
+    # 1-10, Claude's own call on how well this clip will hold viewers,
+    # relative to the other picks in the batch; None if it gave none.
+    score: Optional[int] = None
 
 
 def _salvage_json_array(raw: str) -> Optional[list]:
@@ -328,7 +334,8 @@ second or two whether to keep watching or swipe away. So each clip must:
   "okay so", "chat"), dead air, or the tail of an unrelated sentence
 - be the tightest cut that still holds the setup and the payoff. On
   streamer-clip channels most breakout Shorts run 15-35 seconds (median
-  around 25); go longer only when the story needs it, never to pad
+  around 25). Past 35 seconds only for a story with several real beats
+  that all pay off -- a single reaction never needs that long
 - end right after the payoff lands (the punchline, the reaction, the
   result), with no trailing chatter -- a tight ending also loops cleanly
   back into the hook
@@ -345,7 +352,15 @@ _PICK_FIELDS = """    "start_words": "the exact first 3-6 words spoken in the cl
     "hook_caption": "text burned onto the top of the video for its first 3 seconds: 3-7 words telling a scrolling viewer why to stay -- who, and the tension or setup of this specific moment. Not a generic 'wait for it', and not the punchline itself. Normal sentence case with at most one word in ALL CAPS, no emoji (they can't be rendered), no hashtags, and not a copy of upload_title",
     "upload_title": "the title to post the clip with. What the biggest recent Shorts on streamer-clip channels (Jynxzi, Stable Ronaldo and similar) have in common: the streamer's name comes first, it's about 6 words, and it says the specific thing that happens instead of teasing it; many end with one emoji (😭 🤣 😂 🤯 👀) and some put one word in ALL CAPS for emphasis. Questions and vague clickbait ('you won't believe...') are rare among them -- avoid both. Style examples, not to copy: 'Stable Ronaldo Chooses the Wrong ENDING In GTA V 🤯', 'Jynxzi *ATTEMPTS* to do MATH 🤣', 'Bodycam turns Jynxzi Evil'. Use the name viewers know the streamer by, from the transcript or source title; if you can't tell who it is, lead with the most specific thing that happens. No hashtags, under 60 characters",
     "description": "the post description: 1-2 short sentences on who's in it, what happens and why it's worth watching (credit the streamer by name), then 3-5 hashtags (#shorts, the streamer, the game or topic). No links",
-    "reason": "one sentence on why this moment holds a viewer past the first few seconds, noting if this channel's own data factored in\""""
+    "reason": "one sentence on why this moment holds a viewer past the first few seconds, noting if this channel's own data factored in",
+    "score": "whole number 1-10: how likely this clip is to hold scrolling viewers and pull views, compared with the other clips you picked -- spread the scores out (the best of the batch should clearly stand out) rather than giving everything a 7 or 8\""""
+
+
+def _score(value) -> Optional[int]:
+    try:
+        return max(1, min(10, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return None
 
 
 def _log_cut(rough_start: float, rough_end: float, cut: Cut) -> None:
@@ -429,6 +444,7 @@ Transcript:
             upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
+            score=_score(item.get("score")),
         ))
 
     picks.sort(key=lambda p: p.start)
@@ -549,6 +565,7 @@ Candidate windows:
             upload_title=_with_shorts_tag(str(item.get("upload_title", "")).strip() or title),
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
+            score=_score(item.get("score")),
         ))
 
     return picks[:n_clips]
