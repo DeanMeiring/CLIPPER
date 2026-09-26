@@ -189,6 +189,9 @@ class JobRequest(BaseModel):
     pacing: bool = True
     # Open each clip on a ~1.4s flash of its loudest late moment.
     teaser: bool = False
+    # The channel mascot in the corner and the channel name stamped beside it
+    # for the first few seconds (captions.brand_dialogues).
+    branding: bool = True
 
 
 class RegenerateRequest(BaseModel):
@@ -366,7 +369,7 @@ def _run_job(job_id: str) -> None:
     # the upload button, so clamp here rather than let a job silently
     # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
-    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser)
+    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -463,7 +466,7 @@ def _run_job(job_id: str) -> None:
 
     clips_meta = _render_all(
         job_id, out_dir, render_items, render_base, [],
-        hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser,
+        hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
@@ -594,7 +597,7 @@ def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, tea
 
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
-    hook_text: bool = True, pacing: bool = True, teaser: bool = False,
+    hook_text: bool = True, pacing: bool = True, teaser: bool = False, branding: bool = True,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -602,7 +605,8 @@ def _render_all(
     they only differ in what render_items contains and whether clips_meta
     starts empty or with clips from a prior run. hook_text burns each pick's
     hook_caption into the top of its first few seconds; pacing and teaser
-    control the edits in clipper/edit_plan.py."""
+    control the edits in clipper/edit_plan.py; branding adds the channel
+    mascot and name stamp."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -622,7 +626,7 @@ def _render_all(
             caption_words, caption_start, out_duration = remap_words(clip_words, pick.start, plan), 0.0, plan.duration
         else:
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True)
+        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
         try:
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
         except RuntimeError as e:
@@ -633,7 +637,7 @@ def _render_all(
             print(f"[edit_plan] edited render of {out_path.name} failed, rendering it without edits: {e}", flush=True)
             plan = None
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True)
+            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
         facecam_uncertain = False
@@ -713,6 +717,7 @@ def _render_all(
 
         _record_clip(
             job_id, pick, caption_words, caption_start, out_duration, out_path, final_layout, burned_hook, plan,
+            branding,
         )
 
         clips_meta.append({
@@ -732,6 +737,7 @@ def _render_all(
             "hook_caption": pick.hook_caption,
             # What's actually burned into the video's opening, if anything.
             "hook_text": burned_hook or None,
+            "branding": branding,
             "upload_title": pick.upload_title,
             "description": pick.description,
             "reason": pick.reason,
@@ -782,7 +788,7 @@ def _registry_id(job_id: str, clip: dict) -> str:
 
 def _record_clip(
     job_id: str, pick, words: List[Word], words_start: float, out_duration: float, out_path: Path, layout,
-    hook_text: str = "", plan: Optional[EditPlan] = None,
+    hook_text: str = "", plan: Optional[EditPlan] = None, branding: bool = False,
 ) -> None:
     """Save what this clip looks like to the clip registry, so its posted
     video's performance can later be compared against it. Never allowed to
@@ -808,6 +814,7 @@ def _record_clip(
             "reason": pick.reason,
             "layout": _layout_name(layout),
             "hook_text": hook_text or None,
+            "branding": branding,
             "score": getattr(pick, "score", None),
             "moment_type": getattr(pick, "moment_type", None),
             "subscores": getattr(pick, "subscores", None),
@@ -1168,6 +1175,9 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         hook_text = job.get("hook_text", True)
         pacing = job.get("pacing", True)
         teaser = job.get("teaser", False)
+        # Jobs from before branding existed get it on their new clips too:
+        # it's the channel's look now, not a per-job experiment.
+        branding = job.get("branding", True)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1251,7 +1261,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
 
     clips_meta = _render_all(
         job_id, out_dir, render_items, 0.15, existing_clips,
-        hook_text=hook_text, pacing=pacing, teaser=teaser,
+        hook_text=hook_text, pacing=pacing, teaser=teaser, branding=branding,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
@@ -4021,6 +4031,11 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <div class="checkbox-row">
+  <input id="branding" type="checkbox" checked>
+  <label for="branding">Channel mascot + name<div class="hint">Puts the channel's mascot in the top-left corner of every clip, with the channel name next to it for the first 3 seconds, so viewers start to recognise the channel.</div></label>
+</div>
+
+<div class="checkbox-row">
   <input id="hook_text" type="checkbox" checked>
   <label for="hook_text">Hook text on screen<div class="hint">Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.</div></label>
 </div>
@@ -4542,6 +4557,7 @@ async function submitJob() {
     hook_text: document.getElementById('hook_text').checked,
     pacing: document.getElementById('pacing').checked,
     teaser: document.getElementById('teaser').checked,
+    branding: document.getElementById('branding').checked,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',
