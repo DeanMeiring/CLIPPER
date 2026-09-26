@@ -723,6 +723,7 @@ def _render_all(
             # pauses are cut, a little longer with a teaser.
             "duration": round(out_duration, 2),
             "score": getattr(pick, "score", None),
+            "moment_type": getattr(pick, "moment_type", None),
             # Kept so a facecam/IRL re-render applies the same edits the
             # clip's caption file was timed for.
             "edit_plan": plan.to_dict() if plan else None,
@@ -807,6 +808,7 @@ def _record_clip(
             "layout": _layout_name(layout),
             "hook_text": hook_text or None,
             "score": getattr(pick, "score", None),
+            "moment_type": getattr(pick, "moment_type", None),
             "edits": (
                 {"cut_seconds": round(plan.cut_seconds, 2), "zooms": plan.zooms, "teaser": plan.teaser}
                 if plan else None
@@ -5229,7 +5231,8 @@ async function poll(jobId) {
       const best = bestScore !== null && c.score === bestScore;
       const badge = document.createElement('span');
       badge.className = 'score-badge' + (best ? ' best' : '');
-      badge.textContent = best ? `⭐ Post this one first · ${c.score}/10` : `${c.score}/10`;
+      const kind = c.moment_type ? `${c.moment_type} · ` : '';
+      badge.textContent = best ? `⭐ Post this one first · ${kind}${c.score}/10` : `${kind}${c.score}/10`;
       badge.title = c.reason || '';
       heading.appendChild(badge);
     }

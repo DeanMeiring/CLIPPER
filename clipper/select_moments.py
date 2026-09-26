@@ -47,6 +47,9 @@ class ClipPick:
     # 1-10, Claude's own call on how well this clip will hold viewers,
     # relative to the other picks in the batch; None if it gave none.
     score: Optional[int] = None
+    # What kind of moment it is (MOMENT_TYPES), so the Analyze page can
+    # compare which kinds actually hold viewers on this channel.
+    moment_type: Optional[str] = None
 
 
 @dataclass
@@ -66,6 +69,9 @@ class WindowPick:
     # 1-10, Claude's own call on how well this clip will hold viewers,
     # relative to the other picks in the batch; None if it gave none.
     score: Optional[int] = None
+    # What kind of moment it is (MOMENT_TYPES), so the Analyze page can
+    # compare which kinds actually hold viewers on this channel.
+    moment_type: Optional[str] = None
 
 
 def _salvage_json_array(raw: str) -> Optional[list]:
@@ -341,6 +347,13 @@ second or two whether to keep watching or swipe away. So each clip must:
   back into the hook
 - make sense to someone who has never watched this streamer and missed the
   rest of the stream
+
+Moments where the streamer takes a strong stance people will argue about --
+money, donations, other streamers, drama, a hot take -- pull comments and
+rewatches, and have been this channel's best performers: rank them highly
+when they also have a clear setup and payoff. Their titles and hook text
+must stick to what was actually said: no accusations, claims or framing the
+streamer didn't make.
 - be between {min_len:.0f} and {max_len:.0f} seconds long, and not overlap any other clip"""
 
 
@@ -353,7 +366,16 @@ _PICK_FIELDS = """    "start_words": "the exact first 3-6 words spoken in the cl
     "upload_title": "the title to post the clip with. What the biggest recent Shorts on streamer-clip channels (Jynxzi, Stable Ronaldo and similar) have in common: the streamer's name comes first, it's about 6 words, and it says the specific thing that happens instead of teasing it; many end with one emoji (😭 🤣 😂 🤯 👀) and some put one word in ALL CAPS for emphasis. Questions and vague clickbait ('you won't believe...') are rare among them -- avoid both. Style examples, not to copy: 'Stable Ronaldo Chooses the Wrong ENDING In GTA V 🤯', 'Jynxzi *ATTEMPTS* to do MATH 🤣', 'Bodycam turns Jynxzi Evil'. Use the name viewers know the streamer by, from the transcript or source title; if you can't tell who it is, lead with the most specific thing that happens. No hashtags, under 60 characters",
     "description": "the post description: 1-2 short sentences on who's in it, what happens and why it's worth watching (credit the streamer by name), then 3-5 hashtags (#shorts, the streamer, the game or topic). No links",
     "reason": "one sentence on why this moment holds a viewer past the first few seconds, noting if this channel's own data factored in",
+    "moment_type": "one of: controversy, drama, fail, rage, funny, skill, wholesome, other -- controversy is a stance or claim viewers will argue about (money, donations, other streamers, hot takes); drama is conflict between people",
     "score": "whole number 1-10: how likely this clip is to hold scrolling viewers and pull views, compared with the other clips you picked -- spread the scores out (the best of the batch should clearly stand out) rather than giving everything a 7 or 8\""""
+
+
+MOMENT_TYPES = ("controversy", "drama", "fail", "rage", "funny", "skill", "wholesome", "other")
+
+
+def _moment_type(value) -> Optional[str]:
+    label = str(value or "").strip().lower()
+    return label if label in MOMENT_TYPES else ("other" if label else None)
 
 
 def _score(value) -> Optional[int]:
@@ -445,6 +467,7 @@ Transcript:
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
             score=_score(item.get("score")),
+            moment_type=_moment_type(item.get("moment_type")),
         ))
 
     picks.sort(key=lambda p: p.start)
@@ -566,6 +589,7 @@ Candidate windows:
             description=str(item.get("description", "")).strip(),
             reason=str(item.get("reason", "")).strip(),
             score=_score(item.get("score")),
+            moment_type=_moment_type(item.get("moment_type")),
         ))
 
     return picks[:n_clips]
