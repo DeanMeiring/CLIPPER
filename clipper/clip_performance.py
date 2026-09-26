@@ -78,6 +78,7 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
                 "hook_caption": record.get("hook_caption"),
                 "hook_text": record.get("hook_text"),
                 "score": record.get("score"),
+                "moment_type": record.get("moment_type"),
                 "edits": record.get("edits"),
             }
         rows.append(row)
@@ -196,11 +197,13 @@ GROUPS: List[tuple] = [
     ("paced", "Pauses cut out", _paced, ["yes", "no"]),
     ("teaser", "Opens on a payoff teaser", _teaser, ["yes", "no"]),
     ("score", "Claude's score when it picked the clip", _score, ["8-10", "5-7", "1-4"]),
+    ("moment_type", "Kind of moment", lambda r: (r.get("clip") or {}).get("moment_type"),
+     ["controversy", "drama", "fail", "rage", "funny", "skill", "wholesome", "other"]),
 ]
 
 # Groups built from this app's own measurements -- only clips made here and
 # matched to a posted video can fill these.
-MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text", "paced", "teaser", "score"}
+MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text", "paced", "teaser", "score", "moment_type"}
 
 
 def _mean(values: list) -> Optional[float]:
