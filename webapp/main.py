@@ -4006,7 +4006,7 @@ INDEX_HTML = """<!doctype html>
 
 <div class="checkbox-row">
   <input id="pacing" type="checkbox" checked>
-  <label for="pacing">Tighten pacing<div class="hint">Cuts quiet pauses out of each clip and zooms in on loud reactions, so it never goes slow.</div></label>
+  <label for="pacing">Tighten pacing<div class="hint">Cuts quiet pauses out of each clip so it never goes slow.</div></label>
 </div>
 
 <div class="checkbox-row">
