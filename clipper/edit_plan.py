@@ -1,5 +1,5 @@
-"""Pacing edits for one clip: cut dead air, punch in on reactions, and
-optionally open on a flash of the payoff.
+"""Pacing edits for one clip: cut dead air, and optionally open on a flash
+of the payoff. (Punch-in zooms on reactions exist below but are off.)
 
 A clip is still picked and cut as one continuous stretch of the source
 (select_moments / cut_points). This decides what happens inside it: which
@@ -51,7 +51,10 @@ ZOOM_PEAK_DB = 8.0
 ZOOM = 1.15
 ZOOM_BEFORE = 0.25
 ZOOM_AFTER = 1.25
-MAX_ZOOMS = 3
+# Off: on real clips the in-and-out punch every few seconds read as a
+# glitch, not an edit. The machinery stays in case a subtler version is
+# wanted later.
+MAX_ZOOMS = 0
 MIN_ZOOM_SPACING = 4.0
 # The opening belongs to the hook text and the first words; don't zoom in
 # before the viewer has even registered the shot.
@@ -242,7 +245,7 @@ def plan_edit(
         candidates = [t for t in _peaks(levels, median, duration) if t >= search_from and kept(t)]
         if candidates:
             t = candidates[0]
-            piece = Piece(round(max(0.0, t - TEASER_BEFORE), 3), round(min(duration, t + TEASER_AFTER), 3), ZOOM)
+            piece = Piece(round(max(0.0, t - TEASER_BEFORE), 3), round(min(duration, t + TEASER_AFTER), 3))
             if max_len is None or plan.duration + piece.length <= max_len:
                 plan.pieces.insert(0, piece)
                 plan.teaser = True
