@@ -277,6 +277,7 @@ from each service's own dashboard.
 | `ANTHROPIC_API_KEY` | everything | Claude API key, used for clip selection everywhere |
 | `CLIPPER_SELECT_MODEL` | — | Claude model id for picking and cutting clips (optional; default `claude-opus-5`) |
 | `CLIPPER_MODEL` | — | Claude model id for everything else -- facecam checks, hook lines, recaps, channel analysis -- and the backup when the clip-picking model is unavailable (optional) |
+| `CLIPPER_BRAND_NAME` | — | channel name stamped next to the mascot in each clip's opening (optional; default `Caught On Stream`) |
 | `APP_PASSWORD` | — | HTTP Basic auth password for the whole app; unset = no auth (local dev only) |
 | `CLIPPER_JOBS_DIR` | — | where job state/output lives; point at a mounted volume in production |
 | `YTDLP_COOKIES` / `YTDLP_COOKIES_FILE` | YouTube downloads from a cloud IP | exported browser cookies, to get past YouTube's bot check |
