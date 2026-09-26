@@ -79,6 +79,7 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
                 "hook_text": record.get("hook_text"),
                 "score": record.get("score"),
                 "moment_type": record.get("moment_type"),
+                "subscores": record.get("subscores"),
                 "edits": record.get("edits"),
             }
         rows.append(row)
@@ -168,6 +169,12 @@ def _teaser(row: dict) -> Optional[str]:
     return "yes" if (clip.get("edits") or {}).get("teaser") else "no"
 
 
+def _band(value) -> Optional[str]:
+    if value is None:
+        return None
+    return "8-10" if value >= 8 else "5-7" if value >= 5 else "1-4"
+
+
 def _score(row: dict) -> Optional[str]:
     clip = row.get("clip")
     if not clip or clip.get("score") is None:
@@ -197,13 +204,17 @@ GROUPS: List[tuple] = [
     ("paced", "Pauses cut out", _paced, ["yes", "no"]),
     ("teaser", "Opens on a payoff teaser", _teaser, ["yes", "no"]),
     ("score", "Claude's score when it picked the clip", _score, ["8-10", "5-7", "1-4"]),
+    ("hook_score", "Claude's hook score", lambda r: _band(((r.get("clip") or {}).get("subscores") or {}).get("hook")),
+     ["8-10", "5-7", "1-4"]),
+    ("controversy_score", "Claude's controversy score",
+     lambda r: _band(((r.get("clip") or {}).get("subscores") or {}).get("controversy")), ["8-10", "5-7", "1-4"]),
     ("moment_type", "Kind of moment", lambda r: (r.get("clip") or {}).get("moment_type"),
      ["controversy", "drama", "fail", "rage", "funny", "skill", "wholesome", "other"]),
 ]
 
 # Groups built from this app's own measurements -- only clips made here and
 # matched to a posted video can fill these.
-MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text", "paced", "teaser", "score", "moment_type"}
+MADE_HERE_GROUPS = {"first_words", "opening_pace", "longest_gap", "opening_loudness", "layout", "hook_text", "paced", "teaser", "score", "moment_type", "hook_score", "controversy_score"}
 
 
 def _mean(values: list) -> Optional[float]:

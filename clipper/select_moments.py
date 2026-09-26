@@ -50,6 +50,8 @@ class ClipPick:
     # What kind of moment it is (MOMENT_TYPES), so the Analyze page can
     # compare which kinds actually hold viewers on this channel.
     moment_type: Optional[str] = None
+    # Claude's 1-10 breakdown behind `score` (SUBSCORE_KEYS).
+    subscores: Optional[dict] = None
 
 
 @dataclass
@@ -72,6 +74,8 @@ class WindowPick:
     # What kind of moment it is (MOMENT_TYPES), so the Analyze page can
     # compare which kinds actually hold viewers on this channel.
     moment_type: Optional[str] = None
+    # Claude's 1-10 breakdown behind `score` (SUBSCORE_KEYS).
+    subscores: Optional[dict] = None
 
 
 def _salvage_json_array(raw: str) -> Optional[list]:
@@ -367,6 +371,7 @@ _PICK_FIELDS = """    "start_words": "the exact first 3-6 words spoken in the cl
     "description": "the post description: 1-2 short sentences on who's in it, what happens and why it's worth watching (credit the streamer by name), then 3-5 hashtags (#shorts, the streamer, the game or topic). No links",
     "reason": "one sentence on why this moment holds a viewer past the first few seconds, noting if this channel's own data factored in",
     "moment_type": "one of: controversy, drama, fail, rage, funny, skill, wholesome, other -- controversy is a stance or claim viewers will argue about (money, donations, other streamers, hot takes); drama is conflict between people",
+    "scores": {"hook": "1-10: how hard the opening stops a scrolling viewer", "controversy": "1-10: how much viewers will argue about it in the comments", "reaction": "1-10: how big the streamer's or chat's reaction is", "payoff": "1-10: how strong the ending is", "standalone": "1-10: how well it makes sense with zero context"},
     "score": "whole number 1-10: how likely this clip is to hold scrolling viewers and pull views, compared with the other clips you picked -- spread the scores out (the best of the batch should clearly stand out) rather than giving everything a 7 or 8\""""
 
 
@@ -376,6 +381,17 @@ MOMENT_TYPES = ("controversy", "drama", "fail", "rage", "funny", "skill", "whole
 def _moment_type(value) -> Optional[str]:
     label = str(value or "").strip().lower()
     return label if label in MOMENT_TYPES else ("other" if label else None)
+
+
+SUBSCORE_KEYS = ("hook", "controversy", "reaction", "payoff", "standalone")
+
+
+def _subscores(value) -> Optional[dict]:
+    if not isinstance(value, dict):
+        return None
+    scores = {k: _score(value.get(k)) for k in SUBSCORE_KEYS}
+    scores = {k: v for k, v in scores.items() if v is not None}
+    return scores or None
 
 
 def _score(value) -> Optional[int]:
@@ -468,6 +484,7 @@ Transcript:
             reason=str(item.get("reason", "")).strip(),
             score=_score(item.get("score")),
             moment_type=_moment_type(item.get("moment_type")),
+            subscores=_subscores(item.get("scores")),
         ))
 
     picks.sort(key=lambda p: p.start)
@@ -590,6 +607,7 @@ Candidate windows:
             reason=str(item.get("reason", "")).strip(),
             score=_score(item.get("score")),
             moment_type=_moment_type(item.get("moment_type")),
+            subscores=_subscores(item.get("scores")),
         ))
 
     return picks[:n_clips]

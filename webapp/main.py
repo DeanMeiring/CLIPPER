@@ -724,6 +724,7 @@ def _render_all(
             "duration": round(out_duration, 2),
             "score": getattr(pick, "score", None),
             "moment_type": getattr(pick, "moment_type", None),
+            "subscores": getattr(pick, "subscores", None),
             # Kept so a facecam/IRL re-render applies the same edits the
             # clip's caption file was timed for.
             "edit_plan": plan.to_dict() if plan else None,
@@ -809,6 +810,7 @@ def _record_clip(
             "hook_text": hook_text or None,
             "score": getattr(pick, "score", None),
             "moment_type": getattr(pick, "moment_type", None),
+            "subscores": getattr(pick, "subscores", None),
             "edits": (
                 {"cut_seconds": round(plan.cut_seconds, 2), "zooms": plan.zooms, "teaser": plan.teaser}
                 if plan else None
@@ -3902,6 +3904,8 @@ INDEX_HTML = """<!doctype html>
   .creator-card .name { font-size: 0.78rem; font-weight: 700; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .creator-card .meta { font-size: 0.7rem; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .score-badge { display: inline-block; margin-left: 8px; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); vertical-align: middle; }
+  .score-breakdown { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 2px; font-size: 0.78rem; opacity: 0.85; }
+  .score-breakdown .overall { font-weight: 700; opacity: 1; }
   .score-badge.best { background: #fff4cc; border-color: #f2c200; color: #5c4700; }
   .live-badge { display: inline-block; background: var(--danger); color: #fff; font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-top: 6px; letter-spacing: 0.03em; }
   #recommend-vod-btn { padding: 8px 16px; }
@@ -5237,6 +5241,27 @@ async function poll(jobId) {
       heading.appendChild(badge);
     }
     div.appendChild(heading);
+    if (c.subscores && Object.keys(c.subscores).length) {
+      const labels = [
+        ['hook', 'Hook'], ['controversy', 'Controversy'], ['reaction', 'Reaction'],
+        ['payoff', 'Payoff'], ['standalone', 'Makes sense alone'],
+      ];
+      const grid = document.createElement('div');
+      grid.className = 'score-breakdown';
+      labels.forEach(([key, label]) => {
+        if (typeof c.subscores[key] !== 'number') return;
+        const row = document.createElement('span');
+        row.textContent = `${label} ${c.subscores[key]}/10`;
+        grid.appendChild(row);
+      });
+      if (typeof c.score === 'number') {
+        const overall = document.createElement('span');
+        overall.className = 'overall';
+        overall.textContent = `Overall ${c.score}/10`;
+        grid.appendChild(overall);
+      }
+      div.appendChild(grid);
+    }
 
     if (c.hook_caption) {
       const em = document.createElement('em');
