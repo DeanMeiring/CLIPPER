@@ -11,6 +11,7 @@ honestly is more useful than a confident-sounding one built on 3 videos.
 """
 from __future__ import annotations
 
+import datetime
 import statistics
 from typing import Callable, List, Optional
 
@@ -65,6 +66,7 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
             "duration": v.get("duration_seconds"),
             "views": m.get("views", v.get("views")),
             "avg_view_pct": m.get("average_view_percentage"),
+            "subs_gained": m.get("subscribers_gained"),
             "retention": curve_metrics(curves_by_id.get(v["id"]) or [], v.get("duration_seconds")),
             "made_here": record is not None,
             "clip": None,
@@ -178,6 +180,25 @@ def _teaser(row: dict) -> Optional[str]:
     return "yes" if (clip.get("edits") or {}).get("teaser") else "no"
 
 
+def _picker(row: dict) -> Optional[str]:
+    clip = row.get("clip")
+    if not clip:
+        return "not matched to a clip made here"
+    # Moment types and sub-scores arrived with the current way of picking
+    # and cutting clips (hook-first cuts, strong-stance ranking, pacing,
+    # branding), so they mark which clips it made.
+    if clip.get("moment_type") or clip.get("subscores"):
+        return "made here, current picker"
+    return "made here, earlier version"
+
+
+def _posted(row: dict) -> Optional[str]:
+    age = row.get("age_days")
+    if age is None:
+        return None
+    return "last 7 days" if age <= 7 else "8-28 days ago" if age <= 28 else "older"
+
+
 def _band(value) -> Optional[str]:
     if value is None:
         return None
@@ -199,6 +220,9 @@ def _layout(row: dict) -> Optional[str]:
 
 
 GROUPS: List[tuple] = [
+    ("posted", "When it was posted", _posted, ["last 7 days", "8-28 days ago", "older"]),
+    ("picker", "Which version of this app made it", _picker,
+     ["made here, current picker", "made here, earlier version", "not matched to a clip made here"]),
     ("length", "Clip length", _length, ["under 20s", "20-30s", "30-45s", "45-60s"]),
     ("title_question", "Title asks a question", lambda r: "yes" if r["title_is_question"] else "no", ["yes", "no"]),
     ("title_caps", "Title has ALL-CAPS words", lambda r: "yes" if r["title_caps_words"] else "no", ["yes", "no"]),
@@ -235,6 +259,14 @@ def _median(values: list) -> Optional[float]:
     return statistics.median(values) if values else None
 
 
+def _subs_per_1k(rows: List[dict]) -> Optional[float]:
+    """New subscribers per 1,000 views, pooled over the rows that have both
+    numbers -- how well a kind of clip turns viewers into subscribers."""
+    pairs = [(r["subs_gained"], r["views"]) for r in rows if r.get("subs_gained") is not None and r.get("views")]
+    views = sum(v for _, v in pairs)
+    return round(sum(s for s, _ in pairs) / views * 1000, 2) if views else None
+
+
 def _bucket_stats(label: str, rows: List[dict]) -> dict:
     views = [r["views"] for r in rows if r.get("views") is not None]
     pcts = [r["avg_view_pct"] for r in rows if r.get("avg_view_pct") is not None]
@@ -244,6 +276,7 @@ def _bucket_stats(label: str, rows: List[dict]) -> dict:
         "label": label,
         "n": len(rows),
         "median_views": round(median_views) if median_views is not None else None,
+        "subs_per_1k": _subs_per_1k(rows),
         "avg_view_pct": round(statistics.mean(pcts), 1) if pcts else None,
         "watch_3s": _mean(watch_3s),
         "n_retention": len(watch_3s),
@@ -295,9 +328,74 @@ def build_stats(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, rec
         "opening_vs_similar": _mean(curve_values("opening_vs_similar")),
         "overall_vs_similar": _mean(curve_values("overall_vs_similar")),
     }
+    summary["subs_per_1k"] = _subs_per_1k(settled)
     groups = [g for g in (_group(settled, *spec) for spec in GROUPS) if g]
     rows.sort(key=lambda r: r.get("published_at") or "", reverse=True)
     return {"summary": summary, "groups": groups, "videos": rows}
+
+
+TREND_WEEKS = 8
+
+
+def _day(value: Optional[str]) -> Optional[datetime.date]:
+    try:
+        return datetime.date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
+
+
+def _change_pct(new: Optional[float], old: Optional[float]) -> Optional[float]:
+    return round((new - old) / old * 100) if new is not None and old else None
+
+
+def build_trend(daily: List[dict], rows: List[dict], weeks: int = TREND_WEEKS) -> Optional[dict]:
+    """Week-by-week growth: channel views and subscribers (from
+    youtube_analytics.get_daily_totals) next to the Shorts posted that week
+    and how many views they got. Weeks are the 7 days ending on the latest
+    day YouTube has numbers for, not the calendar week -- today and
+    yesterday aren't in the Analytics data yet, and counting them as zero
+    would make every week look like a drop."""
+    by_day = {d: row for row in daily if (d := _day(row.get("date")))}
+    if not by_day:
+        return None
+    first, last = min(by_day), max(by_day)
+    out = []
+    for i in range(weeks - 1, -1, -1):
+        end = last - datetime.timedelta(days=7 * i)
+        start = end - datetime.timedelta(days=6)
+        if start < first:
+            continue  # only part of this week is in the data -- it would read as a dip
+        days = [by_day[d] for d in by_day if start <= d <= end]
+        posted = [r for r in rows if (p := _day(r.get("published_at"))) and start <= p <= end]
+        post_views = [r["views"] for r in posted if r.get("views") is not None]
+        gained = sum(d.get("subscribers_gained") or 0 for d in days)
+        lost = sum(d.get("subscribers_lost") or 0 for d in days)
+        views = sum(d.get("views") or 0 for d in days)
+        out.append({
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "label": f"{start.day} {start:%b} - {end.day} {end:%b}",
+            "views": round(views),
+            "subscribers_gained": gained,
+            "subscribers_net": gained - lost,
+            "subs_per_1k": round(gained / views * 1000, 2) if views else None,
+            "shorts_posted": len(posted),
+            "made_here_posted": sum(1 for r in posted if r.get("made_here")),
+            "median_views_per_short": round(_median(post_views)) if post_views else None,
+        })
+    if not out:
+        return None
+    this, prev = out[-1], (out[-2] if len(out) > 1 else None)
+    return {
+        "weeks": out,
+        "data_through": last.isoformat(),
+        "last_week": this,
+        "views_change_pct": _change_pct(this["views"], prev["views"] if prev else None),
+        "subs_change": this["subscribers_net"] - prev["subscribers_net"] if prev else None,
+        "median_views_change_pct": _change_pct(
+            this["median_views_per_short"], prev["median_views_per_short"] if prev else None,
+        ),
+    }
 
 
 def _pct(fraction: Optional[float]) -> Optional[str]:
@@ -309,6 +407,8 @@ def _bucket_line(b: dict) -> str:
     details = []
     if b["median_views"] is not None:
         details.append(f"median {b['median_views']:,} views")
+    if b.get("subs_per_1k") is not None:
+        details.append(f"{b['subs_per_1k']:.1f} new subscribers per 1,000 views")
     if b["avg_view_pct"] is not None:
         details.append(f"{b['avg_view_pct']:.0f}% of the video watched")
     if b["watch_3s"] is not None:
@@ -350,4 +450,19 @@ def render_prompt_text(stats: dict) -> str:
     )
     for g in stats["groups"]:
         lines.append(f"- {g['name']}: " + "; ".join(_bucket_line(b) for b in g["buckets"]))
+    trend = stats.get("trend")
+    if trend:
+        lines.append(
+            f"Week by week (7-day weeks up to {trend['data_through']}, oldest first; channel-wide views and "
+            "subscribers, and the Shorts posted that week):"
+        )
+        for w in trend["weeks"]:
+            median = w["median_views_per_short"]
+            lines.append(
+                f"- {w['label']}: {w['views']:,} views, {w['subscribers_net']:+d} subscribers, "
+                f"{w['shorts_posted']} Shorts posted ({w['made_here_posted']} made here)"
+                + (f", median {median:,} views each" if median is not None else "")
+            )
+        if trend["views_change_pct"] is not None:
+            lines.append(f"Latest week vs the week before: views {trend['views_change_pct']:+d}%.")
     return "\n".join(lines)
