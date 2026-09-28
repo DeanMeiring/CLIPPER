@@ -1019,13 +1019,21 @@ def _gather_clip_performance(refresh: bool = False) -> dict:
 
     metrics = youtube_analytics.get_video_retention(access_token, own["id"], lookback_days=365, max_videos=200)
     curves = _load_retention_curves(access_token, own["id"], videos)
+    stats = clip_performance.build_stats(videos, metrics, curves, records)
+    try:
+        daily = youtube_analytics.get_daily_totals(access_token, own["id"])
+        trend = clip_performance.build_trend(daily, stats["videos"])
+    except Exception as e:  # noqa: BLE001 - the trend is extra; the rest of the panel stands without it
+        print(f"[clip_performance] weekly trend unavailable: {e}", flush=True)
+        trend = None
     data = {
         "available": True,
         "channel_title": own["title"],
         "clips_recorded": len(records),
         "clips_linked": sum(1 for r in records if r.get("video_id")),
         "generated_at": time.time(),
-        **clip_performance.build_stats(videos, metrics, curves, records),
+        **stats,
+        "trend": trend,
     }
     _clip_performance_cache.update(at=time.time(), data=data)
     return data
@@ -5649,6 +5657,7 @@ ANALYTICS_HTML = """<!doctype html>
     .perf-table th, .perf-table td { padding: 5px 4px; }
   }
   details.perf-videos { margin-top: 16px; }
+  .bar-row.latest .bar-title { font-weight: 700; }
   details.perf-videos summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; }
 </style>
 </head>
@@ -5669,6 +5678,13 @@ ANALYTICS_HTML = """<!doctype html>
 <div class="section">
   <label style="margin-top:0">📈 Channel insights — best day to post</label>
   <div id="insights-body"><div class="hint">Loading...</div></div>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🚀 Is it growing?</label>
+  <p class="hint">Views and new subscribers week by week, and how many views the Shorts you posted each week got.
+    Updates with the refresh button below.</p>
+  <div id="growth-body"><div class="hint">Loading...</div></div>
 </div>
 
 <div class="section">
@@ -5938,19 +5954,91 @@ function buildDropOffBlock(s) {
   return block;
 }
 
+function fmtChange(pct) {
+  if (pct == null) return null;
+  return `${pct > 0 ? '+' : ''}${pct}% vs the week before`;
+}
+function fmtSigned(n) { return n == null ? '–' : (n > 0 ? `+${n}` : String(n)); }
+
+// One measure per chart, one row per week (oldest at the top, the latest
+// week in bold), the value printed at the tip and spelled out on hover.
+function buildWeeklyBars(title, hint, weeks, valueOf, fmt, subOf) {
+  const block = el('div', { className: 'chart-block' });
+  const titleRow = el('div', { className: 'chart-title' });
+  titleRow.style.flexWrap = 'wrap';
+  titleRow.appendChild(el('span', { text: title }));
+  if (hint) titleRow.appendChild(el('span', { className: 'hint', text: hint }));
+  block.appendChild(titleRow);
+  const scaleMax = Math.max(1, ...weeks.map(w => valueOf(w) || 0));
+  weeks.forEach((w, i) => {
+    const value = valueOf(w);
+    const row = el('div', { className: 'bar-row' + (i === weeks.length - 1 ? ' latest' : '') });
+    row.title = `${w.label}: ${value == null ? 'no data' : fmt(value)}${subOf ? ' (' + subOf(w) + ')' : ''}`;
+    const labelCol = el('div', { className: 'bar-label' });
+    labelCol.appendChild(el('div', { className: 'bar-title', text: w.label }));
+    if (subOf) labelCol.appendChild(el('div', { className: 'bar-sub', text: subOf(w) }));
+    row.appendChild(labelCol);
+    const track = el('div', { className: 'bar-track' });
+    const fill = el('div', { className: 'bar-fill' });
+    fill.style.width = Math.max(0, Math.round((Math.max(0, value || 0) / scaleMax) * 100)) + '%';
+    fill.style.background = 'var(--chart-you)';
+    track.appendChild(fill);
+    row.appendChild(track);
+    row.appendChild(el('div', { className: 'bar-value', text: value == null ? '–' : fmt(value) }));
+    block.appendChild(row);
+  });
+  return block;
+}
+
+function renderGrowth(data) {
+  const body = document.getElementById('growth-body');
+  body.innerHTML = '';
+  if (!data.available) {
+    body.appendChild(el('div', { className: 'hint', text: data.reason || 'Not available.' }));
+    return;
+  }
+  const t = data.trend;
+  if (!t || !t.weeks || !t.weeks.length) {
+    body.appendChild(el('div', { className: 'hint', text: 'No week-by-week numbers from YouTube yet.' }));
+    return;
+  }
+  const w = t.last_week;
+  const prev = t.weeks.length > 1 ? t.weeks[t.weeks.length - 2] : null;
+  const tiles = el('div', { className: 'stat-row' });
+  tiles.appendChild(statTile('Views, latest week', fmtCount(w.views), fmtChange(t.views_change_pct)));
+  tiles.appendChild(statTile('New subscribers, latest week', fmtSigned(w.subscribers_net),
+    prev ? `${fmtSigned(prev.subscribers_net)} the week before` : null));
+  tiles.appendChild(statTile('Median views per Short posted', fmtCount(w.median_views_per_short),
+    fmtChange(t.median_views_change_pct) || `${w.shorts_posted} Shorts posted that week`));
+  tiles.appendChild(statTile('Subscribers per 1,000 views', w.subs_per_1k == null ? '–' : w.subs_per_1k.toFixed(1),
+    'latest week'));
+  body.appendChild(tiles);
+  const through = new Date(t.data_through + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const note = el('div', { className: 'hint', text: `Weeks are the 7 days up to ${through}, the latest day YouTube has numbers for (they run about 2 days behind Studio).` });
+  note.style.marginTop = '8px';
+  body.appendChild(note);
+  body.appendChild(buildWeeklyBars('Views per week', 'whole channel', t.weeks, x => x.views, fmtCount));
+  body.appendChild(buildWeeklyBars('New subscribers per week', 'gained minus lost', t.weeks, x => x.subscribers_net, fmtSigned));
+  body.appendChild(buildWeeklyBars(
+    'Median views per Short posted that week', 'newer weeks are still collecting views',
+    t.weeks, x => x.median_views_per_short, fmtCount,
+    x => `${x.shorts_posted} posted, ${x.made_here_posted} made here`,
+  ));
+}
+
 function buildComparisonTable(groups) {
   const wrap = el('div', { className: 'table-scroll' });
   const table = el('table', { className: 'perf-table' });
   const head = el('thead');
   const headRow = el('tr');
-  ['', 'Shorts', 'At 3s', 'Watched', 'Median views'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  ['', 'Shorts', 'At 3s', 'Watched', 'Median views', 'Subs / 1k views'].forEach(h => headRow.appendChild(el('th', { text: h })));
   head.appendChild(headRow);
   table.appendChild(head);
   const body = el('tbody');
   groups.forEach(g => {
     const nameRow = el('tr', { className: 'group-name' });
     const nameCell = el('th', { text: g.name + (g.made_here_only ? ' (clips made here only)' : '') });
-    nameCell.colSpan = 5;
+    nameCell.colSpan = 6;
     nameRow.appendChild(nameCell);
     body.appendChild(nameRow);
     g.buckets.forEach(b => {
@@ -5960,6 +6048,7 @@ function buildComparisonTable(groups) {
       row.appendChild(el('td', { text: fmtFraction(b.watch_3s) }));
       row.appendChild(el('td', { text: fmtPercent(b.avg_view_pct) }));
       row.appendChild(el('td', { text: fmtCount(b.median_views) }));
+      row.appendChild(el('td', { text: b.subs_per_1k == null ? '–' : b.subs_per_1k.toFixed(1) }));
       body.appendChild(row);
     });
   });
@@ -5975,7 +6064,7 @@ function buildVideoTable(videos) {
   const table = el('table', { className: 'perf-table' });
   const head = el('thead');
   const headRow = el('tr');
-  ['Title', 'At 3s', 'Watched', 'Views', 'Length', 'Posted', 'Made here'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  ['Title', 'At 3s', 'Watched', 'Views', 'Subs', 'Length', 'Posted', 'Made here'].forEach(h => headRow.appendChild(el('th', { text: h })));
   head.appendChild(headRow);
   table.appendChild(head);
   const body = el('tbody');
@@ -5991,6 +6080,7 @@ function buildVideoTable(videos) {
     row.appendChild(el('td', { text: fmtFraction(v.retention ? v.retention.watch_3s : null) }));
     row.appendChild(el('td', { text: fmtPercent(v.avg_view_pct) }));
     row.appendChild(el('td', { text: fmtCount(v.views) }));
+    row.appendChild(el('td', { text: v.subs_gained == null ? '–' : fmtSigned(v.subs_gained) }));
     row.appendChild(el('td', { text: v.duration != null ? `${Math.round(v.duration)}s` : '–' }));
     row.appendChild(el('td', { text: v.published_at ? new Date(v.published_at).toLocaleDateString() : '–' }));
     const madeHere = !v.made_here ? '–' : (v.clip && v.clip.link_method === 'upload' ? '✓ uploaded here' : '✓ title match');
@@ -6019,6 +6109,7 @@ async function loadClipPerformance(refresh) {
   }
   body.style.opacity = '';
   refreshBtn.disabled = false;
+  renderGrowth(data);
   body.innerHTML = '';
   if (!data.available) {
     body.appendChild(el('div', { className: 'hint', text: data.reason || 'Not available.' }));
@@ -6038,6 +6129,9 @@ async function loadClipPerformance(refresh) {
   tiles.appendChild(statTile('Median views', fmtCount(s.median_views)));
   tiles.appendChild(statTile('Watched on average', fmtPercent(s.avg_view_pct), 'of each Short, replays included'));
   tiles.appendChild(statTile('Still watching at 3s', fmtFraction(s.watch_3s), 'per view'));
+  if (s.subs_per_1k != null) {
+    tiles.appendChild(statTile('Subscribers per 1,000 views', s.subs_per_1k.toFixed(1), 'across these Shorts'));
+  }
   if (s.opening_vs_similar != null) {
     tiles.appendChild(statTile('First 3s vs similar videos', s.opening_vs_similar.toFixed(2), '0.5 = typical for the length'));
   }

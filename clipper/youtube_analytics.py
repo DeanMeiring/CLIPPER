@@ -47,16 +47,26 @@ def get_video_retention(access_token: str, channel_id: str, lookback_days: int =
     reach problem, not a quality one -- exactly the gap a creator's own
     gut sense of "this one was good" often can't see from view count
     alone."""
+    import requests
+
     end = datetime.date.today()
     start = end - datetime.timedelta(days=lookback_days)
-    data = _get(ANALYTICS_URL, access_token, {
+    params = {
         "ids": f"channel=={channel_id}",
         "startDate": start.isoformat(), "endDate": end.isoformat(),
-        "metrics": "views,averageViewDuration,averageViewPercentage",
+        "metrics": "views,averageViewDuration,averageViewPercentage,subscribersGained",
         "dimensions": "video",
         "sort": "-views",
         "maxResults": max_videos,
-    })
+    }
+    try:
+        data = _get(ANALYTICS_URL, access_token, params)
+    except requests.HTTPError as e:
+        # Subscribers per video is a bonus; if the API ever refuses it,
+        # keep the views and retention everything else depends on.
+        if e.response is None or e.response.status_code != 400:
+            raise
+        data = _get(ANALYTICS_URL, access_token, {**params, "metrics": "views,averageViewDuration,averageViewPercentage"})
     result: dict = {}
     for row in data.get("rows") or []:
         video_id, views, avg_duration, avg_pct = row[0], row[1], row[2], row[3]
@@ -64,8 +74,29 @@ def get_video_retention(access_token: str, channel_id: str, lookback_days: int =
             "views": views,
             "average_view_duration_seconds": avg_duration,
             "average_view_percentage": avg_pct,
+            "subscribers_gained": row[4] if len(row) > 4 else None,
         }
     return result
+
+
+def get_daily_totals(access_token: str, channel_id: str, days: int = 63) -> list:
+    """Channel-wide views and subscribers per day, oldest first:
+    [{"date": "2026-09-01", "views": 1200, "subscribers_gained": 3,
+    "subscribers_lost": 0}, ...]. YouTube's numbers run about two days
+    behind, so the most recent days are simply absent."""
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=days)
+    data = _get(ANALYTICS_URL, access_token, {
+        "ids": f"channel=={channel_id}",
+        "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "metrics": "views,subscribersGained,subscribersLost",
+        "dimensions": "day",
+        "sort": "day",
+    })
+    return [
+        {"date": r[0], "views": r[1], "subscribers_gained": r[2], "subscribers_lost": r[3]}
+        for r in data.get("rows") or []
+    ]
 
 
 def get_retention_curve(access_token: str, channel_id: str, video_id: str, start_date: str) -> list:
