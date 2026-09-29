@@ -298,21 +298,26 @@ The app can run two channels side by side out of one deployment: the
 original ("main") channel plus a second ("es", labeled "Espanol") that
 tracks its own Twitch streamers, uploads to its own connected YouTube
 account, and stamps clips with its own name and mascot accent colour --
-same pipeline, different watchlist and destination. A channel switcher on
-the home page picks which one you're working in; the trending rows,
-"Yesterday's VODs" list, and the Connect YouTube button all follow it.
+same pipeline, different watchlist and destination. Each channel is its
+own page (`/` for the main channel, `/espanol` for the second one, both
+linked from every page's top nav) rather than a switcher on one page, so
+each has its own bookmarkable URL and its own "Active & saved jobs" list
+-- a job only ever shows up on the page for the channel it was created
+under.
 
 To set the second channel up: set `TRENDING_TWITCH_LOGINS_ES` to the
 streamers to track (comma-separated Twitch logins), optionally
-`CLIPPER_BRAND_NAME_ES` for its on-clip name, then use the channel
-switcher's Connect YouTube button to authorize its YouTube account (it
-reuses the same `YOUTUBE_OAUTH_CLIENT_ID`/`SECRET` as the main channel --
-just a second Google account consenting). A job's clips always upload
-through the YouTube account connected to the profile it was created under.
+`CLIPPER_BRAND_NAME_ES` for its on-clip name, then use the `/espanol`
+page's Connect YouTube button to authorize its YouTube account (it reuses
+the same `YOUTUBE_OAUTH_CLIENT_ID`/`SECRET` as the main channel -- just a
+second Google account consenting). A job's clips always upload through
+the YouTube account connected to the channel it was created under.
 
 Adding a third profile is a matter of adding an entry to `CHANNEL_PROFILES`
 in `webapp/main.py` (its own Twitch-logins env var, brand name, mascot
-accent colour, and YouTube token file).
+accent colour, YouTube token file, and page path) -- `_render_channel_home`
+and `_nav_links` pick it up automatically and it gets its own page and nav
+link for free.
 
 ### Channel insights — best day to post
 

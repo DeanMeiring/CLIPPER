@@ -88,6 +88,7 @@ CHANNEL_PROFILES: dict = {
         "brand_name": os.environ.get("CLIPPER_BRAND_NAME", "Caught On Stream"),
         "mascot_accent": "00CCFF",
         "token_file": "_youtube_oauth_token.json",
+        "page_path": "/",
     },
     "es": {
         "label": "Espanol",
@@ -95,6 +96,7 @@ CHANNEL_PROFILES: dict = {
         "brand_name": os.environ.get("CLIPPER_BRAND_NAME_ES", "Directo Viral"),
         "mascot_accent": "FF7A1A",
         "token_file": "_youtube_oauth_token_es.json",
+        "page_path": "/espanol",
     },
 }
 DEFAULT_CHANNEL_PROFILE = "main"
@@ -3547,13 +3549,13 @@ def youtube_callback(code: str = "", state: str = "", error: str = "") -> Redire
     profile = _profile_or_default(issued[1])
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
     _youtube_token_stores[profile].save(token)
-    # The main channel's connect flow lives on the analytics page (it reads
-    # real Analytics data there); a second profile has no analytics page of
-    # its own yet, so it connects from the home page's channel switcher and
-    # comes back there instead.
+    # The main channel's connect flow also lives on the analytics page (it
+    # reads real Analytics data there); every profile's own channel page
+    # (see CHANNEL_PROFILES' page_path) shows connect status too, and is
+    # where a second profile's connect button sends you from.
     if profile == DEFAULT_CHANNEL_PROFILE:
         return RedirectResponse("/analytics?youtube_connected=1")
-    return RedirectResponse(f"/?youtube_connected=1&profile={profile}")
+    return RedirectResponse(f"{CHANNEL_PROFILES[profile]['page_path']}?youtube_connected=1")
 
 
 @protected.post("/api/youtube/disconnect")
@@ -3866,6 +3868,11 @@ def index() -> str:
     return INDEX_HTML
 
 
+@protected.get("/espanol", response_class=HTMLResponse)
+def espanol_page() -> str:
+    return SPANISH_HTML
+
+
 @protected.get("/analytics", response_class=HTMLResponse)
 def analytics_page() -> str:
     return ANALYTICS_HTML
@@ -3889,12 +3896,12 @@ def hook_line_page() -> str:
 app.include_router(protected)
 
 
-INDEX_HTML = """<!doctype html>
+_CHANNEL_HOME_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>clipper</title>
+<title>clipper — __PROFILE_LABEL__</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -3968,9 +3975,9 @@ INDEX_HTML = """<!doctype html>
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
   }
-  #profile-row { display: flex; align-items: flex-end; gap: 10px; }
-  #profile-row > div:first-child { flex: 1; }
-  #profile-row button { width: auto; white-space: nowrap; padding: 10px 16px; margin-top: 6px; }
+  #profile-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; }
+  #profile-row .hint { margin: 0; }
+  #profile-row button { width: auto; white-space: nowrap; padding: 8px 14px; margin-top: 0; font-size: 0.85rem; }
   .row { display: flex; gap: 12px; }
   .row > div { flex: 1; }
   button {
@@ -4105,26 +4112,16 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <div class="page">
-<div class="topnav">
-  <a href="/" class="active">Home</a>
-  <a href="/weekly-recap">Weekly Recap</a>
-  <a href="/game-recap">Game Recap</a>
-  <a href="/analytics">Analytics</a>
-  <a href="/hook-line">Hook Line</a>
-</div>
+__NAV_LINKS__
 <div class="card">
 
-<div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
+<div class="brand"><span class="logo">🎬</span><h1>clipper — __PROFILE_LABEL__</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
 
 <div id="profile-row">
-  <div>
-    <label style="margin-top:0">Channel</label>
-    <select id="channel-profile"></select>
-  </div>
+  <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
   <button id="profile-youtube-btn" type="button">Connect YouTube</button>
 </div>
-<div class="hint" id="profile-youtube-status" style="margin-bottom:4px"></div>
 
 <div class="trending-section" id="yesterday-vods-section" style="display:none">
   <label style="margin-top:0">Yesterday's VODs</label>
@@ -4412,8 +4409,7 @@ let timer = null;
 let jobsTimer = null;
 let currentJobId = null;
 let pendingDeleteOnCancel = false;
-let currentProfile = 'main';
-let CHANNEL_PROFILES_CACHE = [];
+const currentProfile = '__PROFILE_ID__';
 
 function formatViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
@@ -4503,75 +4499,47 @@ async function loadYesterdayVods() {
   }
 }
 
-const channelProfileSelect = document.getElementById('channel-profile');
 const profileYoutubeBtn = document.getElementById('profile-youtube-btn');
 const profileYoutubeStatus = document.getElementById('profile-youtube-status');
+let profileYoutubeConnected = false;
 
-function renderProfileYoutubeStatus() {
-  const p = CHANNEL_PROFILES_CACHE.find(p => p.id === currentProfile);
-  if (!p) return;
-  if (p.youtube_connected) {
-    profileYoutubeStatus.textContent = `YouTube connected for ${p.label}.`;
+function renderProfileYoutubeStatus(label) {
+  if (profileYoutubeConnected) {
+    profileYoutubeStatus.textContent = `YouTube connected for ${label}.`;
     profileYoutubeBtn.textContent = 'Disconnect YouTube';
   } else {
-    profileYoutubeStatus.textContent = `YouTube not connected for ${p.label} -- uploads for this channel won't work until it is.`;
+    profileYoutubeStatus.textContent = `YouTube not connected for ${label} -- uploads for this channel won't work until it is.`;
     profileYoutubeBtn.textContent = 'Connect YouTube';
   }
 }
 
 profileYoutubeBtn.addEventListener('click', async () => {
-  const p = CHANNEL_PROFILES_CACHE.find(p => p.id === currentProfile);
-  if (p && p.youtube_connected) {
-    if (!confirm(`Disconnect the ${p.label} YouTube account?`)) return;
+  if (profileYoutubeConnected) {
+    if (!confirm('Disconnect the __PROFILE_LABEL__ YouTube account?')) return;
     await fetch(`/api/youtube/disconnect?profile=${encodeURIComponent(currentProfile)}`, { method: 'POST' });
-    await loadProfiles();
+    await loadProfileYoutubeStatus();
   } else {
     window.location.href = `/auth/youtube/login?profile=${encodeURIComponent(currentProfile)}`;
   }
 });
 
-async function loadProfiles() {
+async function loadProfileYoutubeStatus() {
   try {
     const resp = await fetch('/api/profiles');
     if (!resp.ok) return;
     const data = await resp.json();
-    CHANNEL_PROFILES_CACHE = data.profiles || [];
-    const previous = channelProfileSelect.value;
-    channelProfileSelect.innerHTML = '';
-    CHANNEL_PROFILES_CACHE.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.label;
-      channelProfileSelect.appendChild(opt);
-    });
-    const params = new URLSearchParams(window.location.search);
-    const fromUrl = params.get('profile');
-    if (fromUrl && CHANNEL_PROFILES_CACHE.some(p => p.id === fromUrl)) {
-      currentProfile = fromUrl;
-    } else if (previous && CHANNEL_PROFILES_CACHE.some(p => p.id === previous)) {
-      currentProfile = previous;
-    } else {
-      currentProfile = data.default || 'main';
-    }
-    channelProfileSelect.value = currentProfile;
-    renderProfileYoutubeStatus();
+    const p = (data.profiles || []).find(p => p.id === currentProfile);
+    if (!p) return;
+    profileYoutubeConnected = p.youtube_connected;
+    renderProfileYoutubeStatus(p.label);
   } catch (e) {
-    // channel switcher is a nice-to-have -- default profile still works
+    // connect status is a nice-to-have -- generating/uploading still work
   }
 }
 
-channelProfileSelect.addEventListener('change', () => {
-  currentProfile = channelProfileSelect.value;
-  renderProfileYoutubeStatus();
-  loadTrending();
-  loadYesterdayVods();
-});
-
-(async () => {
-  await loadProfiles();
-  loadTrending();
-  loadYesterdayVods();
-})();
+loadProfileYoutubeStatus();
+loadTrending();
+loadYesterdayVods();
 
 function formatDuration(d) {
   // Twitch's own format is already compact (e.g. "3h20m10s") -- just
@@ -4714,7 +4682,9 @@ async function loadJobsList() {
     if (!resp.ok) return;
     const { jobs } = await resp.json();
     jobsListEl.innerHTML = '';
-    jobs.forEach(job => {
+    // Jobs from before channel profiles existed have no channel_profile at
+    // all -- they belong to the main channel, not to neither.
+    jobs.filter(job => (job.channel_profile || 'main') === currentProfile).forEach(job => {
       const row = document.createElement('div');
       row.className = 'job-row';
 
@@ -5768,6 +5738,45 @@ notifyTestBtn.addEventListener('click', async () => {
 """
 
 
+def _nav_links(active_path: str) -> str:
+    """The shared topnav, repeated on every page -- active_path marks which
+    link (by href) gets the highlighted style. One extra link per channel
+    profile (see CHANNEL_PROFILES) beyond the fixed Weekly Recap/Game
+    Recap/Analytics/Hook Line pages."""
+    links = [("Home", CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]["page_path"]),
+             ("Weekly Recap", "/weekly-recap"), ("Game Recap", "/game-recap"),
+             ("Analytics", "/analytics"), ("Hook Line", "/hook-line")]
+    for profile, cfg in CHANNEL_PROFILES.items():
+        if profile != DEFAULT_CHANNEL_PROFILE:
+            links.append((cfg["label"], cfg["page_path"]))
+
+    def _link(label: str, href: str) -> str:
+        active_attr = ' class="active"' if href == active_path else ""
+        return f'<a href="{href}"{active_attr}>{label}</a>'
+
+    rows = "\n  ".join(_link(label, href) for label, href in links)
+    return f'<div class="topnav">\n  {rows}\n</div>'
+
+
+def _render_channel_home(profile: str) -> str:
+    """INDEX_HTML/SPANISH_HTML are both this same template, just with the
+    fixed channel baked in (see CHANNEL_PROFILES) -- a separate page per
+    channel (its own URL, own "Active & saved jobs" list, own Connect
+    YouTube button) rather than one page with an in-page switcher, so each
+    channel bookmarks and navigates like the app's other pages do."""
+    cfg = CHANNEL_PROFILES[profile]
+    return (
+        _CHANNEL_HOME_TEMPLATE
+        .replace("__NAV_LINKS__", _nav_links(cfg["page_path"]))
+        .replace("__PROFILE_ID__", profile)
+        .replace("__PROFILE_LABEL__", cfg["label"])
+    )
+
+
+INDEX_HTML = _render_channel_home(DEFAULT_CHANNEL_PROFILE)
+SPANISH_HTML = _render_channel_home("es")
+
+
 ANALYTICS_HTML = """<!doctype html>
 <html>
 <head>
@@ -5939,6 +5948,7 @@ ANALYTICS_HTML = """<!doctype html>
   <a href="/game-recap">Game Recap</a>
   <a href="/analytics" class="active">Analytics</a>
   <a href="/hook-line">Hook Line</a>
+  <a href="/espanol">Espanol</a>
 </div>
 <div class="card">
 
@@ -6803,6 +6813,7 @@ GAME_RECAP_HTML = """<!doctype html>
     <a href="/game-recap" class="active">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
+    <a href="/espanol">Espanol</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
@@ -7385,6 +7396,7 @@ WEEKLY_RECAP_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
+    <a href="/espanol">Espanol</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
@@ -7901,6 +7913,7 @@ HOOK_LINE_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line" class="active">Hook Line</a>
+    <a href="/espanol">Espanol</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">⚡</span><h1>Hook line</h1></div>
