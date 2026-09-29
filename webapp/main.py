@@ -74,9 +74,50 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 JOB_META_NAME = "job.json"
 TERMINAL_STATES = ("done", "error", "cancelled")
 
-# Persists on the same volume job data lives on, so the connected YouTube
-# account survives restarts/redeploys -- see clipper/youtube_oauth.py.
-_youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
+# A "channel profile" is a second, parallel content pipeline -- same clipping
+# code, different tracked streamers / YouTube channel / on-clip branding.
+# Added for a Spanish-language clip channel alongside the original one.
+# Adding another profile is just another entry here: a Twitch-logins env var,
+# a display name to stamp on clips, an accent colour for the mascot so the
+# two channels' clips don't look identical, and its own YouTube OAuth token
+# file so it can be connected independently of the main channel.
+CHANNEL_PROFILES: dict = {
+    "main": {
+        "label": "Main (English)",
+        "twitch_env": "TRENDING_TWITCH_LOGINS",
+        "brand_name": os.environ.get("CLIPPER_BRAND_NAME", "Caught On Stream"),
+        "mascot_accent": "00CCFF",
+        "token_file": "_youtube_oauth_token.json",
+    },
+    "es": {
+        "label": "Espanol",
+        "twitch_env": "TRENDING_TWITCH_LOGINS_ES",
+        "brand_name": os.environ.get("CLIPPER_BRAND_NAME_ES", "Directo Viral"),
+        "mascot_accent": "FF7A1A",
+        "token_file": "_youtube_oauth_token_es.json",
+    },
+}
+DEFAULT_CHANNEL_PROFILE = "main"
+
+
+def _profile_logins(profile: str) -> List[str]:
+    cfg = CHANNEL_PROFILES.get(profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
+    return [l.strip().lower() for l in os.environ.get(cfg["twitch_env"], "").split(",") if l.strip()]
+
+
+def _profile_or_default(profile: Optional[str]) -> str:
+    return profile if profile in CHANNEL_PROFILES else DEFAULT_CHANNEL_PROFILE
+
+
+# Persists on the same volume job data lives on, so each connected YouTube
+# account survives restarts/redeploys -- see clipper/youtube_oauth.py. One
+# TokenStore per channel profile, each its own file, so connecting the
+# Spanish channel's YouTube account never touches the main channel's token.
+_youtube_token_stores: dict = {
+    profile: youtube_oauth.TokenStore(BASE_DIR / cfg["token_file"])
+    for profile, cfg in CHANNEL_PROFILES.items()
+}
+_youtube_token_store = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE]  # back-compat alias for the main profile
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
@@ -133,10 +174,10 @@ def _load_performance_notes() -> Optional[str]:
     return clip_performance.render_prompt_text(performance)
 
 
-# CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
-# in-memory is fine -- a login round-trip through Google takes seconds, not
-# something that needs to survive a restart.
-_youtube_oauth_states: dict[str, float] = {}
+# CSRF state for the OAuth login flow: state -> (issued_at, channel_profile).
+# Short-lived and in-memory is fine -- a login round-trip through Google
+# takes seconds, not something that needs to survive a restart.
+_youtube_oauth_states: dict[str, tuple] = {}
 
 
 class JobCancelled(Exception):
@@ -192,6 +233,10 @@ class JobRequest(BaseModel):
     # The channel mascot in the corner and the channel name stamped beside it
     # for the first few seconds (captions.brand_dialogues).
     branding: bool = True
+    # Which tracked-streamer list / YouTube account / on-clip brand this job
+    # belongs to (see CHANNEL_PROFILES). Defaults to the original channel so
+    # every existing client that doesn't send this keeps working unchanged.
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE
 
 
 class RegenerateRequest(BaseModel):
@@ -369,7 +414,9 @@ def _run_job(job_id: str) -> None:
     # the upload button, so clamp here rather than let a job silently
     # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
-    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding)
+    profile = _profile_or_default(req.channel_profile)
+    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
+         channel_profile=profile)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -467,6 +514,7 @@ def _run_job(job_id: str) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, render_base, [],
         hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
+        channel_profile=profile,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
@@ -598,6 +646,7 @@ def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, tea
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
     hook_text: bool = True, pacing: bool = True, teaser: bool = False, branding: bool = True,
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -606,9 +655,14 @@ def _render_all(
     starts empty or with clips from a prior run. hook_text burns each pick's
     hook_caption into the top of its first few seconds; pacing and teaser
     control the edits in clipper/edit_plan.py; branding adds the channel
-    mascot and name stamp."""
+    mascot and name stamp -- channel_profile picks *which* channel's name/
+    mascot colour (see CHANNEL_PROFILES), so a Spanish-channel job doesn't
+    get stamped with the main channel's name."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
+    profile_cfg = CHANNEL_PROFILES.get(channel_profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
+    brand_name = profile_cfg["brand_name"]
+    mascot_accent = profile_cfg["mascot_accent"]
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
     for i, (video_path, words, pick) in enumerate(render_items, start=1):
         cancel()
@@ -626,7 +680,8 @@ def _render_all(
             caption_words, caption_start, out_duration = remap_words(clip_words, pick.start, plan), 0.0, plan.duration
         else:
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
+        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
+                  brand_name=brand_name, mascot_accent=mascot_accent)
         try:
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
         except RuntimeError as e:
@@ -637,7 +692,8 @@ def _render_all(
             print(f"[edit_plan] edited render of {out_path.name} failed, rendering it without edits: {e}", flush=True)
             plan = None
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
+            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
+                      brand_name=brand_name, mascot_accent=mascot_accent)
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
         facecam_uncertain = False
@@ -1186,6 +1242,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # Jobs from before branding existed get it on their new clips too:
         # it's the channel's look now, not a per-job experiment.
         branding = job.get("branding", True)
+        channel_profile = job.get("channel_profile", DEFAULT_CHANNEL_PROFILE)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1270,6 +1327,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, 0.15, existing_clips,
         hook_text=hook_text, pacing=pacing, teaser=teaser, branding=branding,
+        channel_profile=channel_profile,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
@@ -1523,6 +1581,7 @@ def create_job(req: JobRequest) -> dict:
             "error": None,
             "saved": False,
             "request": req,
+            "channel_profile": _profile_or_default(req.channel_profile),
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
@@ -1849,10 +1908,16 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
         if clip is None:
             raise HTTPException(404, "clip not found")
+        channel_profile = job.get("channel_profile", DEFAULT_CHANNEL_PROFILE)
 
-    access_token = _youtube_token_store.get_valid_access_token()
+    # A job's clips always go to the same channel they were generated for --
+    # a Spanish-channel job's clips upload through the Spanish channel's own
+    # connected YouTube account, never the main one, even if both happen to
+    # be connected at once.
+    access_token = _youtube_token_stores[_profile_or_default(channel_profile)].get_valid_access_token()
     if not access_token:
-        raise HTTPException(409, "Connect your YouTube account on the analytics page first.")
+        label = CHANNEL_PROFILES[_profile_or_default(channel_profile)]["label"]
+        raise HTTPException(409, f"Connect the {label} YouTube account first.")
 
     path = BASE_DIR / job_id / filename
     if not path.is_file():
@@ -3220,31 +3285,102 @@ def delete_all_clips(job_id: str) -> dict:
     return {"ok": True, "clips": []}
 
 
-_trending_cache: dict = {"at": 0.0, "sections": {}}
+_trending_cache: dict = {}  # profile -> {"at": float, "sections": dict}
 _TRENDING_CACHE_SECONDS = 180.0
 
 
+@protected.get("/api/profiles")
+def list_channel_profiles() -> dict:
+    """Which channel profiles exist (see CHANNEL_PROFILES), and whether each
+    one's YouTube account is currently connected -- backs the channel
+    switcher in the UI."""
+    return {
+        "profiles": [
+            {
+                "id": profile,
+                "label": cfg["label"],
+                "brand_name": cfg["brand_name"],
+                "twitch_logins": _profile_logins(profile),
+                "youtube_connected": _youtube_token_stores[profile].is_connected(),
+            }
+            for profile, cfg in CHANNEL_PROFILES.items()
+        ],
+        "default": DEFAULT_CHANNEL_PROFILE,
+    }
+
+
 @protected.get("/api/trending")
-def trending() -> dict:
+def trending(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
     """Four rows for the UI: configured creators' latest YouTube upload,
     configured creators' latest Twitch VOD, Twitch's biggest live streams
     globally, and popular Twitch creators not already on the watchlist
-    (see clipper/trending.py). Cached briefly so refreshing the page
-    doesn't re-hit the Twitch/YouTube APIs (and YouTube's daily quota)
-    every time."""
+    (see clipper/trending.py). profile picks which channel's watchlist to
+    use (see CHANNEL_PROFILES) -- defaults to the main channel. Cached
+    briefly per profile so refreshing the page doesn't re-hit the Twitch/
+    YouTube APIs (and YouTube's daily quota) every time."""
+    profile = _profile_or_default(profile)
+    cache = _trending_cache.setdefault(profile, {"at": 0.0, "sections": {}})
     now = time.time()
-    if now - _trending_cache["at"] > _TRENDING_CACHE_SECONDS:
+    if now - cache["at"] > _TRENDING_CACHE_SECONDS:
         try:
-            sections = get_trending_sections()
+            # Only the main profile has a configured YouTube watchlist row
+            # today -- a second profile just shows its own Twitch rows.
+            youtube_channels = None if profile == DEFAULT_CHANNEL_PROFILE else []
+            sections = get_trending_sections(twitch_logins=_profile_logins(profile), youtube_channels=youtube_channels)
         except Exception as e:
-            print(f"[trending] lookup failed: {e}", flush=True)
-            sections = _trending_cache["sections"]
-        _trending_cache["sections"] = sections
-        _trending_cache["at"] = now
+            print(f"[trending] lookup failed for profile {profile!r}: {e}", flush=True)
+            sections = cache["sections"]
+        cache["sections"] = sections
+        cache["at"] = now
     return {
         name: [vars(e) for e in entries]
-        for name, entries in _trending_cache["sections"].items()
+        for name, entries in cache["sections"].items()
     }
+
+
+@protected.get("/api/vods/yesterday")
+def yesterday_vods(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
+    """Yesterday's VODs (by UTC calendar date) from a channel profile's
+    tracked streamers -- built for the Spanish channel, where the streamers
+    are big enough that browsing "what did they stream yesterday" and
+    picking one by hand is the actual workflow, rather than the single
+    latest-VOD row /api/trending shows. Reuses get_recommendation_candidates
+    (the same Twitch lookup /api/recommend-vod uses) with a wider per-
+    streamer pull and no AI ranking -- this just lists what's there for a
+    human to pick from and feed into the normal /api/jobs flow, exactly
+    like any other source URL."""
+    from datetime import datetime, timezone, timedelta
+
+    profile = _profile_or_default(profile)
+    logins = _profile_logins(profile)
+    if not logins:
+        raise HTTPException(
+            409,
+            f"No streamers configured for this profile -- set {CHANNEL_PROFILES[profile]['twitch_env']} first.",
+        )
+
+    today_utc = datetime.now(timezone.utc).date()
+    yesterday_utc = today_utc - timedelta(days=1)
+
+    try:
+        candidates = get_recommendation_candidates(logins, per_streamer=10, max_age_days=2.5)
+    except Exception as e:
+        raise HTTPException(502, f"Twitch lookup failed: {e}") from e
+
+    results = []
+    for c in candidates:
+        if not c.published_at:
+            continue
+        try:
+            published = datetime.fromisoformat(c.published_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if published.astimezone(timezone.utc).date() != yesterday_utc:
+            continue
+        results.append(vars(c).copy())
+
+    results.sort(key=lambda c: c.get("view_count") or 0, reverse=True)
+    return {"date": yesterday_utc.isoformat(), "results": results}
 
 
 @protected.get("/api/search-creator")
@@ -3372,10 +3508,16 @@ def _youtube_redirect_uri() -> str:
 
 
 @protected.get("/auth/youtube/login")
-def youtube_login() -> RedirectResponse:
-    """Kick off the OAuth flow for the channel owner's own YouTube account
-    (see clipper/youtube_oauth.py) -- reads real Analytics data instead of
-    just the public Data API's view counts."""
+def youtube_login(profile: str = DEFAULT_CHANNEL_PROFILE) -> RedirectResponse:
+    """Kick off the OAuth flow for one channel profile's YouTube account
+    (see clipper/youtube_oauth.py and CHANNEL_PROFILES) -- reads real
+    Analytics data instead of just the public Data API's view counts. Both
+    profiles share one registered Google OAuth client (just a different
+    Google account consenting each time); which profile this login is for
+    is carried through the round trip in _youtube_oauth_states, keyed by
+    the CSRF state, since Google's redirect back doesn't let us pass our
+    own query params through untouched."""
+    profile = _profile_or_default(profile)
     if not youtube_oauth.is_configured():
         raise HTTPException(
             400,
@@ -3384,12 +3526,12 @@ def youtube_login() -> RedirectResponse:
         )
     redirect_uri = _youtube_redirect_uri()
     state = secrets.token_urlsafe(24)
-    _youtube_oauth_states[state] = time.time()
+    _youtube_oauth_states[state] = (time.time(), profile)
     # Prune old, abandoned login attempts instead of growing forever --
     # this dict only ever holds a handful of entries for a single-tenant
     # app, so a plain sweep on every login is plenty.
     cutoff = time.time() - 600
-    for s, issued_at in list(_youtube_oauth_states.items()):
+    for s, (issued_at, _profile) in list(_youtube_oauth_states.items()):
         if issued_at < cutoff:
             _youtube_oauth_states.pop(s, None)
     return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state))
@@ -3399,17 +3541,24 @@ def youtube_login() -> RedirectResponse:
 def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
     if error:
         return RedirectResponse(f"/analytics?youtube_error={error}")
-    issued_at = _youtube_oauth_states.pop(state, None)
-    if issued_at is None or time.time() - issued_at > 600:
+    issued = _youtube_oauth_states.pop(state, None)
+    if issued is None or time.time() - issued[0] > 600:
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
+    profile = _profile_or_default(issued[1])
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
-    _youtube_token_store.save(token)
-    return RedirectResponse("/analytics?youtube_connected=1")
+    _youtube_token_stores[profile].save(token)
+    # The main channel's connect flow lives on the analytics page (it reads
+    # real Analytics data there); a second profile has no analytics page of
+    # its own yet, so it connects from the home page's channel switcher and
+    # comes back there instead.
+    if profile == DEFAULT_CHANNEL_PROFILE:
+        return RedirectResponse("/analytics?youtube_connected=1")
+    return RedirectResponse(f"/?youtube_connected=1&profile={profile}")
 
 
 @protected.post("/api/youtube/disconnect")
-def youtube_disconnect() -> dict:
-    _youtube_token_store.clear()
+def youtube_disconnect(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
+    _youtube_token_stores[_profile_or_default(profile)].clear()
     return {"ok": True}
 
 
@@ -3809,16 +3958,19 @@ INDEX_HTML = """<!doctype html>
   h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
   .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
   label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
-  input, textarea {
+  input, textarea, select {
     width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
     background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 10px;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input:focus, textarea:focus {
+  input:focus, textarea:focus, select:focus {
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
   }
+  #profile-row { display: flex; align-items: flex-end; gap: 10px; }
+  #profile-row > div:first-child { flex: 1; }
+  #profile-row button { width: auto; white-space: nowrap; padding: 10px 16px; margin-top: 6px; }
   .row { display: flex; gap: 12px; }
   .row > div { flex: 1; }
   button {
@@ -3964,6 +4116,21 @@ INDEX_HTML = """<!doctype html>
 
 <div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
+
+<div id="profile-row">
+  <div>
+    <label style="margin-top:0">Channel</label>
+    <select id="channel-profile"></select>
+  </div>
+  <button id="profile-youtube-btn" type="button">Connect YouTube</button>
+</div>
+<div class="hint" id="profile-youtube-status" style="margin-bottom:4px"></div>
+
+<div class="trending-section" id="yesterday-vods-section" style="display:none">
+  <label style="margin-top:0">Yesterday's VODs</label>
+  <div class="hint" id="yesterday-vods-status" style="display:none"></div>
+  <div id="yesterday-vods-results"></div>
+</div>
 
 <label style="margin-top:0">Search a creator</label>
 <div id="search-row">
@@ -4245,6 +4412,8 @@ let timer = null;
 let jobsTimer = null;
 let currentJobId = null;
 let pendingDeleteOnCancel = false;
+let currentProfile = 'main';
+let CHANNEL_PROFILES_CACHE = [];
 
 function formatViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
@@ -4286,7 +4455,7 @@ function buildCreatorCard(c) {
 
 async function loadTrending() {
   try {
-    const resp = await fetch('/api/trending');
+    const resp = await fetch(`/api/trending?profile=${encodeURIComponent(currentProfile)}`);
     if (!resp.ok) return;
     const sections = await resp.json();
     TRENDING_SECTIONS.forEach(key => {
@@ -4302,7 +4471,107 @@ async function loadTrending() {
     // trending is a nice-to-have -- never block the rest of the page on it
   }
 }
-loadTrending();
+
+const yesterdayVodsSection = document.getElementById('yesterday-vods-section');
+const yesterdayVodsStatus = document.getElementById('yesterday-vods-status');
+const yesterdayVodsResults = document.getElementById('yesterday-vods-results');
+
+async function loadYesterdayVods() {
+  yesterdayVodsResults.innerHTML = '';
+  yesterdayVodsStatus.style.display = 'none';
+  try {
+    const resp = await fetch(`/api/vods/yesterday?profile=${encodeURIComponent(currentProfile)}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      // No streamers configured for this profile yet -- just hide the
+      // section instead of showing an error for something that isn't a
+      // real problem (e.g. the main profile, which uses Recommend VOD instead).
+      yesterdayVodsSection.style.display = 'none';
+      return;
+    }
+    const results = data.results || [];
+    if (!results.length) {
+      yesterdayVodsSection.style.display = 'block';
+      yesterdayVodsStatus.style.display = 'block';
+      yesterdayVodsStatus.textContent = `No VODs found from yesterday (${data.date}) for this channel's tracked streamers.`;
+      return;
+    }
+    yesterdayVodsSection.style.display = 'block';
+    results.forEach(c => yesterdayVodsResults.appendChild(buildRecommendCard(c, c.name)));
+  } catch (e) {
+    yesterdayVodsSection.style.display = 'none';
+  }
+}
+
+const channelProfileSelect = document.getElementById('channel-profile');
+const profileYoutubeBtn = document.getElementById('profile-youtube-btn');
+const profileYoutubeStatus = document.getElementById('profile-youtube-status');
+
+function renderProfileYoutubeStatus() {
+  const p = CHANNEL_PROFILES_CACHE.find(p => p.id === currentProfile);
+  if (!p) return;
+  if (p.youtube_connected) {
+    profileYoutubeStatus.textContent = `YouTube connected for ${p.label}.`;
+    profileYoutubeBtn.textContent = 'Disconnect YouTube';
+  } else {
+    profileYoutubeStatus.textContent = `YouTube not connected for ${p.label} -- uploads for this channel won't work until it is.`;
+    profileYoutubeBtn.textContent = 'Connect YouTube';
+  }
+}
+
+profileYoutubeBtn.addEventListener('click', async () => {
+  const p = CHANNEL_PROFILES_CACHE.find(p => p.id === currentProfile);
+  if (p && p.youtube_connected) {
+    if (!confirm(`Disconnect the ${p.label} YouTube account?`)) return;
+    await fetch(`/api/youtube/disconnect?profile=${encodeURIComponent(currentProfile)}`, { method: 'POST' });
+    await loadProfiles();
+  } else {
+    window.location.href = `/auth/youtube/login?profile=${encodeURIComponent(currentProfile)}`;
+  }
+});
+
+async function loadProfiles() {
+  try {
+    const resp = await fetch('/api/profiles');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    CHANNEL_PROFILES_CACHE = data.profiles || [];
+    const previous = channelProfileSelect.value;
+    channelProfileSelect.innerHTML = '';
+    CHANNEL_PROFILES_CACHE.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      channelProfileSelect.appendChild(opt);
+    });
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('profile');
+    if (fromUrl && CHANNEL_PROFILES_CACHE.some(p => p.id === fromUrl)) {
+      currentProfile = fromUrl;
+    } else if (previous && CHANNEL_PROFILES_CACHE.some(p => p.id === previous)) {
+      currentProfile = previous;
+    } else {
+      currentProfile = data.default || 'main';
+    }
+    channelProfileSelect.value = currentProfile;
+    renderProfileYoutubeStatus();
+  } catch (e) {
+    // channel switcher is a nice-to-have -- default profile still works
+  }
+}
+
+channelProfileSelect.addEventListener('change', () => {
+  currentProfile = channelProfileSelect.value;
+  renderProfileYoutubeStatus();
+  loadTrending();
+  loadYesterdayVods();
+});
+
+(async () => {
+  await loadProfiles();
+  loadTrending();
+  loadYesterdayVods();
+})();
 
 function formatDuration(d) {
   // Twitch's own format is already compact (e.g. "3h20m10s") -- just
@@ -4566,6 +4835,7 @@ async function submitJob() {
     pacing: document.getElementById('pacing').checked,
     teaser: document.getElementById('teaser').checked,
     branding: document.getElementById('branding').checked,
+    channel_profile: currentProfile,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',
