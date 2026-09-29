@@ -89,14 +89,20 @@ CHANNEL_PROFILES: dict = {
         "mascot_accent": "00CCFF",
         "token_file": "_youtube_oauth_token.json",
         "page_path": "/",
+        # Language Claude writes clip titles/hook text/descriptions in --
+        # None leaves the selection prompt exactly as it always was.
+        "output_language": None,
     },
     "es": {
-        "label": "Espanol",
+        "label": "Español",
         "twitch_env": "TRENDING_TWITCH_LOGINS_ES",
-        "brand_name": os.environ.get("CLIPPER_BRAND_NAME_ES", "Directo Viral"),
-        "mascot_accent": "FF7A1A",
+        "brand_name": os.environ.get("CLIPPER_BRAND_NAME_ES", "Pillado En Directo"),
+        # ASS colours are &HBBGGRR: this is orange (RGB FF7A1A), next to the
+        # main channel's yellow (RGB FFCC00) face.
+        "mascot_accent": "1A7AFF",
         "token_file": "_youtube_oauth_token_es.json",
         "page_path": "/espanol",
+        "output_language": "Spanish",
     },
 }
 DEFAULT_CHANNEL_PROFILE = "main"
@@ -109,6 +115,10 @@ def _profile_logins(profile: str) -> List[str]:
 
 def _profile_or_default(profile: Optional[str]) -> str:
     return profile if profile in CHANNEL_PROFILES else DEFAULT_CHANNEL_PROFILE
+
+
+def _profile_output_language(profile: Optional[str]) -> Optional[str]:
+    return CHANNEL_PROFILES[_profile_or_default(profile)]["output_language"]
 
 
 # Persists on the same volume job data lives on, so each connected YouTube
@@ -466,6 +476,7 @@ def _run_job(job_id: str) -> None:
             candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, api_key=None, source_title=source_title,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(profile),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -504,6 +515,7 @@ def _run_job(job_id: str) -> None:
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(profile),
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -1294,6 +1306,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
             focus=focus, api_key=None, source_title=source_title,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(channel_profile),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -1312,6 +1325,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
             focus=focus, source_title=source_title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(channel_profile),
         )
 
         def _overlaps_used(p) -> bool:
@@ -3939,11 +3953,11 @@ _CHANNEL_HOME_TEMPLATE = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -5758,16 +5772,283 @@ def _nav_links(active_path: str) -> str:
     return f'<div class="topnav">\n  {rows}\n</div>'
 
 
+# The Spanish channel page's interface text: (exact English text in
+# _CHANNEL_HOME_TEMPLATE, Spanish replacement). Short or ambiguous strings
+# carry their surrounding quotes/tags so only display text is swapped, never
+# a logic value like a key name or HTTP method. Single-quoted JS strings
+# must not gain an apostrophe. Longer strings come before any shorter one
+# they contain.
+_UI_STRINGS_ES: list = [
+    ("<html>", '<html lang="es">'),
+    ("Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.",
+     "Pega un enlace de YouTube o Twitch y recibe clips verticales cortos con los mejores momentos, elegidos por Claude."),
+    (">Connect YouTube<", ">Conectar YouTube<"),
+    ("'Connect YouTube'", "'Conectar YouTube'"),
+    ("'Disconnect YouTube'", "'Desconectar YouTube'"),
+    ("YouTube connected for ${label}.", "YouTube conectado para ${label}."),
+    ("YouTube not connected for ${label} -- uploads for this channel won't work until it is.",
+     "YouTube no está conectado para ${label}: las subidas de este canal no funcionarán hasta que lo conectes."),
+    ("Disconnect the __PROFILE_LABEL__ YouTube account?", "¿Desconectar la cuenta de YouTube de este canal?"),
+    (">Home</a>", ">Principal</a>"),
+    (">Weekly Recap</a>", ">Semanal</a>"),
+    (">Game Recap</a>", ">Juegos</a>"),
+    (">Analytics</a>", ">Analíticas</a>"),
+    (">Hook Line</a>", ">Ganchos</a>"),
+    ("'🗑 Delete'", "'🗑 Borrar'"),
+    ("'🖼 Thumbnail'", "'🖼 Miniatura'"),
+    ("No VODs found from yesterday (${data.date}) for this channel's tracked streamers.",
+     "No hay VODs de ayer (${data.date}) de los streamers que sigue este canal."),
+    ("Yesterday's VODs", "VODs de ayer"),
+    (">Search a creator<", ">Buscar un creador<"),
+    ('placeholder="Twitch login or YouTube handle..."', 'placeholder="Usuario de Twitch o @ de YouTube..."'),
+    (">Search<", ">Buscar<"),
+    ("'Searching...'", "'Buscando...'"),
+    ('No creator found for "${q}".', 'No se encontró ningún creador para "${q}".'),
+    ("Search failed -- try again.", "La búsqueda falló: inténtalo de nuevo."),
+    (">Recommended VOD to clip today<", ">VOD recomendado para clipear hoy<"),
+    (">🎯 Recommend one<", ">🎯 Recomiéndame uno<"),
+    ("Checking your tracked streamers' recent VODs -- this can take up to a minute since it double-checks each one is actually downloadable...",
+     "Revisando los VODs recientes de tus streamers: puede tardar hasta un minuto porque comprueba que cada uno se pueda descargar..."),
+    ("Could not get a recommendation -- try again.", "No se pudo obtener una recomendación: inténtalo de nuevo."),
+    ("'Could not get a recommendation.'", "'No se pudo obtener una recomendación.'"),
+    ("'Top pick'", "'Mejor opción'"),
+    ("'Runner-up'", "'Segunda opción'"),
+    ("'Use this VOD'", "'Usar este VOD'"),
+    ("${formatViewers(entry.view_count)} views", "${formatViewers(entry.view_count)} vistas"),
+    ("`LIVE · ${formatViewers(c.viewers)} viewers` : 'LIVE'",
+     "`EN DIRECTO · ${formatViewers(c.viewers)} espectadores` : 'EN DIRECTO'"),
+    (">Latest uploads — YouTube<", ">Últimos videos — YouTube<"),
+    (">Latest VODs — Twitch<", ">Últimos VODs — Twitch<"),
+    (">Trending live now — Twitch (100k+ viewers)<", ">En directo ahora — Twitch (más de 100k espectadores)<"),
+    (">Suggested creators — Twitch (popular, not on your watchlist)<",
+     ">Creadores sugeridos — Twitch (populares, fuera de tu lista)<"),
+    (">Video URL<", ">URL del video<"),
+    (">Focus (optional)<", ">Enfoque (opcional)<"),
+    ('placeholder="e.g. funniest moments"', 'placeholder="p. ej. los momentos más graciosos"'),
+    ("># clips<", ">Nº de clips<"),
+    (">Min length (s)<", ">Duración mín. (s)<"),
+    (">Max length (s)<", ">Duración máx. (s)<"),
+    ("Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.",
+     "Máximo 60 s: por encima, YouTube puede subirlo como video normal en vez de Short."),
+    (">Accurate captions (Whisper)<", ">Subtítulos precisos (Whisper)<"),
+    ("Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).",
+     "Más lento, pero cada palabra va sincronizada con el audio. Desmárcalo para usar los subtítulos de YouTube (más rápido, pero pueden ir con retraso)."),
+    (">Tighten pacing<", ">Ritmo más ágil<"),
+    ("Cuts quiet pauses out of each clip so it never goes slow.",
+     "Corta las pausas en silencio de cada clip para que nunca se haga lento."),
+    (">Payoff teaser<", ">Adelanto del clímax<"),
+    ("Opens each clip on a 1-second flash of its biggest moment, then plays it from the start. A strong hook, but try it on a few clips before making it a habit.",
+     "Abre cada clip con un flash de 1 segundo de su mejor momento y luego lo reproduce desde el principio. Es un gancho fuerte, pero pruébalo en unos pocos clips antes de usarlo siempre."),
+    (">Channel mascot + name<", ">Mascota + nombre del canal<"),
+    ("Puts the channel's mascot in the top-left corner of every clip, with the channel name next to it for the first 3 seconds, so viewers start to recognise the channel.",
+     "Pone la mascota del canal en la esquina superior izquierda de cada clip, con el nombre del canal al lado durante los primeros 3 segundos, para que la gente empiece a reconocer el canal."),
+    (">Hook text on screen<", ">Texto gancho en pantalla<"),
+    ("Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.",
+     "Pone una frase corta arriba de cada clip durante sus primeros 3 segundos, diciendo por qué seguir mirando. Es justo cuando la gente decide si desliza o no."),
+    (">Generate clips<", ">Generar clips<"),
+    ("Emergency stop", "Parada de emergencia"),
+    ("🗑 I've downloaded these — delete from server", "🗑 Ya los descargué — borrar del servidor"),
+    ("Active &amp; saved jobs", "Trabajos activos y guardados"),
+    ("🔔 Test Telegram notification", "🔔 Probar notificación de Telegram"),
+    ("'Sending...'", "'Enviando...'"),
+    ("✅ Sent -- check Telegram", "✅ Enviado: revisa Telegram"),
+    ("❌ Failed -- check CLIPPER_BOT_API is set and message the bot first",
+     "❌ Falló: revisa que CLIPPER_BOT_API esté configurado y escríbele primero al bot"),
+    (">Stop this job now?<", ">¿Detener este trabajo ahora?<"),
+    ("A step already in progress (a download, a render) finishes first -- this isn't instant.",
+     "Un paso que ya esté en marcha (una descarga, un render) termina primero: no es instantáneo."),
+    (">Save progress<", ">Guardar progreso<"),
+    (">Yes, stop &amp; delete<", ">Sí, detener y borrar<"),
+    (">No, continue<", ">No, continuar<"),
+    ("save ? 'Saving & stopping...' : 'Stopping...'", "save ? 'Guardando y deteniendo...' : 'Deteniendo...'"),
+    (">What mood are you looking for?<", ">¿Qué tipo de momentos buscas?<"),
+    ("This becomes the instruction Claude uses when picking clips -- pick one, or skip to let it judge freely.",
+     "Esto se convierte en la instrucción que Claude usa al elegir clips: elige uno u omítelo para que decida libremente."),
+    ('data-mood="the funniest moments -- genuine comedy, banter, or jokes that land"',
+     'data-mood="los momentos más graciosos: comedia de verdad, vacile o chistes que funcionan"'),
+    ('data-mood="insane clutch plays -- high-pressure moments where they pull off something incredible at the last second"',
+     'data-mood="jugadas clutch épicas: momentos de máxima presión en los que logran algo increíble en el último segundo"'),
+    ('data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;"',
+     'data-mood="momentos locos e inesperados: situaciones caóticas o alucinantes que te hacen decir &quot;no puede ser&quot;"'),
+    ('data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh"',
+     'data-mood="humor negro: chistes atrevidos o macabros que sacan una risa de sorpresa"'),
+    (">😂 Funny<", ">😂 Gracioso<"),
+    (">🔥 Insane clutch<", ">🔥 Clutch épico<"),
+    (">🤯 Crazy moment<", ">🤯 Momento loco<"),
+    (">💀 Dark humor<", ">💀 Humor negro<"),
+    (">Skip -- no preference<", ">Omitir: sin preferencia<"),
+    ("Generate more clips", "Generar más clips"),
+    ("Reuses the already-downloaded source -- no re-download needed.",
+     "Reutiliza la fuente ya descargada: no hace falta volver a descargarla."),
+    (">Mood (optional)<", ">Estilo (opcional)<"),
+    (">How many more clips?<", ">¿Cuántos clips más?<"),
+    ("🔁 Start fresh (ignore previously-picked moments -- may repeat earlier clips)",
+     "🔁 Empezar de cero (ignora los momentos ya elegidos; puede repetir clips anteriores)"),
+    ("Off (default): only ever picks NEW moments, same as before. On: forgets what's already been\n"
+     "      picked so Claude can freely re-pick from everything again -- useful once repeated \"generate more\" calls\n"
+     "      have used up most of the available moments and it's only returning 1-2 clips.",
+     "Desactivado (por defecto): solo elige momentos NUEVOS, como siempre. Activado: olvida lo que ya se eligió para que"
+     " Claude pueda volver a elegir entre todo; útil cuando varios \"generar más\" ya han gastado casi todos los momentos"
+     " disponibles y solo devuelve 1-2 clips."),
+    (">Generate<", ">Generar<"),
+    ("textContent = 'Generate';", "textContent = 'Generar';"),
+    (">Cancel<", ">Cancelar<"),
+    ("'Starting...'", "'Iniciando...'"),
+    ("Could not start -- the downloaded source may be gone.",
+     "No se pudo iniciar: puede que la fuente descargada ya no esté."),
+    ("🗑 Clear clips & regenerate", "🗑 Borrar clips y regenerar"),
+    ("Delete all clips from this job? The downloaded source stays, so regenerating is still fast.",
+     "¿Borrar todos los clips de este trabajo? La fuente descargada se queda, así que regenerar sigue siendo rápido."),
+    ("'Could not clear clips.'", "'No se pudieron borrar los clips.'"),
+    (" · 🎯 ${needFacecam} need facecam placement", " · 🎯 ${needFacecam} necesitan colocar la facecam"),
+    ("return 'Running';", "return 'En curso';"),
+    ("return 'Saved';", "return 'Guardado';"),
+    ("return 'Done';", "return 'Listo';"),
+    ("return 'Stopped';", "return 'Detenido';"),
+    ("running ? 'View' : 'View clips'", "running ? 'Ver' : 'Ver clips'"),
+    ("delBtn.textContent = 'Delete';", "delBtn.textContent = 'Borrar';"),
+    ("'Submitting...'", "'Enviando...'"),
+    ("'Error submitting job: '", "'Error al enviar el trabajo: '"),
+    ("~${job.estimate_minutes} min total, ~${remainingMin.toFixed(1)} min left",
+     "~${job.estimate_minutes} min en total, quedan ~${remainingMin.toFixed(1)} min"),
+    (">Place the facecam<", ">Coloca la facecam<"),
+    ('alt="Source frame"', 'alt="Fotograma original"'),
+    ("Re-render with these boxes", "Volver a renderizar con estos recuadros"),
+    (">Clear boxes<", ">Borrar recuadros<"),
+    ("This isn't a facecam -- it's an IRL scene", "No es una facecam: es una escena IRL"),
+    ("Skip for now", "Omitir por ahora"),
+    ('IRL scene -- "${clip.title}"', 'Escena IRL — "${clip.title}"'),
+    ("This clip is set to render as a wide IRL shot, no facecam. Draw a box below if it actually does have one.",
+     "Este clip se renderiza como plano IRL abierto, sin facecam. Dibuja un recuadro abajo si en realidad sí tiene una."),
+    ('Fix the facecam position -- "${clip.title}"', 'Corrige la posición de la facecam — "${clip.title}"'),
+    ("Detection found a facecam here but the automatic check rejected where it landed, so this clip shipped without one.",
+     "Se detectó una facecam aquí, pero la comprobación automática rechazó dónde quedó, así que este clip salió sin ella."),
+    ('Adjust the facecam position -- "${clip.title}"', 'Ajusta la posición de la facecam — "${clip.title}"'),
+    ("This clip uses the boxes you placed earlier.", "Este clip usa los recuadros que colocaste antes."),
+    ("The automatic placement passed its check, but override it if it actually looks wrong.",
+     "La colocación automática pasó la comprobación, pero cámbiala si en realidad se ve mal."),
+    ('Add a facecam -- "${clip.title}"', 'Añade una facecam — "${clip.title}"'),
+    ("No facecam was detected in this clip.", "No se detectó ninguna facecam en este clip."),
+    ("${why} Click and drag on the frame to draw a box tightly around each facecam window (up to ${FACECAM_MAX_BOXES}), then re-render.",
+     "${why} Haz clic y arrastra sobre el fotograma para dibujar un recuadro ajustado a cada ventana de facecam (hasta ${FACECAM_MAX_BOXES}) y luego vuelve a renderizar."),
+    ("Also apply these boxes to the other ${othersMissing} clip(s) without an automatic facecam",
+     "Aplicar también estos recuadros a los otros ${othersMissing} clip(s) sin facecam automática"),
+    ("Loading the source frame...", "Cargando el fotograma original..."),
+    ("Couldn't load a source frame for this clip -- try again.",
+     "No se pudo cargar un fotograma original de este clip: inténtalo de nuevo."),
+    ("Couldn't load a source frame for this clip.", "No se pudo cargar un fotograma original de este clip."),
+    ("Maximum ${FACECAM_MAX_BOXES} facecam boxes -- remove one (×) to redraw it.",
+     "Máximo ${FACECAM_MAX_BOXES} recuadros de facecam: quita uno (×) para volver a dibujarlo."),
+    ("${facecamBoxes.length} box(es) drawn -- click and drag on the frame to add ${facecamBoxes.length ? 'another' : 'one'} (up to ${FACECAM_MAX_BOXES}).",
+     "${facecamBoxes.length} recuadro(s) dibujado(s): haz clic y arrastra sobre el fotograma para añadir ${facecamBoxes.length ? 'otro' : 'uno'} (hasta ${FACECAM_MAX_BOXES})."),
+    ("Draw at least one box around a facecam first.", "Primero dibuja al menos un recuadro alrededor de una facecam."),
+    ("The frame hasn't finished loading yet -- try again in a second.",
+     "El fotograma aún no ha terminado de cargar: inténtalo en un segundo."),
+    ("'Could not start the re-render.'", "'No se pudo iniciar el nuevo render.'"),
+    ("<p>Upload to YouTube</p>", "<p>Subir a YouTube</p>"),
+    ("📤 Upload to YouTube", "📤 Subir a YouTube"),
+    ("<label>Title</label>", "<label>Título</label>"),
+    ("<label>Description</label>", "<label>Descripción</label>"),
+    (">Unlisted<", ">No listado<"),
+    ("Only people with the link can see it -- good for a final check before going public.",
+     "Solo lo ve quien tenga el enlace: bueno para una última revisión antes de hacerlo público."),
+    (">Public<", ">Público<"),
+    ("Live immediately on your channel and in search/Shorts feed.",
+     "Visible al instante en tu canal, en la búsqueda y en el feed de Shorts."),
+    (">Private<", ">Privado<"),
+    (">Only you can see it.<", ">Solo tú puedes verlo.<"),
+    (">Trim before uploading (optional)<", ">Recortar antes de subir (opcional)<"),
+    ("Play the video above, pause where you want to cut, then use the buttons below -- or type seconds directly.",
+     "Reproduce el video, pausa donde quieras cortar y usa los botones de abajo, o escribe los segundos directamente."),
+    (">Off the start (s)<", ">Quitar del inicio (s)<"),
+    (">Off the end (s)<", ">Quitar del final (s)<"),
+    (">Set to current position<", ">Usar posición actual<"),
+    (">Upload<", ">Subir<"),
+    ("textContent = 'Upload';", "textContent = 'Subir';"),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: con ese recorte quedan ${resultSeconds.toFixed(1)} s, demasiado corto. Deja al menos 1 s."),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploads from the app over ${SHORTS_MAX_SECONDS}s land as regular videos, ",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: lo que se sube desde la app con más de ${SHORTS_MAX_SECONDS} s queda como video normal, "),
+    ("not Shorts. Trim at least ${(resultSeconds - SHORTS_MAX_SECONDS).toFixed(1)}s more.",
+     "no como Short. Recorta al menos ${(resultSeconds - SHORTS_MAX_SECONDS).toFixed(1)} s más."),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploading ${resultSeconds.toFixed(1)}s after this trim.",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: se subirán ${resultSeconds.toFixed(1)} s tras este recorte."),
+    ("That trim would cut the whole clip -- leave at least a second.",
+     "Ese recorte eliminaría todo el clip: deja al menos un segundo."),
+    ("'Title cannot be empty.'", "'El título no puede estar vacío.'"),
+    ("'Trimming & uploading...' : 'Uploading...'", "'Recortando y subiendo...' : 'Subiendo...'"),
+    ("'Upload failed.'", "'La subida falló.'"),
+    ("`Uploaded -- ${data.url}`", "`Subido: ${data.url}`"),
+    (">Choose a thumbnail<", ">Elige una miniatura<"),
+    ("A real frame from the clip -- not AI-generated -- with one bold line of\n"
+     "      text burned over it. Pick one below, then edit the wording if you want.",
+     "Un fotograma real del clip (no generado con IA) con una línea de texto en grande encima."
+     " Elige una abajo y luego edita el texto si quieres."),
+    ('alt="Selected thumbnail"', 'alt="Miniatura seleccionada"'),
+    ("<label>Text</label>", "<label>Texto</label>"),
+    ("Regenerate with this text", "Regenerar con este texto"),
+    ("&larr; Back to choices", "&larr; Volver a las opciones"),
+    (">Download thumbnail<", ">Descargar miniatura<"),
+    (">Close<", ">Cerrar<"),
+    ("Generating thumbnail options...", "Generando opciones de miniatura..."),
+    ("'Could not generate thumbnails.'", "'No se pudieron generar las miniaturas.'"),
+    ("Click one to pick it, then edit the text if you want.", "Haz clic en una para elegirla y luego edita el texto si quieres."),
+    ("Thumbnail option ${t.index}", "Opción de miniatura ${t.index}"),
+    ("No thumbnail candidates could be generated for this clip.", "No se pudo generar ninguna miniatura para este clip."),
+    ("'Text cannot be empty.'", "'El texto no puede estar vacío.'"),
+    ("'Could not regenerate thumbnail.'", "'No se pudo regenerar la miniatura.'"),
+    ("'Regenerating...'", "'Regenerando...'"),
+    ("const kind = c.moment_type ? `${c.moment_type} · ` : '';",
+     "const kind = c.moment_type ? `${({controversy: 'polémica', drama: 'drama', fail: 'fallo', rage: 'rabia',"
+     " funny: 'gracioso', skill: 'habilidad', wholesome: 'tierno', other: 'otro'})[c.moment_type] || c.moment_type} · ` : '';"),
+    ("⭐ Post this one first · ${kind}${c.score}/10", "⭐ Publica este primero · ${kind}${c.score}/10"),
+    ("['hook', 'Hook'], ['controversy', 'Controversy'], ['reaction', 'Reaction'],",
+     "['hook', 'Gancho'], ['controversy', 'Polémica'], ['reaction', 'Reacción'],"),
+    ("['payoff', 'Payoff'], ['standalone', 'Makes sense alone'],",
+     "['payoff', 'Remate'], ['standalone', 'Se entiende solo'],"),
+    ("Overall ${c.score}/10", "Global ${c.score}/10"),
+    ("✅ Posted to YouTube", "✅ Publicado en YouTube"),
+    ("'Copy title'", "'Copiar título'"),
+    ("'Copy description'", "'Copiar descripción'"),
+    ("'Copied!'", "'¡Copiado!'"),
+    ("Download ${c.file}", "Descargar ${c.file}"),
+    ("🎬 IRL scene", "🎬 Escena IRL"),
+    ("🎯 Fix facecam", "🎯 Corregir facecam"),
+    ("🎯 Adjust facecam", "🎯 Ajustar facecam"),
+    ("🎯 Add facecam", "🎯 Añadir facecam"),
+    ("Delete ${c.file}? This can't be undone.", "¿Borrar ${c.file}? No se puede deshacer."),
+    ("'Could not delete this clip.'", "'No se pudo borrar este clip.'"),
+    ("'Deleting...'", "'Borrando...'"),
+    ("Delete these clips from the server? This can\\'t be undone.", "¿Borrar estos clips del servidor? No se puede deshacer."),
+    ("'Deleted.'", "'Borrado.'"),
+]
+
+_UI_TRANSLATIONS: dict = {"es": _UI_STRINGS_ES}
+
+
+def _translate_template(template: str, profile: str) -> str:
+    for english, translated in _UI_TRANSLATIONS.get(profile, []):
+        if english not in template:
+            # The English page changed under this entry -- say so at
+            # startup rather than leave that string silently untranslated.
+            print(f"[ui] {profile!r} translation no longer matches the page: {english[:70]!r}", flush=True)
+            continue
+        template = template.replace(english, translated)
+    return template
+
+
 def _render_channel_home(profile: str) -> str:
     """INDEX_HTML/SPANISH_HTML are both this same template, just with the
     fixed channel baked in (see CHANNEL_PROFILES) -- a separate page per
     channel (its own URL, own "Active & saved jobs" list, own Connect
     YouTube button) rather than one page with an in-page switcher, so each
-    channel bookmarks and navigates like the app's other pages do."""
+    channel bookmarks and navigates like the app's other pages do. A
+    profile with an entry in _UI_TRANSLATIONS gets its interface text in
+    that language."""
     cfg = CHANNEL_PROFILES[profile]
+    page = _CHANNEL_HOME_TEMPLATE.replace("__NAV_LINKS__", _nav_links(cfg["page_path"]))
     return (
-        _CHANNEL_HOME_TEMPLATE
-        .replace("__NAV_LINKS__", _nav_links(cfg["page_path"]))
+        _translate_template(page, profile)
         .replace("__PROFILE_ID__", profile)
         .replace("__PROFILE_LABEL__", cfg["label"])
     )
@@ -5837,11 +6118,11 @@ ANALYTICS_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -5948,7 +6229,7 @@ ANALYTICS_HTML = """<!doctype html>
   <a href="/game-recap">Game Recap</a>
   <a href="/analytics" class="active">Analytics</a>
   <a href="/hook-line">Hook Line</a>
-  <a href="/espanol">Espanol</a>
+  <a href="/espanol">Español</a>
 </div>
 <div class="card">
 
@@ -6709,11 +6990,11 @@ GAME_RECAP_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -6813,7 +7094,7 @@ GAME_RECAP_HTML = """<!doctype html>
     <a href="/game-recap" class="active">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
-    <a href="/espanol">Espanol</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
@@ -7294,11 +7575,11 @@ WEEKLY_RECAP_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -7396,7 +7677,7 @@ WEEKLY_RECAP_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
-    <a href="/espanol">Espanol</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
@@ -7842,11 +8123,11 @@ HOOK_LINE_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -7913,7 +8194,7 @@ HOOK_LINE_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line" class="active">Hook Line</a>
-    <a href="/espanol">Espanol</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">⚡</span><h1>Hook line</h1></div>

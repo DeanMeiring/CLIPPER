@@ -335,6 +335,26 @@ audience, even over the general guidance below:
 """
 
 
+def _output_language_block(output_language: Optional[str]) -> str:
+    """Empty (the prompt is unchanged) unless a channel posts in a language
+    other than the default -- the field instructions and title examples are
+    written in English, and left alone Claude answers in the prompt's
+    language even when the stream itself is in another one."""
+    if not output_language:
+        return ""
+    return f"""
+
+LANGUAGE: this channel posts in {output_language} for a {output_language}-speaking
+audience. Write title, hook_caption, upload_title, description and reason in
+natural, casual {output_language} -- the way a {output_language}-speaking clip
+channel would write them, not a translation of English phrasing. The title
+examples above are English only to show the style: keep the structure (the
+streamer's name first, the specific thing that happens, at most one emoji)
+but write it in {output_language}. start_words and end_words must still be
+copied verbatim from the transcript in whatever language was spoken, and
+moment_type must still be one of the listed English labels."""
+
+
 def _clip_rules(min_len: float, max_len: float) -> str:
     return f"""What decides whether a Short gets watched: viewers choose within the first
 second or two whether to keep watching or swipe away. So each clip must:
@@ -423,9 +443,13 @@ def select_clips(
     loud_moments: Optional[List[LoudMoment]] = None,
     strategy_notes: Optional[str] = None,
     performance_notes: Optional[str] = None,
+    output_language: Optional[str] = None,
 ) -> List[ClipPick]:
-    """Return up to n_clips non-overlapping ClipPicks, sorted by start time."""
+    """Return up to n_clips non-overlapping ClipPicks, sorted by start time.
+    output_language (e.g. "Spanish") makes Claude write the on-screen and
+    upload text in that language; None leaves the prompt as it always was."""
     transcript_text = _chunk_transcript(words)
+    language_line = _output_language_block(output_language)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
     loud_line = _loud_moments_block(loud_moments)
@@ -452,7 +476,7 @@ double-quote characters that appear inside a string value):
 {_PICK_FIELDS}
   }}
 ]
-"start" and "end" are seconds, read off the markers.
+"start" and "end" are seconds, read off the markers.{language_line}
 
 Transcript:
 {transcript_text}
@@ -508,6 +532,7 @@ def select_from_candidate_windows(
     source_title: Optional[str] = None,
     strategy_notes: Optional[str] = None,
     performance_notes: Optional[str] = None,
+    output_language: Optional[str] = None,
 ) -> List[WindowPick]:
     """Pick the best clips from a set of pre-filtered candidate windows
     (long-VOD pipeline) instead of one continuous transcript.
@@ -524,6 +549,7 @@ def select_from_candidate_windows(
     source_line = f"\nSource VOD title: {source_title}\n" if source_title else ""
     performance_line = _performance_block(performance_notes)
     strategy_line = _strategy_notes_block(strategy_notes)
+    language_line = _output_language_block(output_language)
 
     blocks = []
     for w in windows:
@@ -564,7 +590,7 @@ double-quote characters that appear inside a string value):
   }}
 ]
 "start" and "end" are seconds LOCAL TO THAT WINDOW (0 to its duration), read
-off its markers.
+off its markers.{language_line}
 
 Candidate windows:
 {windows_text}

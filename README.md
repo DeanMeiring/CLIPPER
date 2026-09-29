@@ -284,7 +284,7 @@ from each service's own dashboard.
 | `TRENDING_TWITCH_LOGINS` | trending / weekly recap | comma-separated Twitch logins to track (main channel) |
 | `TRENDING_YOUTUBE_CHANNELS` | trending | comma-separated YouTube channel IDs / `@handles` (main channel) |
 | `TRENDING_TWITCH_LOGINS_ES` | second-channel trending / yesterday's VODs | comma-separated Twitch logins for the second (Spanish) channel profile -- see "Channel profiles" below |
-| `CLIPPER_BRAND_NAME_ES` | — | channel name stamped on the second channel's clips (optional; default `Directo Viral`) |
+| `CLIPPER_BRAND_NAME_ES` | — | channel name stamped on the second channel's clips (optional; default `Pillado En Directo`) |
 | `YOUTUBE_API_KEY` | trending, channel insights, competitor discovery | public YouTube Data API v3 key |
 | `YOUTUBE_OWN_CHANNEL` | no-auth channel insights | your own channel's ID / `@handle` |
 | `YOUTUBE_OAUTH_CLIENT_ID` / `YOUTUBE_OAUTH_CLIENT_SECRET` | real Analytics + YouTube upload | Google Cloud OAuth Web client, see below |
@@ -295,15 +295,23 @@ from each service's own dashboard.
 ### Channel profiles — a second, parallel clip channel
 
 The app can run two channels side by side out of one deployment: the
-original ("main") channel plus a second ("es", labeled "Espanol") that
+original ("main") channel plus a second ("es", labeled "Español") that
 tracks its own Twitch streamers, uploads to its own connected YouTube
-account, and stamps clips with its own name and mascot accent colour --
-same pipeline, different watchlist and destination. Each channel is its
+account, and stamps clips with its own name (default "Pillado En Directo")
+and an orange mascot instead of the main channel's yellow one -- same
+pipeline, different watchlist and destination. Each channel is its
 own page (`/` for the main channel, `/espanol` for the second one, both
 linked from every page's top nav) rather than a switcher on one page, so
 each has its own bookmarkable URL and its own "Active & saved jobs" list
 -- a job only ever shows up on the page for the channel it was created
 under.
+
+The Spanish channel's page is in Spanish (`_UI_STRINGS_ES` in
+`webapp/main.py`; a startup log line flags any entry the English page no
+longer matches), and its profile's `output_language` makes Claude write
+each clip's title, burned-in hook text, upload title and description in
+Spanish. Progress messages sent from the server while a job runs are still
+in English.
 
 To set the second channel up: set `TRENDING_TWITCH_LOGINS_ES` to the
 streamers to track (comma-separated Twitch logins), optionally
