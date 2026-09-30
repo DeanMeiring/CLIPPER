@@ -191,13 +191,16 @@ def fetch_article(url: str) -> dict:
     r.raise_for_status()
     page = r.text
     title_m = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+    site_m = re.search(r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']+)', page, re.I)
+    date_m = re.search(r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|date|pubdate|publish-date)["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})', page, re.I)
     page = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer|header|aside)[^>]*>.*?</\1>", " ", page)
     page = re.sub(r"(?i)<br\s*/?>|</p>|</h\d>|</li>", "\n", page)
     text = html.unescape(re.sub(r"<[^>]+>", " ", page))
     lines = [" ".join(ln.split()) for ln in text.splitlines()]
     text = "\n".join(ln for ln in lines if len(ln) > 40)
     return {"url": url, "title": html.unescape(" ".join((title_m.group(1) if title_m else url).split()))[:150],
-            "text": text[:12000]}
+            "site": html.unescape(site_m.group(1)).strip()[:40] if site_m else "",
+            "published": date_m.group(1) if date_m else "", "text": text[:12000]}
 
 
 def build_dossier(login: str, notes: str, links: List[str], on_progress: Callable[[str], None] = lambda m: None) -> dict:
@@ -207,9 +210,21 @@ def build_dossier(login: str, notes: str, links: List[str], on_progress: Callabl
     clips = career_clips(profile)
     on_progress("Checking Wikipedia...")
     wiki = wikipedia([profile["display_name"], profile["login"]])
-    articles, failed = [], []
-    for url in links[:5]:
+    from .visual_sources import is_x_post, x_post
+
+    articles, posts, failed = [], [], []
+    for url in links[:8]:
         on_progress(f"Reading {url[:60]}...")
+        if is_x_post(url):
+            try:
+                post = x_post(url)
+                (posts if post else failed).append(post or url)
+            except Exception as e:
+                print(f"[documentary] post {url} failed: {e}", flush=True)
+                failed.append(url)
+            continue
+        if len(articles) >= 5:
+            continue
         try:
             a = fetch_article(url)
             if len(a["text"]) > 200:
@@ -219,7 +234,7 @@ def build_dossier(login: str, notes: str, links: List[str], on_progress: Callabl
         except Exception as e:
             print(f"[documentary] article {url} failed: {e}", flush=True)
             failed.append(url)
-    return {"profile": profile, "clips": clips, "wikipedia": wiki, "articles": articles,
+    return {"profile": profile, "clips": clips, "wikipedia": wiki, "articles": articles, "posts": posts,
             "failed_links": failed, "notes": notes.strip()[:6000]}
 
 
@@ -299,6 +314,8 @@ def _script_prompt(dossier: dict, library: List[dict], project_dir: Path, channe
         sources.append(f"WIKIPEDIA ARTICLE \"{dossier['wikipedia']['title']}\":\n{dossier['wikipedia']['text'][:20000]}")
     for a in dossier.get("articles") or []:
         sources.append(f"ARTICLE \"{a['title']}\" ({a['url']}):\n{a['text'][:8000]}")
+    for post in dossier.get("posts") or []:
+        sources.append(f"POST ON X by @{post['handle']} ({post.get('date') or 'undated'}): \"{post['text']}\"")
     if dossier.get("notes"):
         sources.append(f"THE CREATOR'S OWN NOTES (things they know as a long-time viewer):\n{dossier['notes']}")
     name = p["display_name"]
@@ -381,7 +398,9 @@ def normalize_scenes(items, library: List[dict]) -> List[dict]:
         if kind == "narrate":
             text = " ".join(str(it.get("narration") or "").split())
             if text:
-                scenes.append({"kind": "narrate", "narration": text, "clip": clip, "start": 0.0, "caption": caption, "take": None})
+                cues = normalize_cues(it.get("cues") or [], text, library) if it.get("cues") else []
+                scenes.append({"kind": "narrate", "narration": text, "clip": clip, "start": 0.0, "caption": caption,
+                               "take": None, "cues": cues})
         elif kind == "moment" and clip:
             dur = by_id[clip]["duration"]
             start = max(0.0, min(_num(it.get("start")) or 0.0, max(0.0, dur - MOMENT_MIN)))
@@ -407,6 +426,281 @@ def write_script(dossier: dict, library: List[dict], project_dir: Path, channel:
     if not any(s["kind"] == "narrate" for s in scenes):
         raise RuntimeError("Claude didn't return a usable script -- try Write the story again.")
     return scenes
+
+
+# --------------------------------------------------------------- visuals ---
+# Keyword visuals for narrated scenes (rendered by longform_beats.py): what
+# appears on screen when the narrator says a given phrase. Claude plans
+# them; everything is checked against the narration and the research here,
+# so a stat card can only show a number that is written in the research.
+
+MAX_CUES_PER_SCENE = 8
+
+
+def _tokens(text: str) -> List[str]:
+    from .longform import _norm
+
+    return [t for t in (_norm(w) for w in str(text).split()) if t]
+
+
+def _contains(hay: List[str], needle: List[str]) -> bool:
+    n = len(needle)
+    return n > 0 and any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
+
+
+def research_text(dossier: dict, library: List[dict]) -> str:
+    """Every fact the visuals may quote, as one lower-case blob."""
+    p = dossier.get("profile") or {}
+    parts = [p.get("display_name") or "", p.get("description") or "", (p.get("created_at") or "")[:10],
+             p.get("broadcaster_type") or "", dossier.get("notes") or ""]
+    parts += [(dossier.get("wikipedia") or {}).get("text") or ""]
+    parts += [f"{a.get('title', '')} {a.get('published', '')} {a.get('text', '')}" for a in dossier.get("articles") or []]
+    parts += [f"{x.get('text', '')} {x.get('date', '')} {x.get('likes', '')}" for x in dossier.get("posts") or []]
+    parts += [f"{c.get('date', '')} {c.get('views', '')} {int(c.get('views') or 0):,} {c.get('title', '')}" for c in library]
+    return " ".join(parts).lower()
+
+
+def _numbers(text: str) -> set:
+    return {m.replace(",", "").rstrip(".") for m in re.findall(r"\d[\d,.]*", text)}
+
+
+def _value_ok(value: str, blob: str, nums: set) -> bool:
+    v = value.strip().lower()
+    if not v:
+        return False
+    if v in blob:
+        return True
+    digits = re.findall(r"\d[\d,.]*", v)
+    return bool(digits) and all(d.replace(",", "").rstrip(".") in nums for d in digits)
+
+
+def normalize_cues(cues, narration: str, library: List[dict], dossier: Optional[dict] = None) -> List[dict]:
+    """Keep only cues that can be drawn and are true: the phrase is in the
+    narration, clips/posts/articles exist, numbers and years come from the
+    research. Without a dossier (a story edit being saved) the research
+    checks are skipped -- the cues were checked when they were planned."""
+    from .longform_beats import CUE_TYPES
+    from .visual_sources import emoji_file
+
+    narr = _tokens(narration)
+    by_id = {c["id"]: c for c in library}
+    blob = research_text(dossier, library) if dossier is not None else None
+    nums = _numbers(blob) if blob is not None else set()
+    posts = (dossier or {}).get("posts")
+    articles = (dossier or {}).get("articles")
+    out: List[dict] = []
+    for c in cues if isinstance(cues, list) else []:
+        if not isinstance(c, dict):
+            continue
+        kind = str(c.get("type") or "").lower()
+        at = " ".join(str(c.get("at") or "").split())[:60]
+        if kind not in CUE_TYPES or not _contains(narr, _tokens(at)):
+            continue
+        cue = {"at": at, "type": kind}
+        if kind == "words":
+            cue["text"] = " ".join(str(c.get("text") or at).split())[:32]
+        elif kind == "emoji":
+            e = str(c.get("emoji") or "").strip()
+            if not emoji_file(e):
+                continue
+            cue["emoji"] = e
+            cue["text"] = " ".join(str(c.get("text") or "").split())[:24]
+        elif kind == "stat":
+            value = " ".join(str(c.get("value") or "").split())[:24]
+            if not value or (blob is not None and not _value_ok(value, blob, nums)):
+                continue
+            cue.update(value=value, label=" ".join(str(c.get("label") or "").split())[:30],
+                       sub=" ".join(str(c.get("sub") or "").split())[:48])
+        elif kind in ("stock", "photo"):
+            q = " ".join(str(c.get("query") or "").split())[:60]
+            if not q:
+                continue
+            cue["query"] = q
+            for k in ("asset", "credit"):
+                if c.get(k):
+                    cue[k] = c[k]
+        elif kind == "clip":
+            cid = str(c.get("clip") or "").upper()
+            if cid not in by_id:
+                continue
+            start = _num(c.get("start")) or 0.0
+            cue.update(clip=cid, start=round(max(0.0, min(start, float(by_id[cid].get("duration") or 0) - 2)), 2))
+        elif kind == "post":
+            try:
+                i = int(c.get("post"))
+            except (TypeError, ValueError):
+                continue
+            if posts is not None and not 0 <= i < len(posts):
+                continue
+            hl = " ".join(str(c.get("highlight") or "").split())[:120]
+            if posts is not None and hl and not _contains(_tokens(posts[i]["text"]), _tokens(hl)):
+                hl = ""
+            cue.update(post=i, highlight=hl)
+        elif kind == "headline":
+            try:
+                i = int(c.get("article"))
+            except (TypeError, ValueError):
+                continue
+            if articles is not None and not 0 <= i < len(articles):
+                continue
+            hl = " ".join(str(c.get("highlight") or "").split())[:100]
+            if articles is not None and hl and not _contains(_tokens(articles[i]["title"]), _tokens(hl)):
+                hl = ""
+            cue.update(article=i, highlight=hl)
+        elif kind == "timeline":
+            pts = []
+            for pt in c.get("points") or []:
+                if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                    continue
+                year = str(pt[0]).strip()[:6]
+                if blob is not None and not (re.fullmatch(r"\d{4}", year) and year in blob):
+                    continue
+                pts.append([year, " ".join(str(pt[1]).split())[:22]])
+            if len(pts) < 2:
+                continue
+            cue["points"] = pts[:5]
+        out.append(cue)
+    return out[:MAX_CUES_PER_SCENE]
+
+
+def _visuals_prompt(dossier: dict, library: List[dict], scenes: List[dict], emoji: str) -> str:
+    p = dossier["profile"]
+    name = p.get("display_name") or p.get("login")
+    facts = [f"Twitch account created: {(p.get('created_at') or '')[:10] or 'unknown'}",
+             f"Twitch status: {p.get('broadcaster_type') or 'regular'}"]
+    if dossier.get("wikipedia"):
+        facts.append(f"WIKIPEDIA:\n{dossier['wikipedia']['text'][:12000]}")
+    for a in dossier.get("articles") or []:
+        facts.append(f"ARTICLE \"{a['title']}\":\n{a['text'][:4000]}")
+    if dossier.get("notes"):
+        facts.append(f"CREATOR'S NOTES:\n{dossier['notes'][:3000]}")
+    posts = "\n".join(f"{i}: @{x['handle']} ({x.get('date') or 'undated'}): \"{x['text']}\""
+                      for i, x in enumerate(dossier.get("posts") or [])) or "(none)"
+    arts = "\n".join(f"{i}: \"{a['title']}\" ({a.get('site') or a['url']}, {a.get('published') or 'undated'})"
+                     for i, a in enumerate(dossier.get("articles") or [])) or "(none)"
+    clips = "\n".join(f"{c['id']} | {c['date']} | {c['views']:,} views | {c['duration']:.0f}s | \"{c['title']}\"" for c in library)
+    narrated = "\n".join(f"[{i}] {sc['narration']}" for i, sc in enumerate(scenes) if sc.get("kind") == "narrate")
+    return f"""You are planning the on-screen visuals for a YouTube documentary about
+the Twitch streamer {name}. The narrator's own voice tells the story; the
+picture changes on key phrases, every few seconds, the way well-edited
+documentary channels do it.
+
+For each narrated scene below, pick key phrases and what appears the
+moment each phrase is spoken. Visual types:
+- "words": the phrase or a short line (max 4 words) in big letters. For a
+  short, striking statement.
+- "emoji": one emoji from this list: {emoji}
+  For a feeling or an object (money, a trophy, a late night). Optional
+  "text": a 1-3 word label.
+- "stat": a number card with {name}'s picture: "label" (e.g. "Clip views"),
+  "value" written exactly as in the research, optional "sub". Only numbers
+  that appear in the research, clip list, posts or articles below.
+- "stock": free stock video: "query" of 2-4 plain words for a generic
+  scene ("gaming setup at night", "crowd cheering"). Never a person's name,
+  a brand, a game title or a logo -- stock libraries don't have those.
+- "photo": a free photo, same "query" rules. Good for places and objects.
+- "clip": cut to one of {name}'s clips: "clip" id and "start" second. When
+  the narration mentions an event that clip shows.
+- "post": show one of the posts below: "post" number and "highlight"
+  (exact words from the post).
+- "headline": show one of the article headlines below: "article" number
+  and "highlight" (exact words from its title).
+- "timeline": "points", 2 to 5 of ["year", "event"] from the research. For
+  a stretch of time.
+
+Rules:
+- "at" is copied exactly from the scene's narration: 1 to 5 consecutive
+  words. The visual appears when they are said.
+- About one visual per 12 to 18 words. At least 6 words between two
+  "at" phrases. Give cards (stat, post, headline, timeline) at least 10
+  words of narration before the next visual, so there is time to read.
+- Mix the types; never the same type twice in a row.
+- Facts only from the research. If a number isn't there, don't make a stat.
+- Plain labels; no hype words.
+
+RESEARCH:
+{chr(10).join(facts)}
+
+POSTS:
+{posts}
+
+ARTICLES:
+{arts}
+
+CLIPS (id | date | views | length | title):
+{clips}
+
+NARRATED SCENES ([scene number] narration):
+{narrated}
+
+Respond with ONLY a JSON array, one object per narrated scene:
+[{{"scene": 3, "cues": [{{"at": "twelve viewers", "type": "words", "text": "12 viewers"}}, {{"at": "late at night", "type": "stock", "query": "bedroom desk at night"}}]}}]
+"""
+
+
+def plan_visuals(dossier: dict, library: List[dict], scenes: List[dict]) -> List[dict]:
+    """Keyword visuals for every narrated scene. Returns the scenes with
+    "cues" set (other scenes unchanged)."""
+    from .select_moments import DEFAULT_MODEL, _ask_claude_for_json
+    from .visual_sources import emoji_list
+
+    if not any(sc.get("kind") == "narrate" for sc in scenes):
+        return scenes
+    data = _ask_claude_for_json(_visuals_prompt(dossier, library, scenes, emoji_list()), None, DEFAULT_MODEL)
+    planned = {}
+    for item in data if isinstance(data, list) else []:
+        if isinstance(item, dict):
+            try:
+                planned[int(item.get("scene"))] = item.get("cues")
+            except (TypeError, ValueError):
+                continue
+    out = []
+    for i, sc in enumerate(scenes):
+        sc = dict(sc)
+        if sc.get("kind") == "narrate":
+            sc["cues"] = normalize_cues(planned.get(i) or [], sc["narration"], library, dossier)
+        out.append(sc)
+    return out
+
+
+def fetch_visuals(scenes: List[dict], dossier: dict, project_dir: Path,
+                  on_progress: Callable[[str], None] = lambda m: None) -> List[dict]:
+    """Download what the cues need into visuals/: stock footage and photos
+    (a stock video that can't be found falls back to a photo; one with no
+    photo either is dropped), the streamer's avatar and post avatars."""
+    from .visual_sources import fetch_image, find_stock
+
+    vdir = project_dir / "visuals"
+    vdir.mkdir(parents=True, exist_ok=True)
+    fetch_image((dossier.get("profile") or {}).get("profile_image_url") or "", vdir / "avatar.jpg")
+    for i, post in enumerate(dossier.get("posts") or []):
+        fetch_image(post.get("avatar") or "", vdir / f"post_{i}_avatar.jpg")
+    out = []
+    for sc in scenes:
+        sc = dict(sc)
+        cues = []
+        for c in sc.get("cues") or []:
+            c = dict(c)
+            if c["type"] in ("stock", "photo") and not (c.get("asset") and (vdir / c["asset"]).is_file()):
+                on_progress(f"Finding free {'footage' if c['type'] == 'stock' else 'photos'}: {c['query']}...")
+                found = find_stock("video" if c["type"] == "stock" else "photo", c["query"], vdir)
+                if not found and c["type"] == "stock":
+                    found = find_stock("photo", c["query"], vdir)
+                if not found:
+                    continue
+                c["asset"] = found["file"]
+                c["credit"] = {k: found.get(k, "") for k in ("source", "author", "page")}
+            cues.append(c)
+        if sc.get("kind") == "narrate":
+            sc["cues"] = cues
+        out.append(sc)
+    return out
+
+
+def visual_credits(scenes: List[dict]) -> List[str]:
+    from .visual_sources import credits
+
+    return credits([c.get("credit") for sc in scenes for c in sc.get("cues") or [] if c.get("credit")])
 
 
 # ------------------------------------------------------------ the series ---
