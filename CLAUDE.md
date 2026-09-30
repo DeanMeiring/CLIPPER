@@ -31,20 +31,25 @@ merge it yourself; merging stays Dean's call per the rule above.
   content is all in `main` already. Don't build on it or try to push it:
   it has diverged, and the force-push needed is blocked in auto mode.
 
-## Two channels (channel profiles)
+## What the app is now
 
-- `CHANNEL_PROFILES` in `webapp/main.py`: `main` (English, page `/`) and
-  `es` (Spanish, page `/espanol`, brand "Pillado En Directo", Twitch
-  logins from `TRENDING_TWITCH_LOGINS_ES`). Each has its own YouTube
-  token file, mascot accent colour and `output_language`.
-- Both pages render from `_CHANNEL_HOME_TEMPLATE`. The Spanish page's text
-  comes from `_UI_STRINGS_ES` (exact English → Spanish pairs). **Any
-  change to visible text on the home page must update that table**, or the
-  Spanish page shows the new English text. A startup log line
-  `[ui] 'es' translation no longer matches` flags stale entries.
-- The main channel's behaviour must stay unchanged when touching shared
-  code. For the clip-picking prompts in `clipper/select_moments.py` this
-  was checked by capturing old vs new prompts and comparing byte for byte.
+- Dean cut the app back to the core clip pipeline (Sept 2026) to build on
+  from there. The Spanish channel (`/espanol`), Weekly Recap and Game
+  Recap pages were removed, including their code, and the recap-only
+  helpers in `clipper/trending.py`. Pages left: Home (`/`), Analytics,
+  Hook Line.
+- `CHANNEL_PROFILES` in `webapp/main.py` holds just `main`. The profile
+  plumbing (per-channel Twitch logins env var, brand name, mascot accent,
+  YouTube token file, `output_language`) was kept on purpose so a new
+  channel can be added later as another entry.
+- Old Spanish or recap jobs may still sit on the Railway volume. They
+  show in the jobs list so they can be downloaded or deleted. Uploading
+  a clip from a removed profile, and regenerating a recap job, both
+  return 409, so a Spanish clip can never go to the main channel.
+- Dean likes how clips are picked and rendered. Changes to shared
+  pipeline code must keep that byte-for-byte unless he asks otherwise.
+  For the clip-picking prompts in `clipper/select_moments.py` this was
+  checked by capturing old vs new prompts and comparing byte for byte.
 - The "learns from YouTube stats" notes (`_load_strategy_notes` /
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
