@@ -19,6 +19,7 @@ import datetime
 import os
 import re
 import statistics
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -176,18 +177,44 @@ def _chat_spike_windows(
     return windows
 
 
-def _existing_clip_windows(
+# fetch_vod_clips is called twice per long-VOD job (once for the job page's
+# "most-viewed Twitch clips" panel, once here for the candidate windows) --
+# a short cache keeps that to one set of Twitch API calls.
+_VOD_CLIPS_CACHE_SECONDS = 600.0
+_vod_clips_cache: dict = {}
+
+
+def fetch_vod_clips(
     broadcaster_login: str,
     vod_id: str,
     created_at: Optional[float] = None,
     duration: Optional[float] = None,
-    pad_before: float = 20.0,
-    pad_after: float = 40.0,
-) -> List[CandidateWindow]:
+) -> List[dict]:
+    """Twitch's own clips (made with the Clip button, by viewers or the
+    creator) that were cut from this exact VOD, most-viewed first. Raw
+    Helix clip dicts, each with a vod_offset. Empty if TWITCH_CLIENT_ID /
+    TWITCH_CLIENT_SECRET aren't set or on any lookup failure."""
+    clips = _fetch_vod_clips_raw(broadcaster_login, vod_id, created_at=created_at, duration=duration)
+    return sorted(clips, key=lambda c: c.get("view_count") or 0, reverse=True)
+
+
+def _fetch_vod_clips_raw(
+    broadcaster_login: str,
+    vod_id: str,
+    created_at: Optional[float] = None,
+    duration: Optional[float] = None,
+) -> List[dict]:
+    """fetch_vod_clips in Twitch's own response order -- the order
+    _existing_clip_windows has always built its windows in."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     client_secret = os.environ.get("TWITCH_CLIENT_SECRET")
     if not client_id or not client_secret:
         return []
+
+    cache_key = (broadcaster_login.lower(), str(vod_id))
+    cached = _vod_clips_cache.get(cache_key)
+    if cached and time.time() - cached[0] < _VOD_CLIPS_CACHE_SECONDS:
+        return list(cached[1])
 
     import requests
 
@@ -247,6 +274,19 @@ def _existing_clip_windows(
     vod_clips = [c for c in clips if c.get("video_id") == str(vod_id) and c.get("vod_offset") is not None]
     print(f"[highlights] Twitch clips: {len(clips)} total for broadcaster_id={broadcaster_id}, "
           f"{len(vod_clips)} matched vod_id={vod_id}", flush=True)
+    _vod_clips_cache[cache_key] = (time.time(), vod_clips)
+    return list(vod_clips)
+
+
+def _existing_clip_windows(
+    broadcaster_login: str,
+    vod_id: str,
+    created_at: Optional[float] = None,
+    duration: Optional[float] = None,
+    pad_before: float = 20.0,
+    pad_after: float = 40.0,
+) -> List[CandidateWindow]:
+    vod_clips = _fetch_vod_clips_raw(broadcaster_login, vod_id, created_at=created_at, duration=duration)
     if not vod_clips:
         return []
 
