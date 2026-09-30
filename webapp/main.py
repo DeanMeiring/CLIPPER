@@ -36,6 +36,7 @@ from clipper import longform
 from clipper import longform_video
 from clipper import voice_clone
 from clipper import visual_sources
+from clipper import longform_lessons
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -2953,6 +2954,7 @@ def long_form_page() -> str:
 # See clipper/documentary.py (research + story), clipper/longform.py
 # (recording + storage) and clipper/longform_video.py (render).
 _longform_store = longform.ProjectStore(BASE_DIR / "_longform")
+_longform_lessons = longform_lessons.LessonStore(BASE_DIR / "_longform" / "_lessons.json")
 _longform_series_path = BASE_DIR / "_longform" / "_series.json"
 _longform_busy: set = set()  # (project id, "research" | "write" | "render") running right now
 _longform_lock = threading.Lock()
@@ -3040,7 +3042,7 @@ def _longform_write(pid: str) -> None:
         project = _longform_store.load(pid)
         d = _longform_store.path(pid)
         dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
-        scenes = documentary.write_script(dossier, project["library"], d, _longform_brand())
+        scenes = documentary.write_script(dossier, project["library"], d, _longform_brand(), _longform_lessons.texts())
         _longform_store.update(pid, lambda pr: pr.update(status="script_ready", error=None, message=None, scenes=scenes,
                                                          render=None, publish=None, visuals=None))
     except Exception as e:
@@ -3076,7 +3078,7 @@ def _longform_visuals(pid: str, replan: bool) -> None:
         scenes = project.get("scenes") or []
         if replan:
             say("Claude is picking the key words and their visuals...")
-            scenes = documentary.plan_visuals(dossier, project.get("library") or [], scenes)
+            scenes = documentary.plan_visuals(dossier, project.get("library") or [], scenes, _longform_lessons.texts())
         scenes = documentary.fetch_visuals(scenes, dossier, d, on_progress=say)
         planned = {i: sc.get("cues") or [] for i, sc in enumerate(scenes) if sc.get("kind") == "narrate"}
         texts = {i: sc.get("narration") for i, sc in enumerate(scenes)}
@@ -3184,6 +3186,39 @@ def longform_save_series(req: LongformSeriesRequest) -> dict:
         series["plan"][date] = entry
     _save_series(series)
     return longform_series()
+
+
+@protected.get("/api/longform/lessons")
+def longform_lessons_list() -> dict:
+    """What the series has learned (YouTube's reviews, Dean's notes); every
+    new story and visuals plan is written with these."""
+    return {"lessons": _longform_lessons.load()["lessons"]}
+
+
+class LongformLearnRequest(BaseModel):
+    text: str
+    source: str = ""
+
+
+@protected.post("/api/longform/lessons")
+async def longform_lessons_learn(req: LongformLearnRequest) -> dict:
+    text = req.text.strip()
+    if len(text) < 20:
+        raise HTTPException(400, "paste the feedback first")
+    source = " ".join(req.source.split())[:120] or f"Feedback added {datetime.date.today():%d %b %Y}"
+    try:
+        data = await run_in_threadpool(_longform_lessons.learn, text, source)
+    except Exception as e:
+        raise HTTPException(500, f"Couldn't learn from that: {e}")
+    return {"lessons": data["lessons"]}
+
+
+@protected.delete("/api/longform/lessons/{index}")
+def longform_lessons_remove(index: int) -> dict:
+    try:
+        return {"lessons": _longform_lessons.remove(index)["lessons"]}
+    except IndexError:
+        raise HTTPException(404, "no such lesson")
 
 
 @protected.get("/api/longform/projects")
@@ -7104,6 +7139,10 @@ LONGFORM_HTML = """<!doctype html>
   .scene .row input { width: 90px; }
   .scene .excerpt { font-size: 0.78rem; color: var(--muted); margin-top: 5px; font-style: italic; }
   .cues { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .lessons { margin: 10px 0 0; padding: 0; list-style: none; }
+  .lessons li { display: flex; gap: 8px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+  .lessons li .src { display: block; font-size: 0.74rem; color: var(--muted); margin-top: 2px; }
+  .lessons li button { margin: 0 0 0 auto; padding: 2px 8px; font-size: 0.74rem; background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .cue { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 8px; border-radius: 9px; font-size: 0.76rem;
     background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border: 1px solid var(--border); max-width: 100%; }
   .cue .at { font-weight: 700; }
@@ -7200,6 +7239,20 @@ LONGFORM_HTML = """<!doctype html>
       <textarea id="new-links" rows="2" placeholder="News articles, interviews, a fan wiki page..."></textarea>
       <button id="start-new" type="button">🔎 Research and start</button>
       <div class="hint" id="new-status"></div>
+    </div>
+
+    <div class="section" id="lessons-section">
+      <h3>🧠 What the series has learned</h3>
+      <div class="hint">Claude follows these every time it writes a story, picks the clip moments and plans the visuals. Remove any that don’t fit (✕).</div>
+      <ul class="lessons" id="lessons"></ul>
+      <details>
+        <summary>Teach it something new</summary>
+        <div class="hint">Paste YouTube’s review of an episode (YouTube Studio → the video → Editing feedback), comments you agree with, or your own notes. Claude turns it into lessons and merges them with the ones above.</div>
+        <input id="learn-source" placeholder="Where it's from, e.g. YouTube review of The Story of Jynxzi">
+        <textarea id="learn-text" rows="5" placeholder="Paste the feedback here..."></textarea>
+        <button id="learn-btn" type="button" class="secondary">🧠 Learn from this</button>
+        <div class="hint" id="learn-status"></div>
+      </details>
     </div>
 
     <div class="section" id="voice-section">
@@ -7395,6 +7448,7 @@ async function showList() {
   series = s;
   renderSeries();
   loadVoice();
+  loadLessons();
   $('projects-wrap').style.display = projects.length ? 'block' : 'none';
   const pl = $('projects');
   pl.innerHTML = '';
@@ -7924,6 +7978,42 @@ $('next-scene').addEventListener('click', () => { const idx = narrIndices(); con
 $('play-take').addEventListener('click', () => { const a = $('take-audio'); a.src = `/api/longform/projects/${project.id}/scenes/${recIndex}/take?t=${Date.now()}`; a.play(); });
 $('keep-take').addEventListener('click', async () => {
   try { project = await api(`/api/longform/projects/${project.id}/scenes/${recIndex}/keep`, { method: 'POST' }); lastResult = null; render(); } catch (e) { alert(e.message); }
+});
+
+// ---------- lessons ----------
+function renderLessons(list) {
+  const ul = $('lessons');
+  ul.innerHTML = '';
+  list.forEach((l, i) => {
+    const li = el('li');
+    const body = el('div');
+    body.appendChild(document.createTextNode(l.text));
+    body.appendChild(el('span', 'src', l.source || ''));
+    li.appendChild(body);
+    const x = el('button', '', '✕'); x.type = 'button'; x.title = 'Remove this lesson';
+    x.addEventListener('click', async () => {
+      if (!confirm('Remove this lesson? Claude stops following it from the next story.')) return;
+      try { renderLessons((await api(`/api/longform/lessons/${i}`, { method: 'DELETE' })).lessons); } catch (e) { alert(e.message); }
+    });
+    li.appendChild(x);
+    ul.appendChild(li);
+  });
+  if (!list.length) ul.appendChild(el('li', 'hint', 'No lessons yet.'));
+}
+async function loadLessons() {
+  try { renderLessons((await api('/api/longform/lessons')).lessons); } catch (e) { /* page still works */ }
+}
+$('learn-btn').addEventListener('click', async () => {
+  const text = $('learn-text').value.trim();
+  if (text.length < 20) { alert('Paste the feedback first.'); return; }
+  const b = $('learn-btn'); b.disabled = true; $('learn-status').textContent = '🧠 Claude is reading it (about 20 seconds)…';
+  try {
+    const r = await api('/api/longform/lessons', jsonOpts('POST', { text, source: $('learn-source').value }));
+    renderLessons(r.lessons);
+    $('learn-text').value = ''; $('learn-source').value = '';
+    $('learn-status').textContent = '✅ Learned. The next story you write uses these.';
+  } catch (e) { $('learn-status').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; }
 });
 
 // ---------- your AI voice ----------
