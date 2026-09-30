@@ -116,7 +116,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   `longform_video.MUSIC_LEVELS` (quiet -37 / normal -34 / loud -31 LUFS,
   ducked under voice and clips). Dean found the first flat 0.16 gain "a
   bit too loud"; the page has Quieter/Normal/Louder buttons
-  (`project["music_level"]`).
+  (`project["music_level"]`) and "🎵 Update music only"
+  (`POST .../render?music_only=true`), which reuses every finished scene
+  and refuses with the changed scene numbers (`changed_scenes`) rather
+  than turning into a long render. Dean didn't want a music change to
+  re-render the whole video.
 - **AI voice (Sept 2026):** Dean narrates with his own voice (never his
   face). `clipper/voice_clone.py` clones it with Kyutai Pocket TTS (100M
   params, CPU, ~0.6 GB RAM, CC-BY-4.0 weights) to patch lines he'd rather

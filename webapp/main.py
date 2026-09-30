@@ -3603,7 +3603,11 @@ def longform_visual_sources() -> dict:
     return visual_sources.stock_available()
 
 
-def _longform_render(pid: str) -> None:
+def _longform_takes(scenes: List[dict]) -> List[Optional[float]]:
+    return [float((s.get("take") or {}).get("duration") or 0) if longform.needs_take(s) else None for s in scenes]
+
+
+def _longform_render(pid: str, music_only: bool = False) -> None:
     started = time.time()
 
     def progress(p: float, msg: str) -> None:
@@ -3616,9 +3620,8 @@ def _longform_render(pid: str) -> None:
         music = (project.get("music") or {}).get("file")
         final, starts, total = longform_video.render_documentary(
             d, scenes, _longform_library(project),
-            [float((s.get("take") or {}).get("duration") or 0) if longform.needs_take(s) else None for s in scenes],
-            _longform_brand(), d / music if music else None, on_progress=progress,
-            music_level=project.get("music_level") or "normal",
+            _longform_takes(scenes), _longform_brand(), d / music if music else None, on_progress=progress,
+            music_level=project.get("music_level") or "normal", music_only=music_only,
         )
         _longform_store.update(pid, lambda pr: pr.update(render={
             "status": "done", "progress": 1.0, "message": None, "error": None, "built_at": time.time(),
@@ -3636,7 +3639,10 @@ def _longform_render(pid: str) -> None:
 
 
 @protected.post("/api/longform/projects/{pid}/render")
-def longform_start_render(pid: str) -> dict:
+def longform_start_render(pid: str, music_only: bool = False) -> dict:
+    """Render the episode. music_only: only redo the final mix (after a
+    music or music-volume change) -- about a minute, never the scenes; it
+    refuses if anything else changed, so it can't turn into a long render."""
     project = _longform_project(pid)
     scenes = project.get("scenes") or []
     if project.get("status") != "script_ready" or not scenes:
@@ -3646,9 +3652,18 @@ def longform_start_render(pid: str) -> dict:
         raise HTTPException(409, "record these scenes first: " + ", ".join(map(str, missing)))
     if _longform_is_busy(pid, "visuals"):
         raise HTTPException(409, "the visuals are still being planned -- give it a minute")
+    if music_only:
+        if (project.get("render") or {}).get("status") != "done":
+            raise HTTPException(409, "render the video once first")
+        changed = longform_video.changed_scenes(_longform_store.path(pid), scenes, _longform_library(project),
+                                                _longform_takes(scenes), _longform_brand())
+        if changed:
+            raise HTTPException(409, "Scenes " + ", ".join(map(str, changed)) + " changed since the last render, so this "
+                                     "needs a full “Render again” (only those scenes are redone).")
     _longform_claim(pid, "render")
-    _longform_store.update(pid, lambda pr: pr.update(render={"status": "rendering", "progress": 0.0, "message": "Starting..."}))
-    threading.Thread(target=_longform_render, args=(pid,), daemon=True).start()
+    _longform_store.update(pid, lambda pr: pr.update(render={
+        "status": "rendering", "progress": 0.0, "message": "Updating the music..." if music_only else "Starting..."}))
+    threading.Thread(target=_longform_render, args=(pid, music_only), daemon=True).start()
     return {"ok": True}
 
 
@@ -7227,6 +7242,7 @@ LONGFORM_HTML = """<!doctype html>
         <button type="button" class="secondary" data-level="quiet">Quieter</button>
         <button type="button" class="secondary" data-level="normal">Normal</button>
         <button type="button" class="secondary" data-level="loud">Louder</button>
+        <button type="button" id="music-only" style="display:none">🎵 Update music only (about a minute)</button>
       </div>
       <div class="hint" id="music-level-hint"></div>
       <div class="hint" id="render-hint" style="margin-top:14px"></div>
@@ -7901,10 +7917,12 @@ function renderRender() {
   $('music-current').textContent = p.music ? `🎵 ${p.music.name}` : '';
   $('music-remove').style.display = p.music ? 'inline-block' : 'none';
   $('music-level').style.display = p.music ? 'flex' : 'none';
-  $('music-level').querySelectorAll('button').forEach(b => {
+  $('music-level').querySelectorAll('button[data-level]').forEach(b => {
     b.classList.toggle('on', b.dataset.level === (p.music_level || 'normal'));
     b.disabled = rendering;
   });
+  $('music-only').style.display = r.status === 'done' ? 'inline-block' : 'none';
+  $('music-only').disabled = rendering;
   $('music-upload').disabled = $('music-remove').disabled = rendering;
   const rb = $('render-btn');
   rb.disabled = rendering || left > 0;
@@ -7944,14 +7962,21 @@ $('music-upload').addEventListener('click', async () => {
   try { project = await api(`/api/longform/projects/${project.id}/music?name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'Content-Type': f.type || 'audio/mpeg' }, body: f }); $('music-file').value = ''; render(); }
   catch (e) { alert(e.message); } finally { $('music-upload').disabled = false; }
 });
-$('music-level').querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
+$('music-level').querySelectorAll('button[data-level]').forEach(b => b.addEventListener('click', async () => {
   try {
     project = await api(`/api/longform/projects/${project.id}/music-level`, jsonOpts('PUT', { level: b.dataset.level }));
     render();
     $('music-level-hint').textContent = (project.render || {}).status === 'done'
-      ? 'Render again to hear it. Only the final mix is redone, so it takes a minute or two.' : '';
+      ? 'Press “🎵 Update music only” to hear it. Your scenes are kept; only the music is redone.' : '';
   } catch (e) { alert(e.message); }
 }));
+$('music-only').addEventListener('click', async () => {
+  try {
+    await api(`/api/longform/projects/${project.id}/render?music_only=true`, { method: 'POST' });
+    $('music-level-hint').textContent = '';
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
+});
 $('music-remove').addEventListener('click', async () => { try { project = await api(`/api/longform/projects/${project.id}/music`, { method: 'DELETE' }); render(); } catch (e) { alert(e.message); } });
 $('publish-btn').addEventListener('click', async () => {
   const b = $('publish-btn'); b.disabled = true; b.textContent = 'Writing…';
