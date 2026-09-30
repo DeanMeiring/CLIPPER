@@ -3713,8 +3713,44 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
                                                privacy_status=req.privacy_status, is_short=False)
     except (youtube_upload.UploadError, ValueError) as e:
         raise HTTPException(502, str(e)) from e
-    return _longform_store.update(pid, lambda pr: pr.update(youtube_video_id=video_id, youtube_url=f"https://youtu.be/{video_id}",
-                                                            uploaded_privacy=req.privacy_status))
+    url = f"https://youtu.be/{video_id}"
+    project = _longform_store.update(pid, lambda pr: pr.update(youtube_video_id=video_id, youtube_url=url,
+                                                               uploaded_privacy=req.privacy_status))
+    # Straight away, cut 2 promo Shorts from the episode (unless they're
+    # already being made) and tie them to it, so each Short's upload carries
+    # the link to the full video.
+    try:
+        job_id = project.get("promo_job_id") if project.get("promo_job_id") in jobs else None
+        if not job_id:
+            job_id = _longform_start_promo(project, path)
+        _attach_promo(job_id, url, title)
+        project = _longform_store.update(pid, lambda pr: pr.update(promo_job_id=job_id))
+    except Exception as e:  # the episode is up either way
+        print(f"[longform] promo Shorts for {pid} didn't start: {e}", flush=True)
+    return project
+
+
+PROMO_SHORTS = 2
+
+
+def _longform_start_promo(project: dict, path: Path) -> str:
+    name = (project.get("streamer") or {}).get("display_name") or project.get("login") or "the streamer"
+    job = create_job(JobRequest(source=str(path), num_clips=PROMO_SHORTS,
+                                focus=f"the funniest or most surprising moments of {name} that make someone want the full story"))
+    return job["job_id"]
+
+
+def _attach_promo(job_id: str, url: str, title: str) -> None:
+    """Mark a clip job as promo Shorts for a long-form video: the Home
+    page then adds "Full story: <link>" to each Short's description and,
+    once a Short is posted, points to where YouTube Studio's "Related
+    video" is set (YouTube's API can't set that link itself)."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return
+        job["promo_for"] = {"url": url, "title": title}
+    _persist(job_id)
 
 
 @protected.post("/api/longform/projects/{pid}/promo-shorts")
@@ -3725,10 +3761,10 @@ def longform_promo_shorts(pid: str) -> dict:
     path = _longform_store.path(pid) / "final.mp4"
     if (project.get("render") or {}).get("status") != "done" or not path.is_file():
         raise HTTPException(409, "render the video first")
-    name = (project.get("streamer") or {}).get("display_name") or project.get("login") or "the streamer"
-    job = create_job(JobRequest(source=str(path), num_clips=3,
-                                focus=f"the funniest or most surprising moments of {name} that make someone want the full story"))
-    return _longform_store.update(pid, lambda pr: pr.update(promo_job_id=job["job_id"]))
+    job_id = _longform_start_promo(project, path)
+    if project.get("youtube_url"):
+        _attach_promo(job_id, project["youtube_url"], project.get("title") or "")
+    return _longform_store.update(pid, lambda pr: pr.update(promo_job_id=job_id))
 
 
 app.include_router(protected)
@@ -5122,6 +5158,9 @@ const youtubeUploadTrimHint = document.getElementById('youtube-upload-trim-hint'
 const youtubeUploadSetStartBtn = document.getElementById('youtube-upload-set-start-btn');
 const youtubeUploadSetEndBtn = document.getElementById('youtube-upload-set-end-btn');
 let youtubeUploadJobId = null;
+// Jobs cut from a long-form episode as its promo Shorts: {url, title} of
+// the episode, so each Short's description links to it.
+const jobPromoFor = {};
 let youtubeUploadFilename = null;
 // Seeded from the clip's recorded duration so the hint has a number to
 // show immediately, then overwritten by the video element's own
@@ -5188,6 +5227,10 @@ function openYoutubeUploadModal(jobId, clip) {
   youtubeUploadIsShort = !clip.is_recap;
   youtubeUploadTitleInput.value = clip.upload_title || clip.title || '';
   youtubeUploadDescriptionInput.value = clip.description || '';
+  const promo = jobPromoFor[jobId];
+  if (promo && promo.url && !youtubeUploadDescriptionInput.value.includes(promo.url)) {
+    youtubeUploadDescriptionInput.value = (youtubeUploadDescriptionInput.value.trim() + '\\n\\nFull story: ' + promo.url).trim();
+  }
   refreshYoutubeUploadTitleCounter();
   youtubeUploadPreview.src = `/api/jobs/${jobId}/clips/${clip.file}`;
   youtubeUploadPreview.onloadedmetadata = () => {
@@ -5483,6 +5526,27 @@ async function poll(jobId) {
       posted.textContent = '✅ Posted to YouTube';
       posted.style.display = 'block';
       div.appendChild(posted);
+    }
+    jobPromoFor[jobId] = job.promo_for || null;
+    if (job.promo_for && job.promo_for.url) {
+      const note = document.createElement('div');
+      note.className = 'hint';
+      note.style.marginTop = '6px';
+      if (c.youtube_video_id) {
+        // YouTube's API can't set a Short's "Related video"; this opens the
+        // Short in Studio, where it's one dropdown.
+        note.appendChild(document.createTextNode('🔗 Last step: '));
+        const studio = document.createElement('a');
+        studio.href = `https://studio.youtube.com/video/${encodeURIComponent(c.youtube_video_id)}/edit`;
+        studio.target = '_blank';
+        studio.rel = 'noopener';
+        studio.textContent = 'open it in YouTube Studio';
+        note.appendChild(studio);
+        note.appendChild(document.createTextNode(` and set “Related video” to “${job.promo_for.title || 'the full episode'}”, so viewers can tap through to it.`));
+      } else {
+        note.textContent = `🎬 Promo Short for “${job.promo_for.title || 'your episode'}”. Its description will link to the full video.`;
+      }
+      div.appendChild(note);
     }
 
     // Watchable right here -- downloading is now an extra, optional step
@@ -7256,9 +7320,10 @@ LONGFORM_HTML = """<!doctype html>
             <option value="unlisted">Unlisted</option>
             <option value="public">Public now</option>
           </select>
+          <div class="hint">Uploading also cuts 2 promo Shorts from the episode (on the Home page), with the link to it in their descriptions.</div>
           <div class="actions">
             <button id="upload-btn" type="button">⬆ Upload to Caught On Stream</button>
-            <button id="promo-btn" type="button" class="secondary">✂️ Make 3 promo Shorts</button>
+            <button id="promo-btn" type="button" class="secondary">✂️ Make 2 promo Shorts</button>
           </div>
           <div class="hint" id="post-status"></div>
         </div>
@@ -7931,7 +7996,12 @@ function renderRender() {
   }
   const ps = $('post-status'); ps.innerHTML = '';
   if (p.youtube_url) { ps.appendChild(document.createTextNode(`✅ Uploaded (${p.uploaded_privacy}): `)); const a = el('a', '', p.youtube_url); a.href = p.youtube_url; a.target = '_blank'; ps.appendChild(a); }
-  if (p.promo_job_id) { if (ps.childNodes.length) ps.appendChild(el('br')); ps.appendChild(document.createTextNode('✂️ Promo Shorts are being made. Find them in the jobs list on the Home page.')); }
+  if (p.promo_job_id) {
+    if (ps.childNodes.length) ps.appendChild(el('br'));
+    ps.appendChild(document.createTextNode(p.youtube_url
+      ? '✂️ 2 promo Shorts are being made from it: find them on the Home page. Their descriptions already link to this video; after posting one, a link takes you straight to where YouTube Studio lets you set it as the Short’s “Related video”.'
+      : '✂️ 2 promo Shorts are being made: find them on the Home page. Once you upload this video, they’ll carry the link to it.'));
+  }
 }
 $('desc-text').addEventListener('input', () => { $('desc-text').dataset.edited = '1'; });
 $('render-btn').addEventListener('click', async () => {

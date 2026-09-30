@@ -78,8 +78,12 @@ merge it yourself; merging stays Dean's call per the rule above.
   volume with subtitles), `title` (chapter card → YouTube chapter) →
   editable story → record narrated scenes only (same misread check) →
   render → title/description with chapters + credits → upload to Caught On
-  Stream as a regular (not Short) video, private by default → optional
-  promo Shorts via a normal clip job on `final.mp4`.
+  Stream as a regular (not Short) video, private by default → 2 promo
+  Shorts start automatically on upload (a normal clip job on `final.mp4`,
+  `num_clips=2`) with `job["promo_for"] = {url, title}`: the Home upload
+  window adds "Full story: <url>" to their descriptions, and a posted one
+  links to its YouTube Studio edit page to set "Related video". YouTube's
+  API can't set a Short's Related video, so that one click stays manual.
 - Script rules that matter: facts only from the research, quotes only from
   clip transcripts, no accusations/private-life speculation, no hype words.
   Commentary over clips is what keeps it on the right side of fair use and
