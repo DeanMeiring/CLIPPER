@@ -30,6 +30,7 @@ from clipper.captions import build_ass, clean_hook_text, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper import hook_line
 from clipper import longform
+from clipper import longform_video
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -2962,6 +2963,12 @@ def _longform_project(pid: str) -> dict:
             # finished it is gone.
             project = _longform_store.update(pid, lambda pr: pr.update(
                 status="error", error="Interrupted by a restart -- click Rewrite script."))
+    if project.get("visuals_status") == "planning" and not _longform_is_busy(pid, "visuals"):
+        project = _longform_store.update(pid, lambda pr: pr.update(
+            visuals_status="error", visuals_error="Interrupted by a restart -- click Plan visuals again.", visuals_message=None))
+    if (project.get("render") or {}).get("status") == "rendering" and not _longform_is_busy(pid, "render"):
+        project = _longform_store.update(pid, lambda pr: pr.update(
+            render={"status": "error", "error": "Interrupted by a restart -- click Render again.", "progress": 0}))
     return project
 
 
@@ -2979,6 +2986,7 @@ def _longform_write_script(pid: str, report_pdf: Optional[bytes] = None) -> None
                 _longform_store.update(pid, lambda pr: pr.update(message="Downloading the NTSB report..."))
                 report_pdf = longform.download_report(url)
             _longform_store.update(pid, lambda pr: pr.update(message="Reading the report..."))
+            (d / "report.pdf").write_bytes(report_pdf)
             text = longform.pdf_text(report_pdf)
             if len(text) < 2000:
                 raise RuntimeError("Couldn't read enough text from that report (it may be a scanned PDF).")
@@ -2989,7 +2997,8 @@ def _longform_write_script(pid: str, report_pdf: Optional[bytes] = None) -> None
         scenes = longform.write_script(text, title)
 
         def done(pr: dict) -> None:
-            pr.update(status="script_ready", error=None, message=None, scenes=scenes, narration=None)
+            pr.update(status="script_ready", error=None, message=None, scenes=scenes, narration=None,
+                      visuals_status=None, visuals_error=None, render=None, publish=None)
         _longform_store.update(pid, done)
     except Exception as e:
         print(f"[longform] script for {pid} failed: {e}", flush=True)
@@ -3108,9 +3117,12 @@ def longform_save_scenes(pid: str, req: LongformScenesRequest) -> dict:
         raise HTTPException(400, "the script can't be empty")
 
     def apply(pr: dict) -> None:
-        old_takes = {s["narration"]: s.get("take") for s in pr.get("scenes") or []}
+        old = {s["narration"]: s for s in pr.get("scenes") or []}
         for sc in new:
-            sc["take"] = old_takes.get(sc["narration"])
+            prev = old.get(sc["narration"]) or {}
+            sc["take"] = prev.get("take")
+            if prev.get("spec"):
+                sc["spec"], sc["planned"] = prev["spec"], prev.get("planned")
         pr["scenes"] = new
         pr["narration"] = None
         pr["status"] = "script_ready"
@@ -3243,6 +3255,309 @@ def longform_narration_audio(pid: str) -> FileResponse:
     title = (project.get("incident") or {}).get("title") or "narration"
     safe = "".join(ch if ch.isalnum() or ch in " -_" else "" for ch in title).strip()[:60] or "narration"
     return FileResponse(path, media_type="audio/mp4", filename=f"{safe} - narration.m4a")
+
+
+# ---- Long-form visuals and render --------------------------------------------
+# Claude plans each scene's visual from the report (plan), the creator
+# adjusts any of them (the /visuals/{index} edits), then the whole video is
+# rendered in the background, timed to the joined narration. See
+# clipper/longform_video.py.
+_longform_busy: set = set()  # (project id, "visuals" | "render") running right now
+_longform_cache_dir = BASE_DIR / "_longform_cache"  # map tiles + stock downloads, shared across videos
+
+
+def _longform_claim(pid: str, kind: str) -> None:
+    with _longform_writing_lock:
+        if (pid, kind) in _longform_busy:
+            raise HTTPException(409, "already running -- wait for it to finish")
+        _longform_busy.add((pid, kind))
+
+
+def _longform_release(pid: str, kind: str) -> None:
+    with _longform_writing_lock:
+        _longform_busy.discard((pid, kind))
+
+
+def _longform_is_busy(pid: str, kind: str) -> bool:
+    with _longform_writing_lock:
+        return (pid, kind) in _longform_busy
+
+
+def _longform_report_images(pid: str, project: dict) -> list:
+    """Pull the photos/diagrams out of the report PDF once (downloading the
+    PDF again for videos started before it was kept)."""
+    if project.get("report_images") is not None:
+        return project["report_images"]
+    d = _longform_store.path(pid)
+    pdf_path = d / "report.pdf"
+    if not pdf_path.exists():
+        url = (project.get("incident") or {}).get("report_url")
+        if not url:
+            return []
+        pdf_path.write_bytes(longform.download_report(url))
+    images = longform_video.extract_report_images(pdf_path.read_bytes(), d / "report_images")
+    _longform_store.update(pid, lambda pr: pr.update(report_images=images))
+    return images
+
+
+def _longform_plan_visuals(pid: str) -> None:
+    try:
+        project = _longform_store.load(pid)
+        d = _longform_store.path(pid)
+        _longform_store.update(pid, lambda pr: pr.update(visuals_message="Pulling photos and diagrams out of the report..."))
+        try:
+            images = _longform_report_images(pid, project)
+        except Exception as e:
+            print(f"[longform] report images for {pid} failed: {e}", flush=True)
+            images = []
+        _longform_store.update(pid, lambda pr: pr.update(visuals_message="Claude is planning the visuals (about a minute)..."))
+        text = (d / "report.txt").read_text(encoding="utf-8")
+        title = (project.get("incident") or {}).get("title") or "an aviation incident"
+        specs = longform_video.plan_visuals(text, title, project["scenes"])
+        # Hand out the report's images in order, so report scenes don't all
+        # show the same one.
+        next_img = 0
+        for spec in specs:
+            if spec["visual"] in ("report", "stock") and images:
+                spec["image_index"] = next_img % len(images)
+                next_img += 1
+            spec["rev"] = 1
+
+        def done(pr: dict) -> None:
+            for sc, spec in zip(pr.get("scenes") or [], specs):
+                sc["spec"] = spec
+                sc["planned"] = dict(spec)
+            pr.update(visuals_status="ready", visuals_error=None, visuals_message=None, render=None)
+        _longform_store.update(pid, done)
+    except Exception as e:
+        print(f"[longform] visuals for {pid} failed: {e}", flush=True)
+        err = str(e)
+        try:
+            _longform_store.update(pid, lambda pr: pr.update(visuals_status="error", visuals_error=err, visuals_message=None))
+        except Exception:
+            pass
+    finally:
+        _longform_release(pid, "visuals")
+
+
+@protected.get("/api/longform/settings")
+def longform_settings() -> dict:
+    return {"stock_enabled": bool(os.environ.get("PEXELS_API_KEY")), "brand": longform_video.BRAND}
+
+
+@protected.post("/api/longform/projects/{pid}/visuals/plan")
+def longform_plan(pid: str) -> dict:
+    project = _longform_project(pid)
+    if not project.get("scenes") or project.get("status") != "script_ready":
+        raise HTTPException(409, "write the script first")
+    _longform_claim(pid, "visuals")
+    _longform_store.update(pid, lambda pr: pr.update(visuals_status="planning", visuals_error=None, visuals_message="Starting..."))
+    threading.Thread(target=_longform_plan_visuals, args=(pid,), daemon=True).start()
+    return {"ok": True}
+
+
+class LongformVisualEdit(BaseModel):
+    visual: Optional[str] = None
+    caption: Optional[str] = None
+    lines: Optional[str] = None  # cockpit lines, one "SPEAKER: text" per line
+    stock_query: Optional[str] = None
+    image_step: int = 0
+    stock_step: int = 0
+
+
+def _scene_durations(project: dict) -> list:
+    scenes = project.get("scenes") or []
+    narr = project.get("narration") or {}
+    starts = narr.get("scene_starts")
+    if starts and len(starts) == len(scenes):
+        bounds = list(starts) + [float(narr.get("duration") or starts[-1] + 20) + 0.8]
+        return [max(1.0, bounds[i + 1] - bounds[i]) for i in range(len(scenes))]
+    return [max(4.0, len(s["narration"].split()) / 2.5) for s in scenes]
+
+
+@protected.put("/api/longform/projects/{pid}/visuals/{index}")
+def longform_edit_visual(pid: str, index: int, req: LongformVisualEdit) -> dict:
+    """Adjust one scene's visual: its type, caption, cockpit lines, which
+    report image, or which stock clip."""
+    project = _longform_project(pid)
+    n_images = len(project.get("report_images") or [])
+
+    def apply(pr: dict) -> None:
+        scenes = pr.get("scenes") or []
+        if not 0 <= index < len(scenes) or not scenes[index].get("spec"):
+            raise HTTPException(404, "plan the visuals first")
+        sc = scenes[index]
+        spec = dict(sc["spec"])
+        planned = sc.get("planned") or {}
+        if req.visual and req.visual != spec.get("visual"):
+            v = req.visual
+            if v == planned.get("visual"):
+                spec = dict(planned)
+            elif v == "report":
+                spec = {"visual": "report", "caption": spec.get("caption", ""), "report_hint": "", "image_index": index % max(1, n_images)}
+            elif v == "stock":
+                spec = {"visual": "stock", "caption": spec.get("caption", ""), "stock_query": sc.get("visual_note") or "airliner flying", "stock_index": 0,
+                        "image_index": index % max(1, n_images)}
+            elif v == "cockpit":
+                spec = {"visual": "cockpit", "caption": spec.get("caption", ""), "time": "", "lines": []}
+            else:
+                raise HTTPException(400, "that visual needs data from the report -- use Re-plan visuals")
+        if req.caption is not None:
+            spec["caption"] = " ".join(req.caption.split())[:60]
+        if req.lines is not None and spec.get("visual") == "cockpit":
+            lines = []
+            for raw in req.lines.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                speaker, _, text = raw.partition(":")
+                if not text:
+                    speaker, text = "", raw
+                lines.append({"speaker": speaker.strip().upper()[:24], "text": text.strip().strip('"“”')[:220]})
+            spec["lines"] = lines[:5]
+        if req.stock_query is not None and spec.get("visual") == "stock":
+            spec["stock_query"] = " ".join(req.stock_query.split())[:60] or spec.get("stock_query")
+            spec["stock_index"] = 0
+        if req.image_step and n_images:
+            spec["image_index"] = ((spec.get("image_index") or 0) + req.image_step) % n_images
+        if req.stock_step and spec.get("visual") == "stock":
+            spec["stock_index"] = max(0, int(spec.get("stock_index") or 0) + req.stock_step)
+        if spec.get("visual") == "cockpit" and not spec.get("lines"):
+            spec.setdefault("lines", [])
+        spec["rev"] = int(sc["spec"].get("rev") or 0) + 1
+        sc["spec"] = spec
+    return _longform_store.update(pid, apply)
+
+
+@protected.get("/api/longform/projects/{pid}/visuals/{index}/preview")
+async def longform_preview(pid: str, index: int) -> FileResponse:
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    if not 0 <= index < len(scenes) or not scenes[index].get("spec"):
+        raise HTTPException(404, "plan the visuals first")
+    spec = dict(scenes[index]["spec"])
+    if spec.get("visual") == "cockpit" and not spec.get("lines"):
+        spec["lines"] = [{"speaker": "", "text": "(add the cockpit lines for this scene)"}]
+    dur = _scene_durations(project)[index]
+    d = _longform_store.path(pid)
+    out = d / "render" / "previews" / f"scene{index:02d}_{longform_video.spec_hash(spec, dur)}.jpg"
+    if not out.exists():
+        ctx = longform_video.SceneContext(d, (project.get("incident") or {}).get("title") or "", project.get("report_images") or [],
+                                          _longform_cache_dir)
+        try:
+            await run_in_threadpool(longform_video.preview_still, spec, dur, ctx, index, out)
+        except Exception as e:
+            print(f"[longform] preview {pid}/{index} failed: {e}", flush=True)
+            raise HTTPException(500, f"Couldn't draw this visual: {e}")
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+
+_MUSIC_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mp4": ".m4a",
+               "audio/x-m4a": ".m4a", "audio/aac": ".aac", "audio/ogg": ".ogg", "audio/flac": ".flac"}
+
+
+@protected.post("/api/longform/projects/{pid}/music")
+async def longform_upload_music(pid: str, request: Request, name: str = "") -> dict:
+    """Optional background music (e.g. from the YouTube Audio Library), mixed
+    quietly under the narration and ducked while you talk."""
+    _longform_project(pid)
+    data = await request.body()
+    if len(data) < 1000:
+        raise HTTPException(400, "that file is empty")
+    if len(data) > 60 * 1024 * 1024:
+        raise HTTPException(413, "that music file is too large")
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    ext = _MUSIC_EXTS.get(ctype) or (Path(name).suffix.lower() if Path(name).suffix.lower() in _MUSIC_EXTS.values() else ".mp3")
+    d = _longform_store.path(pid)
+    for old in d.glob("music.*"):
+        old.unlink(missing_ok=True)
+    (d / f"music{ext}").write_bytes(data)
+    label = " ".join(Path(name).name.split())[:80] or f"music{ext}"
+    return _longform_store.update(pid, lambda pr: pr.update(music={"file": f"music{ext}", "name": label}))
+
+
+@protected.delete("/api/longform/projects/{pid}/music")
+def longform_remove_music(pid: str) -> dict:
+    _longform_project(pid)
+    for old in _longform_store.path(pid).glob("music.*"):
+        old.unlink(missing_ok=True)
+    return _longform_store.update(pid, lambda pr: pr.update(music=None))
+
+
+def _longform_render(pid: str) -> None:
+    started = time.time()
+
+    def progress(p: float, msg: str) -> None:
+        _longform_store.update(pid, lambda pr: pr.update(render={**(pr.get("render") or {}), "status": "rendering",
+                                                                 "progress": round(p, 3), "message": msg}))
+    try:
+        project = _longform_store.load(pid)
+        d = _longform_store.path(pid)
+        narr = project["narration"]
+        music = (project.get("music") or {}).get("file")
+        final, credits = longform_video.render_video(
+            d, project["scenes"], narr["scene_starts"], d / "narration.wav", float(narr["duration"]),
+            (project.get("incident") or {}).get("title") or "", project.get("report_images") or [],
+            d / music if music else None, _longform_cache_dir, on_progress=progress,
+        )
+        length = longform.audio_duration(final)
+        _longform_store.update(pid, lambda pr: pr.update(render={
+            "status": "done", "progress": 1.0, "message": None, "error": None, "built_at": time.time(),
+            "duration": round(length, 2), "credits": credits, "took_seconds": round(time.time() - started),
+        }))
+    except Exception as e:
+        print(f"[longform] render for {pid} failed: {e}", flush=True)
+        err = str(e)
+        try:
+            _longform_store.update(pid, lambda pr: pr.update(render={"status": "error", "error": err, "progress": 0}))
+        except Exception:
+            pass
+    finally:
+        _longform_release(pid, "render")
+
+
+@protected.post("/api/longform/projects/{pid}/render")
+def longform_start_render(pid: str) -> dict:
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    if not project.get("narration"):
+        raise HTTPException(409, "join the narration first")
+    if not scenes or not all(sc.get("spec") for sc in scenes):
+        raise HTTPException(409, "plan the visuals first")
+    _longform_claim(pid, "render")
+    _longform_store.update(pid, lambda pr: pr.update(render={"status": "rendering", "progress": 0.0, "message": "Starting..."}))
+    threading.Thread(target=_longform_render, args=(pid,), daemon=True).start()
+    return {"ok": True}
+
+
+@protected.get("/api/longform/projects/{pid}/video")
+def longform_video_file(pid: str) -> FileResponse:
+    project = _longform_project(pid)
+    path = _longform_store.path(pid) / "final.mp4"
+    if (project.get("render") or {}).get("status") != "done" or not path.is_file():
+        raise HTTPException(404, "render the video first")
+    title = (project.get("incident") or {}).get("title") or "video"
+    safe = "".join(ch if ch.isalnum() or ch in " -_" else "" for ch in title).strip()[:60] or "video"
+    return FileResponse(path, media_type="video/mp4", filename=f"{safe}.mp4")
+
+
+@protected.post("/api/longform/projects/{pid}/publish-text")
+async def longform_publish_text(pid: str) -> dict:
+    """Three title options and a description with chapters and credits."""
+    project = _longform_project(pid)
+    narr = project.get("narration") or {}
+    scenes = project.get("scenes") or []
+    if not narr.get("scene_starts"):
+        raise HTTPException(409, "join the narration first")
+    incident = project.get("incident") or {}
+    ref = incident.get("subtitle", "").split("·")[-1].strip() if incident.get("report_url") else ""
+    credits = (project.get("render") or {}).get("credits") or []
+    try:
+        text = await run_in_threadpool(longform_video.write_publish_text, incident.get("title") or "", scenes,
+                                       narr["scene_starts"], credits, ref)
+    except Exception as e:
+        raise HTTPException(500, f"Couldn't write the title and description: {e}")
+    return _longform_store.update(pid, lambda pr: pr.update(publish=text))
 
 
 app.include_router(protected)
@@ -6542,6 +6857,25 @@ LONGFORM_HTML = """<!doctype html>
   .take-result.bad { background: color-mix(in srgb, #f59e0b 16%, var(--bg)); color: #92400e; }
   .take-result.wait { background: var(--bg); color: var(--muted); }
   .take-result .heard { display: block; font-weight: 400; font-size: 0.8rem; margin-top: 6px; color: var(--muted); }
+  .vgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-top: 14px; }
+  .vcard { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg); }
+  .vcard img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #0b0c10; }
+  .vcard .vbody { padding: 10px 12px 12px; }
+  .vcard .vhead { display: flex; gap: 8px; align-items: center; }
+  .vcard .vhead b { font-size: 0.86rem; white-space: nowrap; }
+  .vcard select, .vcard input, .vcard textarea { margin-top: 6px; padding: 7px 9px; font-size: 0.84rem; }
+  .vcard .vhead select { margin-top: 0; width: auto; flex: 1; }
+  .vcard .vtext { font-size: 0.78rem; color: var(--muted); margin-top: 6px; line-height: 1.35; }
+  .vcard .vbtns { display: flex; gap: 6px; }
+  .vcard .vbtns button { margin-top: 8px; padding: 6px 10px; font-size: 0.78rem; flex: 1; }
+  .music-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .music-row input { flex: 1; min-width: 200px; }
+  .music-row button { margin-top: 6px; }
+  .bar { height: 10px; border-radius: 99px; background: var(--track); margin-top: 14px; overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.4s; }
+  .title-opt { display: flex; gap: 8px; align-items: center; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); font-size: 0.9rem; }
+  .title-opt span { flex: 1; }
+  .title-opt button { margin-top: 0; padding: 6px 10px; font-size: 0.78rem; }
   a.dl-link { display: inline-flex; margin-top: 10px; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
     color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
   @media (max-width: 560px) {
@@ -6629,7 +6963,49 @@ LONGFORM_HTML = """<!doctype html>
       <div id="narration-out" style="display:none">
         <audio id="narration-audio" controls style="width:100%;margin-top:12px"></audio>
         <a id="narration-dl" class="dl-link" href="#">⬇ Download narration</a>
-        <div class="hint">Next up: the app builds the video around this (maps, cockpit cards, charts, footage). That part is coming in the next update.</div>
+      </div>
+    </div>
+
+    <div class="section" id="visuals-section" style="display:none">
+      <h3><span class="n">4</span>Visuals</h3>
+      <div class="hint">Claude picks a visual for every scene from the report: route maps, the real cockpit transcript, charts of the flight data, and the report's own photos and diagrams. Change any of them below.</div>
+      <div id="stock-note" class="hint" style="display:none">🎞 Stock footage is off until a free Pexels API key is added in Railway as <b>PEXELS_API_KEY</b>. Until then, stock scenes use photos from the report.</div>
+      <div id="visuals-status" class="status-box" style="display:none"></div>
+      <button id="plan-visuals" type="button">🎨 Plan visuals</button>
+      <div id="visual-grid" class="vgrid"></div>
+    </div>
+
+    <div class="section" id="render-section" style="display:none">
+      <h3><span class="n">5</span>Render</h3>
+      <label style="margin-top:4px">Background music (optional)</label>
+      <div class="hint">Download a track from the YouTube Audio Library (free to use on monetised videos) and upload it here. It plays quietly and dips while you talk.</div>
+      <div id="music-current" class="hint" style="display:none"></div>
+      <div class="music-row">
+        <input id="music-file" type="file" accept="audio/*">
+        <button id="music-upload" type="button" class="secondary">Upload music</button>
+        <button id="music-remove" type="button" class="secondary" style="display:none">Remove</button>
+      </div>
+      <div class="hint" id="render-hint" style="margin-top:14px"></div>
+      <button id="render-btn" type="button">🎬 Render video (1080p)</button>
+      <div id="render-progress" style="display:none">
+        <div class="bar"><div id="render-bar"></div></div>
+        <div class="hint" id="render-msg"></div>
+      </div>
+      <div id="render-error" class="status-box err" style="display:none"></div>
+      <div id="render-out" style="display:none">
+        <video id="final-video" controls preload="metadata" style="width:100%;border-radius:12px;margin-top:12px;background:#000"></video>
+        <div class="actions">
+          <a id="video-dl" class="dl-link" href="#">⬇ Download video</a>
+          <button id="publish-btn" type="button" class="secondary">✍️ Write title &amp; description</button>
+        </div>
+        <div class="hint" id="render-info"></div>
+        <div id="publish-out" style="display:none">
+          <label>Title options</label>
+          <div id="title-list"></div>
+          <label>Description (with chapters and credits)</label>
+          <textarea id="desc-text" rows="12"></textarea>
+          <button id="copy-desc" type="button" class="secondary">📋 Copy description</button>
+        </div>
       </div>
     </div>
 
@@ -6749,6 +7125,7 @@ async function openProject(id) {
   $('project-view').style.display = 'block';
   scriptDirty = false;
   lastResult = null;
+  visualsKey = '';
   await loadProject(id, true);
   // Open the script for reading/editing until recording starts; after
   // that the recorder is what matters, so keep the long script folded.
@@ -6766,6 +7143,9 @@ async function loadProject(id, resetIndex) {
   render();
   stopPolling();
   if (project.status === 'writing') pollTimer = setInterval(() => loadProject(project.id, true), 3000);
+  else if (project.visuals_status === 'planning' || (project.render || {}).status === 'rendering') {
+    pollTimer = setInterval(() => loadProject(project.id, false), 3000);
+  }
 }
 
 function render() {
@@ -6779,7 +7159,8 @@ function render() {
     ['1 Script', hasScript ? 'done' : 'on'],
     ['2 Record', !hasScript ? '' : ready === scenes.length ? 'done' : 'on'],
     ['3 Narration', p.narration ? 'done' : (hasScript && ready === scenes.length ? 'on' : '')],
-    ['4 Visuals & render (next update)', ''],
+    ['4 Visuals', scenes.length && scenes.every(s => s.spec) ? 'done' : (p.narration ? 'on' : '')],
+    ['5 Render', (p.render || {}).status === 'done' ? 'done' : (p.narration && scenes.every(s => s.spec) ? 'on' : '')],
   ];
   $('steps').innerHTML = '';
   steps.forEach(([t, cls]) => { const s = document.createElement('span'); s.textContent = t + (cls === 'done' ? ' ✓' : ''); if (cls) s.className = cls; $('steps').appendChild(s); });
@@ -6797,7 +7178,9 @@ function render() {
   $('record-section').style.display = hasScript ? 'block' : 'none';
   $('narration-section').style.display = hasScript ? 'block' : 'none';
   if (!scriptDirty) renderScript();
-  if (hasScript) { renderRecorder(); renderNarration(); }
+  $('visuals-section').style.display = hasScript ? 'block' : 'none';
+  $('render-section').style.display = hasScript ? 'block' : 'none';
+  if (hasScript) { renderRecorder(); renderNarration(); renderVisuals(); renderRender(); }
 }
 
 function renderScript() {
@@ -7026,6 +7409,191 @@ $('delete-project').addEventListener('click', async () => {
   try { await api(`/api/longform/projects/${project.id}`, { method: 'DELETE' }); showList(); } catch (e) { alert(e.message); }
 });
 $('to-list').addEventListener('click', () => { if (recorder) stopRecording(); showList(); });
+
+// ---------- visuals ----------
+let settings = { stock_enabled: false };
+api('/api/longform/settings').then(s => { settings = s; if (project) render(); }).catch(() => {});
+const VIS_LABELS = { map: '🗺 Map', cockpit: '💬 Cockpit card', chart: '📈 Chart', stock: '🎞 Stock footage', report: '📄 Report image' };
+let visualsKey = '';
+
+async function editVisual(i, body) {
+  try {
+    project = await api(`/api/longform/projects/${project.id}/visuals/${i}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    render();
+  } catch (e) { alert(e.message); }
+}
+
+function renderVisuals() {
+  const p = project;
+  const scenes = p.scenes || [];
+  const planned = scenes.length && scenes.every(s => s.spec);
+  const planning = p.visuals_status === 'planning';
+  const rendering = (p.render || {}).status === 'rendering';
+  $('stock-note').style.display = settings.stock_enabled ? 'none' : 'block';
+  const st = $('visuals-status');
+  if (planning) { st.style.display = 'block'; st.className = 'status-box'; st.textContent = '⏳ ' + (p.visuals_message || 'Planning…'); }
+  else if (p.visuals_status === 'error') { st.style.display = 'block'; st.className = 'status-box err'; st.textContent = '⚠️ ' + (p.visuals_error || 'Planning failed.'); }
+  else st.style.display = 'none';
+  const pb = $('plan-visuals');
+  pb.disabled = planning || rendering;
+  pb.textContent = planned ? '🔄 Re-plan all visuals' : '🎨 Plan visuals';
+  pb.className = planned ? 'secondary' : '';
+
+  const narrKey = p.narration ? Math.round(p.narration.built_at || 0) : 0;
+  const key = JSON.stringify([planned, narrKey, rendering, settings.stock_enabled, (p.report_images || []).length, scenes.map(s => s.spec && s.spec.rev)]);
+  if (key === visualsKey) return;
+  visualsKey = key;
+  const grid = $('visual-grid');
+  grid.innerHTML = '';
+  if (!planned) return;
+  scenes.forEach((s, i) => {
+    const spec = s.spec;
+    const card = document.createElement('div'); card.className = 'vcard';
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = `Scene ${i + 1} visual`;
+    img.src = `/api/longform/projects/${p.id}/visuals/${i}/preview?rev=${spec.rev || 0}&n=${narrKey}`;
+    card.appendChild(img);
+    const body = document.createElement('div'); body.className = 'vbody';
+    const head = document.createElement('div'); head.className = 'vhead';
+    const b = document.createElement('b'); b.textContent = `Scene ${i + 1}`;
+    const sel = document.createElement('select');
+    const types = ['report', 'stock', 'cockpit'];
+    const pv = (s.planned || {}).visual;
+    if (pv && !types.includes(pv)) types.unshift(pv);
+    if (!types.includes(spec.visual)) types.unshift(spec.visual);
+    types.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = VIS_LABELS[t] || t; if (t === spec.visual) o.selected = true; sel.appendChild(o); });
+    sel.disabled = rendering;
+    sel.addEventListener('change', () => editVisual(i, { visual: sel.value }));
+    head.appendChild(b); head.appendChild(sel);
+    body.appendChild(head);
+    const cap = document.createElement('input');
+    cap.placeholder = 'Caption (optional)'; cap.value = spec.caption || ''; cap.disabled = rendering;
+    cap.addEventListener('change', () => editVisual(i, { caption: cap.value }));
+    body.appendChild(cap);
+    const btns = document.createElement('div'); btns.className = 'vbtns';
+    const usesImage = spec.visual === 'report' || (spec.visual === 'stock' && !settings.stock_enabled);
+    if (usesImage && (p.report_images || []).length > 1) {
+      const prev = document.createElement('button'); prev.type = 'button'; prev.className = 'secondary'; prev.textContent = '◀ Image';
+      const next = document.createElement('button'); next.type = 'button'; next.className = 'secondary'; next.textContent = 'Image ▶';
+      prev.disabled = next.disabled = rendering;
+      prev.addEventListener('click', () => editVisual(i, { image_step: -1 }));
+      next.addEventListener('click', () => editVisual(i, { image_step: 1 }));
+      btns.appendChild(prev); btns.appendChild(next);
+    }
+    if (spec.visual === 'stock' && settings.stock_enabled) {
+      const q = document.createElement('input'); q.value = spec.stock_query || ''; q.placeholder = 'Stock search words'; q.disabled = rendering;
+      q.addEventListener('change', () => editVisual(i, { stock_query: q.value }));
+      body.appendChild(q);
+      const nx = document.createElement('button'); nx.type = 'button'; nx.className = 'secondary'; nx.textContent = 'Next clip ▶'; nx.disabled = rendering;
+      nx.addEventListener('click', () => editVisual(i, { stock_step: 1 }));
+      btns.appendChild(nx);
+    }
+    if (spec.visual === 'cockpit') {
+      const ta = document.createElement('textarea'); ta.rows = 3; ta.disabled = rendering;
+      ta.placeholder = 'One line each, like  CAPTAIN: my aircraft.';
+      ta.value = (spec.lines || []).map(l => (l.speaker ? l.speaker + ': ' : '') + l.text).join(String.fromCharCode(10));
+      ta.addEventListener('change', () => editVisual(i, { lines: ta.value }));
+      body.appendChild(ta);
+    }
+    if (btns.children.length) body.appendChild(btns);
+    const tx = document.createElement('div'); tx.className = 'vtext';
+    tx.textContent = s.narration.length > 110 ? s.narration.slice(0, 110) + '…' : s.narration;
+    body.appendChild(tx);
+    card.appendChild(body);
+    grid.appendChild(card);
+  });
+}
+
+$('plan-visuals').addEventListener('click', async () => {
+  const planned = (project.scenes || []).every(s => s.spec);
+  if (planned && !confirm('Re-plan every scene? Your visual changes will be replaced.')) return;
+  try {
+    await api(`/api/longform/projects/${project.id}/visuals/plan`, { method: 'POST' });
+    visualsKey = '';
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
+});
+
+// ---------- render ----------
+function renderRender() {
+  const p = project;
+  const scenes = p.scenes || [];
+  const planned = scenes.length && scenes.every(s => s.spec);
+  const r = p.render || {};
+  const rendering = r.status === 'rendering';
+  const music = p.music;
+  $('music-current').style.display = music ? 'block' : 'none';
+  $('music-current').textContent = music ? `🎵 ${music.name}` : '';
+  $('music-remove').style.display = music ? 'inline-block' : 'none';
+  $('music-upload').disabled = $('music-remove').disabled = rendering;
+  const rb = $('render-btn');
+  rb.disabled = rendering || !p.narration || !planned;
+  rb.textContent = r.status === 'done' ? '🎬 Render again' : '🎬 Render video (1080p)';
+  $('render-hint').textContent = !p.narration ? 'Join the narration (step 3) first.'
+    : !planned ? 'Plan the visuals (step 4) first.'
+    : rendering ? '' : `About ${Math.max(1, Math.round((p.narration.duration || 0) / 60))} min of video. Rendering takes roughly as long as the video, and you can leave this page while it runs.`;
+  $('render-progress').style.display = rendering ? 'block' : 'none';
+  if (rendering) {
+    $('render-bar').style.width = Math.round((r.progress || 0) * 100) + '%';
+    $('render-msg').textContent = r.message || 'Rendering…';
+  }
+  $('render-error').style.display = r.status === 'error' ? 'block' : 'none';
+  $('render-error').textContent = r.status === 'error' ? '⚠️ ' + (r.error || 'Render failed.') : '';
+  const out = $('render-out');
+  if (r.status === 'done') {
+    out.style.display = 'block';
+    const src = `/api/longform/projects/${p.id}/video?t=${Math.round(r.built_at || 0)}`;
+    if ($('final-video').getAttribute('src') !== src) $('final-video').setAttribute('src', src);
+    $('video-dl').href = src;
+    $('render-info').textContent = `${fmtTime(r.duration)} long · rendered in ${Math.max(1, Math.round((r.took_seconds || 0) / 60))} min.`;
+  } else out.style.display = 'none';
+  const pub = p.publish;
+  $('publish-out').style.display = pub ? 'block' : 'none';
+  if (pub) {
+    const tl = $('title-list');
+    tl.innerHTML = '';
+    (pub.titles || []).forEach(t => {
+      const row = document.createElement('div'); row.className = 'title-opt';
+      const sp = document.createElement('span'); sp.textContent = t;
+      const cp = document.createElement('button'); cp.type = 'button'; cp.className = 'secondary'; cp.textContent = '📋 Copy';
+      cp.addEventListener('click', () => navigator.clipboard && navigator.clipboard.writeText(t));
+      row.appendChild(sp); row.appendChild(cp); tl.appendChild(row);
+    });
+    if (document.activeElement !== $('desc-text')) $('desc-text').value = pub.description || '';
+  }
+}
+
+$('render-btn').addEventListener('click', async () => {
+  try {
+    await api(`/api/longform/projects/${project.id}/render`, { method: 'POST' });
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
+});
+
+$('music-upload').addEventListener('click', async () => {
+  const f = $('music-file').files[0];
+  if (!f) { alert('Choose a music file first.'); return; }
+  $('music-upload').disabled = true;
+  try {
+    project = await api(`/api/longform/projects/${project.id}/music?name=${encodeURIComponent(f.name)}`,
+      { method: 'POST', headers: { 'Content-Type': f.type || 'audio/mpeg' }, body: f });
+    $('music-file').value = '';
+    render();
+  } catch (e) { alert(e.message); } finally { $('music-upload').disabled = false; }
+});
+$('music-remove').addEventListener('click', async () => {
+  try { project = await api(`/api/longform/projects/${project.id}/music`, { method: 'DELETE' }); render(); } catch (e) { alert(e.message); }
+});
+
+$('publish-btn').addEventListener('click', async () => {
+  const b = $('publish-btn');
+  b.disabled = true; b.textContent = 'Writing…';
+  try { project = await api(`/api/longform/projects/${project.id}/publish-text`, { method: 'POST' }); render(); }
+  catch (e) { alert(e.message); }
+  finally { b.disabled = false; b.textContent = '✍️ Write title & description'; }
+});
+$('copy-desc').addEventListener('click', () => navigator.clipboard && navigator.clipboard.writeText($('desc-text').value));
 
 const startId = new URLSearchParams(location.search).get('v');
 if (startId) openProject(startId); else showList();
