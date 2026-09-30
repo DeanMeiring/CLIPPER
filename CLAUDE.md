@@ -75,10 +75,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   "Keep anyway"). Numbers, filler words and a single misheard word are
   ignored on purpose. Accepted takes are joined into one narration track
   with known scene start times.
-- Still to build: visuals per scene (route maps, cockpit-transcript cards,
-  charts, free Pexels/Pixabay stock, NTSB report images) timed to the
-  narration, 1080p render, upload to the second channel's YouTube account,
-  and promo Shorts. No AI images of real crashes and no AI voice.
+- Visuals and render: `clipper/longform_video.py`. "Plan visuals" has
+  Claude pick one visual per scene from the report (map points/route,
+  word-for-word cockpit lines, chart numbers, stock search words, a short
+  caption); `normalize_spec` drops anything unusable to a safe type.
+  Everything is drawn with Pillow and encoded with ffmpeg: dark
+  OpenStreetMap maps (tiles cached in `BASE_DIR/_longform_cache/tiles`,
+  "© OpenStreetMap contributors" on screen and in the credits), cockpit
+  cards, charts, the report's own images (pulled out of `report.pdf`),
+  Pexels stock (only when `PEXELS_API_KEY` is set; otherwise report images,
+  then a title card). Scenes are cached by a hash of their spec + length,
+  so re-rendering after one change only redraws that scene. Music is
+  optional and ducked under the voice. No AI images and no AI voice.
+- The Docker image isn't changed for fonts on purpose: ffmpeg's
+  dependencies already bring DejaVu, and adding fonts could change the
+  clip captions' font fallback. `longform_video.font()` falls back to
+  `fc-match`, then Pillow's built-in font.
+- Still to build: upload to the second channel's YouTube account,
+  thumbnails, and promo Shorts cut from the finished video.
 - `ntsb.gov` is blocked from the Claude Code sandbox but reachable from
   Railway; test with mocks (see the testing section).
 
