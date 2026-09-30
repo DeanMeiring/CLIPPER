@@ -144,3 +144,29 @@ def upload_video(
     if not video_id:
         raise UploadError(f"Upload seemed to finish but YouTube didn't return a video id: {put_resp.text[:500]}")
     return video_id
+
+
+def set_thumbnail(access_token: str, video_id: str, image_path: Path) -> None:
+    """Set a video's custom thumbnail (JPEG, under 2 MB). YouTube only
+    allows this on a channel verified with a phone number; a 403 says so."""
+    import requests
+
+    try:
+        resp = requests.post(
+            "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+            params={"videoId": video_id, "uploadType": "media"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "image/jpeg"},
+            data=image_path.read_bytes(),
+            timeout=120,
+        )
+    except requests.RequestException as e:
+        raise UploadError(f"Could not reach YouTube to set the thumbnail: {e}") from e
+    if resp.status_code == 401:
+        raise UploadError("Your YouTube connection has expired -- disconnect and reconnect it on the analytics page.")
+    if resp.status_code == 403:
+        raise UploadError(
+            "YouTube didn't allow a custom thumbnail. That needs a verified channel: YouTube Studio -> Settings -> "
+            "Channel -> Feature eligibility -> verify with your phone, then press Set on YouTube again."
+        )
+    if resp.status_code not in (200, 201):
+        raise UploadError(f"Couldn't set the thumbnail ({resp.status_code}): {resp.text[:300]}")
