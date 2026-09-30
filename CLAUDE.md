@@ -109,7 +109,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   the sandbox: test with mocks and the scikit-video sample clips
   (`pip download scikit-video`, `skvideo/datasets/data/*.mp4`).
 - Rendering is Pillow frames piped into ffmpeg, about 2x real time on
-  CPU (a 12-minute episode renders in ~25 min).
+  CPU (a 12-minute episode renders in ~25 min). Scenes are cached by a
+  hash of their inputs, so a change to the final mix only (music, music
+  volume) re-renders in a minute or two.
+- Background music: levelled with loudnorm, then set to
+  `longform_video.MUSIC_LEVELS` (quiet -37 / normal -34 / loud -31 LUFS,
+  ducked under voice and clips). Dean found the first flat 0.16 gain "a
+  bit too loud"; the page has Quieter/Normal/Louder buttons
+  (`project["music_level"]`).
 - **AI voice (Sept 2026):** Dean narrates with his own voice (never his
   face). `clipper/voice_clone.py` clones it with Kyutai Pocket TTS (100M
   params, CPU, ~0.6 GB RAM, CC-BY-4.0 weights) to patch lines he'd rather

@@ -3537,6 +3537,20 @@ async def longform_upload_music(pid: str, request: Request, name: str = "") -> d
     return _longform_store.update(pid, lambda pr: pr.update(music={"file": f"music{ext}", "name": label}))
 
 
+class LongformMusicLevelRequest(BaseModel):
+    level: str
+
+
+@protected.put("/api/longform/projects/{pid}/music-level")
+def longform_music_level(pid: str, req: LongformMusicLevelRequest) -> dict:
+    """Quieter / normal / louder background music. Only the final mix
+    changes, so the next render reuses every scene and takes a minute."""
+    if req.level not in longform_video.MUSIC_LEVELS:
+        raise HTTPException(400, "level must be quiet, normal or loud")
+    _longform_project(pid)
+    return _longform_store.update(pid, lambda pr: pr.update(music_level=req.level))
+
+
 @protected.delete("/api/longform/projects/{pid}/music")
 def longform_remove_music(pid: str) -> dict:
     _longform_project(pid)
@@ -3604,6 +3618,7 @@ def _longform_render(pid: str) -> None:
             d, scenes, _longform_library(project),
             [float((s.get("take") or {}).get("duration") or 0) if longform.needs_take(s) else None for s in scenes],
             _longform_brand(), d / music if music else None, on_progress=progress,
+            music_level=project.get("music_level") or "normal",
         )
         _longform_store.update(pid, lambda pr: pr.update(render={
             "status": "done", "progress": 1.0, "message": None, "error": None, "built_at": time.time(),
@@ -7048,6 +7063,9 @@ LONGFORM_HTML = """<!doctype html>
   .music-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .music-row input { flex: 1; min-width: 200px; }
   .music-row button { margin-top: 6px; }
+  .music-level { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .music-level button { margin-top: 0; padding: 7px 14px; font-size: 0.85rem; }
+  .music-level button.on { outline: 2px solid var(--accent); color: var(--text); }
   .bar { height: 10px; border-radius: 99px; background: var(--track); margin-top: 14px; overflow: hidden; }
   .bar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.4s; }
   #final-video { width: 100%; border-radius: 12px; margin-top: 12px; background: #000; }
@@ -7204,6 +7222,13 @@ LONGFORM_HTML = """<!doctype html>
         <button id="music-upload" type="button" class="secondary">Upload music</button>
         <button id="music-remove" type="button" class="secondary" style="display:none">Remove</button>
       </div>
+      <div class="music-level" id="music-level" style="display:none">
+        <span class="hint" style="margin:0">Music volume:</span>
+        <button type="button" class="secondary" data-level="quiet">Quieter</button>
+        <button type="button" class="secondary" data-level="normal">Normal</button>
+        <button type="button" class="secondary" data-level="loud">Louder</button>
+      </div>
+      <div class="hint" id="music-level-hint"></div>
       <div class="hint" id="render-hint" style="margin-top:14px"></div>
       <button id="render-btn" type="button">🎬 Render video (1080p)</button>
       <div id="render-progress" style="display:none">
@@ -7875,6 +7900,11 @@ function renderRender() {
   $('music-current').style.display = p.music ? 'block' : 'none';
   $('music-current').textContent = p.music ? `🎵 ${p.music.name}` : '';
   $('music-remove').style.display = p.music ? 'inline-block' : 'none';
+  $('music-level').style.display = p.music ? 'flex' : 'none';
+  $('music-level').querySelectorAll('button').forEach(b => {
+    b.classList.toggle('on', b.dataset.level === (p.music_level || 'normal'));
+    b.disabled = rendering;
+  });
   $('music-upload').disabled = $('music-remove').disabled = rendering;
   const rb = $('render-btn');
   rb.disabled = rendering || left > 0;
@@ -7914,6 +7944,14 @@ $('music-upload').addEventListener('click', async () => {
   try { project = await api(`/api/longform/projects/${project.id}/music?name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'Content-Type': f.type || 'audio/mpeg' }, body: f }); $('music-file').value = ''; render(); }
   catch (e) { alert(e.message); } finally { $('music-upload').disabled = false; }
 });
+$('music-level').querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
+  try {
+    project = await api(`/api/longform/projects/${project.id}/music-level`, jsonOpts('PUT', { level: b.dataset.level }));
+    render();
+    $('music-level-hint').textContent = (project.render || {}).status === 'done'
+      ? 'Render again to hear it. Only the final mix is redone, so it takes a minute or two.' : '';
+  } catch (e) { alert(e.message); }
+}));
 $('music-remove').addEventListener('click', async () => { try { project = await api(`/api/longform/projects/${project.id}/music`, { method: 'DELETE' }); render(); } catch (e) { alert(e.message); } });
 $('publish-btn').addEventListener('click', async () => {
   const b = $('publish-btn'); b.disabled = true; b.textContent = 'Writing…';

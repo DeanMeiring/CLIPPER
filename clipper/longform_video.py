@@ -365,9 +365,19 @@ def preview_still(project_dir: Path, scene: dict, library: dict, brand: str, out
 
 # ------------------------------------------------------------- assembly ---
 
+# How loud the background music sits under everything (LUFS of the music
+# bed before it ducks under the voice and clips). Tracks are levelled first,
+# so a loud Audio Library master and a quiet one end up the same. Dean found
+# the first version (a flat 0.16 gain) a bit loud: an Audio Library master
+# sits around -12 LUFS, so it came out near -28. "normal" is now about 6 dB
+# softer than that.
+MUSIC_LEVELS = {"quiet": -37.0, "normal": -34.0, "loud": -31.0}
+
+
 def render_documentary(
     project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]], brand: str,
     music: Optional[Path], on_progress: Callable[[float, str], None] = lambda p, m: None,
+    music_level: str = "normal",
 ) -> Tuple[Path, List[float], float]:
     """Render every scene, add the end card, join, and lay optional music
     under it. Returns (final video, each scene's start time, total length)."""
@@ -411,7 +421,9 @@ def render_documentary(
     tmp = project_dir / ".final.partial.mp4"
     if music is not None and music.exists():
         on_progress(0.96, "Mixing in the music...")
-        fc = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},volume=0.16,"
+        gain = MUSIC_LEVELS.get(music_level, MUSIC_LEVELS["normal"]) + 20.0
+        fc = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},"
+              f"loudnorm=I=-20:TP=-2:LRA=11,aresample=48000,volume={gain:.1f}dB,"
               f"afade=t=in:d=2,afade=t=out:st={max(0.0, total - 4):.3f}:d=4[bed];"
               f"[0:a]asplit=2[main][key];[bed][key]sidechaincompress=threshold=0.02:ratio=10:attack=30:release=500[ducked];"
               f"[main][ducked]amix=inputs=2:duration=first:normalize=0[a]")
