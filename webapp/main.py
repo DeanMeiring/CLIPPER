@@ -20,14 +20,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from clipper.captions import build_ass, clean_hook_text, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper import hook_line
+from clipper import longform
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -2934,6 +2936,315 @@ def hook_line_page() -> str:
     return HOOK_LINE_HTML
 
 
+@protected.get("/long-form", response_class=HTMLResponse)
+def long_form_page() -> str:
+    return LONGFORM_HTML
+
+
+# ---- Long-form videos (second channel) -------------------------------------
+# One project per video: incident -> Claude script -> scene-by-scene recording
+# with a misread check -> joined narration. See clipper/longform.py.
+_longform_store = longform.ProjectStore(BASE_DIR / "_longform")
+_longform_writing: set = set()  # project ids with a script being written right now
+_longform_writing_lock = threading.Lock()
+
+
+def _longform_project(pid: str) -> dict:
+    try:
+        project = _longform_store.load(pid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "long-form video not found")
+    if project.get("status") == "writing":
+        with _longform_writing_lock:
+            alive = pid in _longform_writing
+        if not alive:
+            # The server restarted mid-write; the thread that would have
+            # finished it is gone.
+            project = _longform_store.update(pid, lambda pr: pr.update(
+                status="error", error="Interrupted by a restart -- click Rewrite script."))
+    return project
+
+
+def _longform_write_script(pid: str, report_pdf: Optional[bytes] = None) -> None:
+    """Background: get the report text (downloading the PDF if needed), then
+    have Claude write the scene-by-scene script."""
+    try:
+        d = _longform_store.path(pid)
+        text_path = d / "report.txt"
+        if not text_path.exists():
+            if report_pdf is None:
+                url = (_longform_store.load(pid).get("incident") or {}).get("report_url")
+                if not url:
+                    raise RuntimeError("No report to write from -- upload the report PDF.")
+                _longform_store.update(pid, lambda pr: pr.update(message="Downloading the NTSB report..."))
+                report_pdf = longform.download_report(url)
+            _longform_store.update(pid, lambda pr: pr.update(message="Reading the report..."))
+            text = longform.pdf_text(report_pdf)
+            if len(text) < 2000:
+                raise RuntimeError("Couldn't read enough text from that report (it may be a scanned PDF).")
+            text_path.write_text(text, encoding="utf-8")
+        text = text_path.read_text(encoding="utf-8")
+        title = (_longform_store.load(pid).get("incident") or {}).get("title") or "an aviation incident"
+        _longform_store.update(pid, lambda pr: pr.update(message="Claude is writing the script (about a minute)..."))
+        scenes = longform.write_script(text, title)
+
+        def done(pr: dict) -> None:
+            pr.update(status="script_ready", error=None, message=None, scenes=scenes, narration=None)
+        _longform_store.update(pid, done)
+    except Exception as e:
+        print(f"[longform] script for {pid} failed: {e}", flush=True)
+        err = str(e)
+        try:
+            _longform_store.update(pid, lambda pr: pr.update(status="error", error=err, message=None))
+        except Exception:
+            pass
+    finally:
+        with _longform_writing_lock:
+            _longform_writing.discard(pid)
+
+
+def _longform_start_script(pid: str, report_pdf: Optional[bytes] = None) -> None:
+    with _longform_writing_lock:
+        if pid in _longform_writing:
+            raise HTTPException(409, "the script is already being written")
+        _longform_writing.add(pid)
+    _longform_store.update(pid, lambda pr: pr.update(status="writing", error=None, message="Starting..."))
+    threading.Thread(target=_longform_write_script, args=(pid, report_pdf), daemon=True).start()
+
+
+class LongformCreateRequest(BaseModel):
+    incident_id: Optional[str] = None
+    report_url: Optional[str] = None
+    title: Optional[str] = None
+
+
+class LongformScene(BaseModel):
+    narration: str
+    visual: str = "stock"
+    visual_note: str = ""
+
+
+class LongformScenesRequest(BaseModel):
+    scenes: List[LongformScene]
+
+
+@protected.get("/api/longform/incidents")
+def longform_incidents() -> dict:
+    return {"incidents": longform.INCIDENTS}
+
+
+@protected.get("/api/longform/projects")
+def longform_projects() -> dict:
+    return {"projects": [longform.summary(p) for p in _longform_store.list()]}
+
+
+@protected.post("/api/longform/projects")
+def longform_create(req: LongformCreateRequest) -> dict:
+    if req.incident_id:
+        match = next((i for i in longform.INCIDENTS if i["id"] == req.incident_id), None)
+        if not match:
+            raise HTTPException(404, "unknown incident")
+        incident = {k: match[k] for k in ("id", "title", "subtitle", "report_url")}
+    elif req.report_url:
+        url = req.report_url.strip()
+        if not url.startswith("https://") or not url.lower().split("?")[0].endswith(".pdf"):
+            raise HTTPException(400, "paste a direct https link to the report PDF")
+        incident = {"id": None, "title": (req.title or "").strip() or "Untitled incident",
+                    "subtitle": url, "report_url": url}
+    else:
+        raise HTTPException(400, "pick an incident or paste a report link")
+    project = _longform_store.create(incident)
+    _longform_start_script(project["id"])
+    return {"id": project["id"]}
+
+
+@protected.post("/api/longform/projects/upload-report")
+async def longform_create_from_pdf(request: Request, title: str = "") -> dict:
+    data = await request.body()
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(400, "that file isn't a PDF")
+    if len(data) > longform.MAX_REPORT_BYTES:
+        raise HTTPException(413, "that report is too large")
+    project = _longform_store.create({"id": None, "title": title.strip() or "Untitled incident",
+                                      "subtitle": "Uploaded report", "report_url": None})
+    _longform_start_script(project["id"], report_pdf=data)
+    return {"id": project["id"]}
+
+
+@protected.get("/api/longform/projects/{pid}")
+def longform_get(pid: str) -> dict:
+    return _longform_project(pid)
+
+
+@protected.delete("/api/longform/projects/{pid}")
+def longform_delete(pid: str) -> dict:
+    _longform_project(pid)
+    _longform_store.delete(pid)
+    return {"ok": True}
+
+
+@protected.post("/api/longform/projects/{pid}/rewrite")
+def longform_rewrite(pid: str) -> dict:
+    _longform_project(pid)
+    _longform_start_script(pid)
+    return {"ok": True}
+
+
+@protected.put("/api/longform/projects/{pid}/scenes")
+def longform_save_scenes(pid: str, req: LongformScenesRequest) -> dict:
+    """Save script edits. A scene whose words changed loses its recorded
+    take (it no longer matches what was read); unchanged scenes keep theirs."""
+    project = _longform_project(pid)
+    if project.get("status") == "writing":
+        raise HTTPException(409, "wait for the script to finish writing")
+    new = []
+    for sc in req.scenes:
+        narration = " ".join(sc.narration.split())
+        if narration:
+            new.append({"narration": narration,
+                        "visual": sc.visual if sc.visual in longform.VISUAL_TYPES else "stock",
+                        "visual_note": " ".join(sc.visual_note.split())})
+    if not new:
+        raise HTTPException(400, "the script can't be empty")
+
+    def apply(pr: dict) -> None:
+        old_takes = {s["narration"]: s.get("take") for s in pr.get("scenes") or []}
+        for sc in new:
+            sc["take"] = old_takes.get(sc["narration"])
+        pr["scenes"] = new
+        pr["narration"] = None
+        pr["status"] = "script_ready"
+    return _longform_store.update(pid, apply)
+
+
+_TAKE_EXTS = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "audio/mpeg": ".mp3",
+              "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/aac": ".aac", "video/webm": ".webm"}
+
+
+@protected.post("/api/longform/projects/{pid}/scenes/{index}/take")
+async def longform_take(pid: str, index: int, request: Request) -> dict:
+    """One recorded take of one scene: convert, transcribe, compare with the
+    script. A take that matches is accepted; a flagged one is kept aside
+    until it's re-read (or kept anyway)."""
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    if not 0 <= index < len(scenes):
+        raise HTTPException(404, "scene not found")
+    data = await request.body()
+    if len(data) < 1000:
+        raise HTTPException(400, "that recording is empty -- check your mic")
+    if len(data) > longform.MAX_TAKE_BYTES:
+        raise HTTPException(413, "that recording is too long for one scene")
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    ext = _TAKE_EXTS.get(ctype, ".webm")
+    script = scenes[index]["narration"]
+    takes_dir = _longform_store.path(pid) / "takes"
+    takes_dir.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    raw = takes_dir / f"scene{index:02d}_{stamp}{ext}"
+    wav = takes_dir / f"scene{index:02d}_{stamp}.wav"
+
+    def work() -> dict:
+        raw.write_bytes(data)
+        try:
+            longform.to_wav(raw, wav)
+        finally:
+            raw.unlink(missing_ok=True)
+        duration = longform.audio_duration(wav)
+        heard = longform.transcribe_take(wav)
+        return {"duration": round(duration, 2), "heard": " ".join(heard).strip(),
+                **longform.check_take(script, heard)}
+
+    try:
+        result = await run_in_threadpool(work)
+    except Exception as e:
+        wav.unlink(missing_ok=True)
+        print(f"[longform] take check failed for {pid} scene {index}: {e}", flush=True)
+        raise HTTPException(500, f"Couldn't check that take: {e}")
+
+    take = {"file": wav.name, "recorded_at": time.time(), "kept": False, **result}
+    replaced = []
+
+    def apply(pr: dict) -> None:
+        sc = (pr.get("scenes") or [])[index] if index < len(pr.get("scenes") or []) else None
+        if sc is None or sc["narration"] != script:
+            raise HTTPException(409, "the script changed while this take was being checked -- record it again")
+        old = sc.get("take") or {}
+        if old.get("file") and old["file"] != wav.name:
+            replaced.append(old["file"])
+        sc["take"] = take
+        pr["narration"] = None
+    try:
+        _longform_store.update(pid, apply)
+    except HTTPException:
+        wav.unlink(missing_ok=True)
+        raise
+    for name in replaced:
+        (takes_dir / name).unlink(missing_ok=True)
+    return {"take": take}
+
+
+@protected.post("/api/longform/projects/{pid}/scenes/{index}/keep")
+def longform_keep_take(pid: str, index: int) -> dict:
+    """Accept a flagged take as it is (e.g. Whisper misheard, not you)."""
+    def apply(pr: dict) -> None:
+        scenes = pr.get("scenes") or []
+        if not 0 <= index < len(scenes) or not (scenes[index].get("take") or {}).get("file"):
+            raise HTTPException(404, "no take recorded for that scene")
+        scenes[index]["take"]["kept"] = True
+    _longform_project(pid)
+    return _longform_store.update(pid, apply)
+
+
+@protected.get("/api/longform/projects/{pid}/scenes/{index}/take")
+def longform_take_audio(pid: str, index: int) -> FileResponse:
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    take = (scenes[index].get("take") if 0 <= index < len(scenes) else None) or {}
+    path = _longform_store.path(pid) / "takes" / (take.get("file") or "_none")
+    if not take.get("file") or not path.is_file():
+        raise HTTPException(404, "no take recorded for that scene")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@protected.post("/api/longform/projects/{pid}/narration")
+def longform_build_narration(pid: str) -> dict:
+    """Join every scene's accepted take into one narration track, and record
+    where each scene starts in it (what the visuals will be timed to)."""
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    if not scenes:
+        raise HTTPException(409, "there's no script yet")
+    missing = [i + 1 for i, s in enumerate(scenes) if not longform.scene_ready(s)]
+    if missing:
+        raise HTTPException(409, "record these scenes first: " + ", ".join(map(str, missing)))
+    d = _longform_store.path(pid)
+    wavs = [d / "takes" / s["take"]["file"] for s in scenes]
+    starts, t = [], 0.0
+    for i, s in enumerate(scenes):
+        starts.append(round(t, 2))
+        t += float(s["take"].get("duration") or 0.0) + longform.SCENE_GAP_SECONDS
+    try:
+        longform.join_takes(wavs, d / "narration.wav", d / "narration.m4a")
+        duration = longform.audio_duration(d / "narration.wav")
+    except Exception as e:
+        raise HTTPException(500, f"Couldn't join the takes: {e}")
+    narration = {"file": "narration.m4a", "duration": round(duration, 2), "scene_starts": starts,
+                 "built_at": time.time()}
+    return _longform_store.update(pid, lambda pr: pr.update(narration=narration))
+
+
+@protected.get("/api/longform/projects/{pid}/narration")
+def longform_narration_audio(pid: str) -> FileResponse:
+    project = _longform_project(pid)
+    path = _longform_store.path(pid) / "narration.m4a"
+    if not project.get("narration") or not path.is_file():
+        raise HTTPException(404, "build the narration first")
+    title = (project.get("incident") or {}).get("title") or "narration"
+    safe = "".join(ch if ch.isalnum() or ch in " -_" else "" for ch in title).strip()[:60] or "narration"
+    return FileResponse(path, media_type="audio/mp4", filename=f"{safe} - narration.m4a")
+
+
 app.include_router(protected)
 
 
@@ -3005,6 +3316,12 @@ _CHANNEL_HOME_TEMPLATE = """<!doctype html>
   }
   h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
   .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  .longform-link {
+    display: flex; justify-content: space-between; align-items: center; margin: -8px 0 22px; padding: 12px 16px;
+    border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text);
+    font-weight: 700; font-size: 0.92rem; text-decoration: none;
+  }
+  .longform-link:hover { border-color: var(--accent); color: var(--accent); }
   label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
   input, textarea, select {
     width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
@@ -3172,6 +3489,7 @@ __NAV_LINKS__
 
 <div class="brand"><span class="logo">🎬</span><h1>clipper — __PROFILE_LABEL__</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
+<a class="longform-link" href="/long-form"><span>🛫 Go to long-form videos</span><span>→</span></a>
 
 <div id="profile-row">
   <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
@@ -6070,6 +6388,647 @@ renderBtn.addEventListener('click', async () => {
 });
 
 loadClips();
+</script>
+</body>
+</html>
+"""
+
+
+# The /long-form page -- see clipper/longform.py and the /api/longform routes.
+LONGFORM_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — Long-form videos</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7;
+    --card: #ffffff;
+    --text: #1a1b1f;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6d28d9;
+    --accent2: #ec4899;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --track: #e5e7eb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #1a1c23;
+      --text: #f2f3f7;
+      --muted: #9aa0ac;
+      --border: #2b2e37;
+      --track: #2b2e37;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .page { max-width: 720px; margin: 0 auto; }
+  .topnav {
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
+  }
+  .topnav a {
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
+    font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
+  }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 28px 28px 32px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    font-size: 1.4rem; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
+  label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+  input, select, textarea {
+    width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
+    background: var(--bg); color: var(--text); font-family: inherit;
+    border: 1px solid var(--border); border-radius: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  button {
+    margin-top: 18px; padding: 11px 20px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--accent-text);
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button:hover:not(:disabled) { opacity: 0.92; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .hint { font-size: 0.78rem; color: var(--muted); font-weight: 400; margin-top: 6px; text-transform: none; letter-spacing: normal; }
+  .section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  .back { display: inline-block; margin-bottom: 12px; color: var(--accent); font-weight: 700; text-decoration: none; font-size: 0.9rem; }
+  h2 { font-size: 1.15rem; margin: 10px 0 0; }
+  h3 { font-size: 1.02rem; margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  h3 .n { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; align-items: center; justify-content: center;
+    font-size: 0.78rem; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; }
+  button.linkish { background: none; border: none; color: var(--accent); padding: 0; margin: 0; font-weight: 700; font-size: 0.88rem; }
+  button.danger-link { background: none; border: 1px solid var(--border); color: var(--danger); margin-top: 0; font-size: 0.85rem; padding: 8px 14px; }
+  .incident, .project { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; margin-top: 10px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg); cursor: pointer; width: 100%; text-align: left; color: var(--text); font-weight: 400; }
+  .incident:hover, .project:hover { border-color: var(--accent); opacity: 1; }
+  .incident .ico { font-size: 1.5rem; line-height: 1; }
+  .incident .t, .project .t { font-weight: 700; font-size: 0.95rem; }
+  .incident .m, .project .m { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+  .tag { font-size: 0.7rem; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: var(--muted); }
+  .tag.good { color: #059669; }
+  .tag.warn { color: #b45309; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; font-weight: 700; font-size: 0.9rem; color: var(--accent); }
+  .steps { display: flex; gap: 6px; margin: 14px 0 4px; flex-wrap: wrap; }
+  .steps span { font-size: 0.74rem; font-weight: 700; padding: 5px 10px; border-radius: 999px; background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+  .steps span.done { color: var(--accent); border-color: var(--accent); }
+  .steps span.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border-color: transparent; }
+  .status-box { margin-top: 16px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg); font-size: 0.9rem; }
+  .status-box.err { border-color: var(--danger); color: var(--danger); }
+  .meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.82rem; color: var(--muted); margin: 8px 0 4px; }
+  .meta b { color: var(--text); }
+  .scene { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .scene .num { font-weight: 800; color: var(--accent); padding-top: 12px; }
+  .scene textarea { margin-top: 0; min-height: 90px; resize: vertical; line-height: 1.45; }
+  .scene .vis-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .scene select { width: auto; margin-top: 0; padding: 6px 8px; font-size: 0.82rem; }
+  .scene .vnote { font-size: 0.78rem; color: var(--muted); }
+  .scene .rec-badge { font-size: 0.72rem; font-weight: 700; margin-left: auto; white-space: nowrap; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions button { margin-top: 12px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .chips button { margin-top: 0; padding: 6px 0; width: 36px; font-size: 0.8rem; background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+  .chips button.ready { background: color-mix(in srgb, #059669 18%, var(--bg)); color: #059669; border-color: #059669; }
+  .chips button.flag { background: color-mix(in srgb, #f59e0b 18%, var(--bg)); color: #b45309; border-color: #f59e0b; }
+  .chips button.cur { outline: 3px solid var(--accent); outline-offset: 1px; }
+  .prompter { background: #0b0c10; color: #f3f4f6; border-radius: 14px; padding: 22px; margin-top: 12px; font-size: 1.35rem; line-height: 1.65; }
+  .prompter .miss { background: rgba(239, 68, 68, 0.4); color: #fff; border-radius: 5px; padding: 0 3px; }
+  .prompter .label { font-size: 0.75rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; font-weight: 700; }
+  .rec-row { display: flex; gap: 12px; align-items: center; }
+  #rec-btn { font-size: 1.05rem; padding: 14px 22px; }
+  #rec-btn.recording { background: var(--danger); }
+  .rec-timer { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--danger); margin-top: 18px; }
+  .take-result { margin-top: 12px; padding: 12px 14px; border-radius: 12px; font-size: 0.92rem; font-weight: 600; }
+  .take-result.ok { background: color-mix(in srgb, #059669 14%, var(--bg)); color: #047857; }
+  .take-result.bad { background: color-mix(in srgb, #f59e0b 16%, var(--bg)); color: #92400e; }
+  .take-result.wait { background: var(--bg); color: var(--muted); }
+  .take-result .heard { display: block; font-weight: 400; font-size: 0.8rem; margin-top: 6px; color: var(--muted); }
+  a.dl-link { display: inline-flex; margin-top: 10px; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
+    color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+  @media (max-width: 560px) {
+    .card { padding: 20px 16px 24px; }
+    .prompter { font-size: 1.2rem; padding: 18px; }
+    .scene { grid-template-columns: 22px 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+<a class="back" href="/">← Back to clips</a>
+<div class="card">
+  <div class="brand"><span class="logo">🛫</span><h1>Long-form videos</h1></div>
+  <p class="subtitle">True aviation stories for your second channel. Claude writes the script from the official report, you read it here one scene at a time, and the app checks every take.</p>
+
+  <div id="list-view">
+    <div id="projects-wrap" style="display:none">
+      <label style="margin-top:0">Your videos</label>
+      <div id="projects"></div>
+    </div>
+
+    <label>Start a new video</label>
+    <div class="hint">Pick an incident. Claude reads its NTSB report and writes a 10–12 minute script, which takes about a minute.</div>
+    <div id="incidents"></div>
+
+    <details id="other-report">
+      <summary>Or use another NTSB report</summary>
+      <label>Title</label>
+      <input id="custom-title" placeholder="e.g. United 232: the DC-10 that lost all its hydraulics">
+      <label>Report link (PDF)</label>
+      <input id="custom-url" placeholder="https://www.ntsb.gov/investigations/AccidentReports/Reports/....pdf">
+      <button id="custom-url-btn" type="button">Write script from link</button>
+      <label>Or upload the report PDF</label>
+      <input id="custom-pdf" type="file" accept="application/pdf">
+      <button id="custom-pdf-btn" type="button" class="secondary">Upload report and write script</button>
+      <div class="hint" id="custom-status"></div>
+    </details>
+  </div>
+
+  <div id="project-view" style="display:none">
+    <button id="to-list" type="button" class="linkish">← All long-form videos</button>
+    <h2 id="p-title"></h2>
+    <div class="hint" id="p-sub" style="margin-top:2px"></div>
+    <div class="steps" id="steps"></div>
+    <div id="p-status" class="status-box" style="display:none"></div>
+
+    <div class="section" id="script-section" style="display:none">
+      <h3><span class="n">1</span>Script</h3>
+      <div class="hint">Edit any line before you record it. Changing a scene you've already recorded means reading that scene again.</div>
+      <div class="meta" id="script-meta"></div>
+      <details id="script-details">
+        <summary id="script-summary">Show and edit the script</summary>
+        <div id="scenes"></div>
+        <div class="actions">
+          <button id="save-script" type="button" class="secondary" disabled>💾 Save changes</button>
+          <button id="rewrite-script" type="button" class="secondary">🔄 Rewrite script</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="section" id="record-section" style="display:none">
+      <h3><span class="n">2</span>Record</h3>
+      <div class="hint">Read the scene, then tap Stop. The app listens back, and if you skipped or fluffed something it asks you to read that scene again. Use headphones or a quiet room.</div>
+      <div class="chips" id="chips"></div>
+      <div class="prompter" id="prompter"></div>
+      <div class="rec-row">
+        <button id="rec-btn" type="button">🎙 Record scene 1</button>
+        <span id="rec-timer" class="rec-timer"></span>
+      </div>
+      <div id="take-result" class="take-result" style="display:none"></div>
+      <div class="actions" id="take-actions">
+        <button id="play-take" type="button" class="secondary" style="display:none">▶ Play my take</button>
+        <button id="keep-take" type="button" class="secondary" style="display:none">Keep anyway</button>
+        <button id="prev-scene" type="button" class="secondary">← Previous</button>
+        <button id="next-scene" type="button" class="secondary">Next →</button>
+      </div>
+      <audio id="take-audio" style="display:none"></audio>
+    </div>
+
+    <div class="section" id="narration-section" style="display:none">
+      <h3><span class="n">3</span>Narration</h3>
+      <div class="hint" id="narration-hint"></div>
+      <button id="build-narration" type="button">🎧 Join into one narration</button>
+      <div id="narration-out" style="display:none">
+        <audio id="narration-audio" controls style="width:100%;margin-top:12px"></audio>
+        <a id="narration-dl" class="dl-link" href="#">⬇ Download narration</a>
+        <div class="hint">Next up: the app builds the video around this (maps, cockpit cards, charts, footage). That part is coming in the next update.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <button id="delete-project" type="button" class="danger-link">🗑 Delete this video</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const VISUALS = [['map', '🗺 Map'], ['cockpit', '💬 Cockpit card'], ['chart', '📈 Chart'], ['stock', '🎞 Stock footage'], ['report', '📄 Report image']];
+let project = null;
+let recIndex = 0;
+let pollTimer = null;
+let recorder = null;
+let recStream = null;
+let recChunks = [];
+let recStarted = 0;
+let recTick = null;
+let scriptDirty = false;
+let lastResult = null;
+
+function sceneReady(s) { const t = s.take || {}; return !!t.file && !!(t.ok || t.kept); }
+function sceneFlagged(s) { const t = s.take || {}; return !!t.file && !t.ok && !t.kept; }
+function fmtTime(sec) { sec = Math.max(0, Math.round(sec || 0)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+  return data;
+}
+
+// ---------- list view ----------
+async function showList() {
+  stopPolling();
+  project = null;
+  history.replaceState(null, '', '/long-form');
+  $('project-view').style.display = 'none';
+  $('list-view').style.display = 'block';
+  const [{ projects }, { incidents }] = await Promise.all([api('/api/longform/projects'), api('/api/longform/incidents')]);
+  $('projects-wrap').style.display = projects.length ? 'block' : 'none';
+  const pl = $('projects');
+  pl.innerHTML = '';
+  projects.forEach(p => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'project';
+    const info = document.createElement('div');
+    const t = document.createElement('div'); t.className = 't'; t.textContent = p.title;
+    const m = document.createElement('div'); m.className = 'm';
+    const state = p.status === 'writing' ? 'Writing script…'
+      : p.status === 'error' ? 'Needs attention'
+      : p.has_narration ? 'Narration ready'
+      : `${p.recorded}/${p.scenes} scenes recorded`;
+    m.textContent = `${state} · ~${p.minutes} min`;
+    info.appendChild(t); info.appendChild(m); b.appendChild(info);
+    b.addEventListener('click', () => openProject(p.id));
+    pl.appendChild(b);
+  });
+  const il = $('incidents');
+  il.innerHTML = '';
+  incidents.forEach(inc => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'incident';
+    const ico = document.createElement('div'); ico.className = 'ico'; ico.textContent = inc.icon;
+    const info = document.createElement('div');
+    const t = document.createElement('div'); t.className = 't'; t.textContent = inc.title;
+    const m = document.createElement('div'); m.className = 'm'; m.textContent = inc.subtitle;
+    const tags = document.createElement('div'); tags.className = 'tags';
+    inc.tags.forEach(([text, kind]) => { const s = document.createElement('span'); s.className = 'tag ' + kind; s.textContent = text; tags.appendChild(s); });
+    info.appendChild(t); info.appendChild(m); info.appendChild(tags);
+    b.appendChild(ico); b.appendChild(info);
+    b.addEventListener('click', async () => {
+      if (!confirm(`Start a video on "${inc.title}"? Claude will write the script from the NTSB report.`)) return;
+      b.disabled = true;
+      try {
+        const { id } = await api('/api/longform/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ incident_id: inc.id }) });
+        openProject(id);
+      } catch (e) { alert(e.message); } finally { b.disabled = false; }
+    });
+    il.appendChild(b);
+  });
+}
+
+$('custom-url-btn').addEventListener('click', async () => {
+  const url = $('custom-url').value.trim();
+  if (!url) { $('custom-status').textContent = 'Paste the link to the report PDF first.'; return; }
+  try {
+    const { id } = await api('/api/longform/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ report_url: url, title: $('custom-title').value }) });
+    openProject(id);
+  } catch (e) { $('custom-status').textContent = e.message; }
+});
+
+$('custom-pdf-btn').addEventListener('click', async () => {
+  const f = $('custom-pdf').files[0];
+  if (!f) { $('custom-status').textContent = 'Choose the report PDF first.'; return; }
+  $('custom-status').textContent = 'Uploading…';
+  try {
+    const { id } = await api(`/api/longform/projects/upload-report?title=${encodeURIComponent($('custom-title').value)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: f });
+    $('custom-status').textContent = '';
+    openProject(id);
+  } catch (e) { $('custom-status').textContent = e.message; }
+});
+
+// ---------- project view ----------
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+async function openProject(id) {
+  history.replaceState(null, '', `/long-form?v=${encodeURIComponent(id)}`);
+  $('list-view').style.display = 'none';
+  $('project-view').style.display = 'block';
+  scriptDirty = false;
+  lastResult = null;
+  await loadProject(id, true);
+  // Open the script for reading/editing until recording starts; after
+  // that the recorder is what matters, so keep the long script folded.
+  if (project) $('script-details').open = !(project.scenes || []).some(s => s.take);
+}
+
+async function loadProject(id, resetIndex) {
+  try {
+    project = await api(`/api/longform/projects/${encodeURIComponent(id)}`);
+  } catch (e) { alert(e.message); showList(); return; }
+  if (resetIndex) {
+    const firstTodo = (project.scenes || []).findIndex(s => !sceneReady(s));
+    recIndex = firstTodo === -1 ? 0 : firstTodo;
+  }
+  render();
+  stopPolling();
+  if (project.status === 'writing') pollTimer = setInterval(() => loadProject(project.id, true), 3000);
+}
+
+function render() {
+  const p = project;
+  const scenes = p.scenes || [];
+  $('p-title').textContent = (p.incident || {}).title || 'Untitled';
+  $('p-sub').textContent = (p.incident || {}).subtitle || '';
+  const ready = scenes.filter(sceneReady).length;
+  const hasScript = scenes.length > 0 && p.status !== 'writing';
+  const steps = [
+    ['1 Script', hasScript ? 'done' : 'on'],
+    ['2 Record', !hasScript ? '' : ready === scenes.length ? 'done' : 'on'],
+    ['3 Narration', p.narration ? 'done' : (hasScript && ready === scenes.length ? 'on' : '')],
+    ['4 Visuals & render (next update)', ''],
+  ];
+  $('steps').innerHTML = '';
+  steps.forEach(([t, cls]) => { const s = document.createElement('span'); s.textContent = t + (cls === 'done' ? ' ✓' : ''); if (cls) s.className = cls; $('steps').appendChild(s); });
+
+  const st = $('p-status');
+  if (p.status === 'writing') {
+    st.style.display = 'block'; st.className = 'status-box';
+    st.textContent = '⏳ ' + (p.message || 'Writing the script…');
+  } else if (p.status === 'error') {
+    st.style.display = 'block'; st.className = 'status-box err';
+    st.textContent = '⚠️ ' + (p.error || 'Something went wrong.') + ' Use Rewrite script to try again.';
+  } else { st.style.display = 'none'; }
+
+  $('script-section').style.display = (hasScript || p.status === 'error') ? 'block' : 'none';
+  $('record-section').style.display = hasScript ? 'block' : 'none';
+  $('narration-section').style.display = hasScript ? 'block' : 'none';
+  if (!scriptDirty) renderScript();
+  if (hasScript) { renderRecorder(); renderNarration(); }
+}
+
+function renderScript() {
+  const scenes = project.scenes || [];
+  const words = scenes.reduce((n, s) => n + s.narration.split(' ').length, 0);
+  $('script-meta').innerHTML = '';
+  [[`~${(words / 150).toFixed(1)} min`, ' read'], [String(words), ' words'], [String(scenes.length), ' scenes']].forEach(([b, t]) => {
+    const s = document.createElement('span'); const bb = document.createElement('b'); bb.textContent = b; s.appendChild(bb); s.appendChild(document.createTextNode(t)); $('script-meta').appendChild(s);
+  });
+  const wrap = $('scenes');
+  wrap.innerHTML = '';
+  scenes.forEach((s, i) => {
+    const row = document.createElement('div'); row.className = 'scene';
+    const num = document.createElement('div'); num.className = 'num'; num.textContent = i + 1;
+    const body = document.createElement('div');
+    const ta = document.createElement('textarea'); ta.value = s.narration; ta.dataset.i = i;
+    ta.addEventListener('input', () => { scriptDirty = true; $('save-script').disabled = false; });
+    const vr = document.createElement('div'); vr.className = 'vis-row';
+    const sel = document.createElement('select'); sel.dataset.i = i;
+    VISUALS.forEach(([v, label]) => { const o = document.createElement('option'); o.value = v; o.textContent = label; if (v === s.visual) o.selected = true; sel.appendChild(o); });
+    sel.addEventListener('change', () => { scriptDirty = true; $('save-script').disabled = false; });
+    const note = document.createElement('span'); note.className = 'vnote'; note.textContent = s.visual_note || ''; note.dataset.note = s.visual_note || '';
+    const badge = document.createElement('span'); badge.className = 'rec-badge';
+    badge.textContent = sceneReady(s) ? '✅ recorded' : sceneFlagged(s) ? '⚠️ retake' : '';
+    vr.appendChild(sel); vr.appendChild(note); vr.appendChild(badge);
+    body.appendChild(ta); body.appendChild(vr);
+    row.appendChild(num); row.appendChild(body);
+    wrap.appendChild(row);
+  });
+  $('save-script').disabled = true;
+}
+
+$('save-script').addEventListener('click', async () => {
+  const rows = [...$('scenes').querySelectorAll('.scene')];
+  const scenes = rows.map(r => ({
+    narration: r.querySelector('textarea').value,
+    visual: r.querySelector('select').value,
+    visual_note: r.querySelector('.vnote').dataset.note || '',
+  }));
+  $('save-script').disabled = true;
+  try {
+    project = await api(`/api/longform/projects/${project.id}/scenes`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes }) });
+    scriptDirty = false;
+    if (recIndex >= project.scenes.length) recIndex = 0;
+    render();
+  } catch (e) { alert(e.message); $('save-script').disabled = false; }
+});
+
+$('rewrite-script').addEventListener('click', async () => {
+  if (!confirm('Have Claude write a fresh script? Your edits and any recorded scenes will be replaced.')) return;
+  try {
+    await api(`/api/longform/projects/${project.id}/rewrite`, { method: 'POST' });
+    scriptDirty = false;
+    loadProject(project.id, true);
+  } catch (e) { alert(e.message); }
+});
+
+// ---------- recorder ----------
+function renderRecorder() {
+  const scenes = project.scenes;
+  if (recIndex >= scenes.length) recIndex = scenes.length - 1;
+  const chips = $('chips');
+  chips.innerHTML = '';
+  scenes.forEach((s, i) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = String(i + 1);
+    b.className = (sceneReady(s) ? 'ready' : sceneFlagged(s) ? 'flag' : '') + (i === recIndex ? ' cur' : '');
+    b.title = sceneReady(s) ? 'Recorded' : sceneFlagged(s) ? 'Needs a retake' : 'Not recorded yet';
+    b.addEventListener('click', () => { if (recorder) return; recIndex = i; lastResult = null; renderRecorder(); });
+    chips.appendChild(b);
+  });
+  const s = scenes[recIndex];
+  const take = s.take || {};
+  const missed = new Set(sceneFlagged(s) ? (take.missed || []) : []);
+  const pr = $('prompter');
+  pr.innerHTML = '';
+  const label = document.createElement('div'); label.className = 'label';
+  label.textContent = `Scene ${recIndex + 1} of ${scenes.length}`;
+  pr.appendChild(label);
+  s.narration.split(' ').forEach((w, i) => {
+    const span = document.createElement('span');
+    span.textContent = w + ' ';
+    if (missed.has(i)) span.className = 'miss';
+    pr.appendChild(span);
+  });
+  const rb = $('rec-btn');
+  if (!recorder) {
+    rb.textContent = sceneFlagged(s) ? `🎙 Read scene ${recIndex + 1} again` : sceneReady(s) ? `🎙 Re-record scene ${recIndex + 1}` : `🎙 Record scene ${recIndex + 1}`;
+    rb.className = '';
+  }
+  const res = $('take-result');
+  const show = lastResult || (take.file ? take : null);
+  if (show && !recorder) {
+    res.style.display = 'block';
+    const good = show.ok || show.kept;
+    res.className = 'take-result ' + (good ? 'ok' : 'bad');
+    res.textContent = good ? (show.kept && !show.ok ? '✅ Kept as recorded.' : '✅ ' + (show.message || 'Sounds right.')) : '⚠️ ' + show.message;
+    if (show.heard) { const h = document.createElement('span'); h.className = 'heard'; h.textContent = 'Heard: ' + show.heard; res.appendChild(h); }
+  } else if (!recorder) { res.style.display = 'none'; }
+  $('play-take').style.display = take.file ? 'inline-block' : 'none';
+  $('keep-take').style.display = sceneFlagged(s) ? 'inline-block' : 'none';
+  $('prev-scene').disabled = recIndex === 0 || !!recorder;
+  $('next-scene').disabled = recIndex === scenes.length - 1 || !!recorder;
+}
+
+function pickMime() {
+  const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+  return opts.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+}
+
+async function startRecording() {
+  if (!navigator.mediaDevices || !window.MediaRecorder) { alert("This browser can’t record audio. Try Chrome or Safari."); return; }
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (e) { alert('Microphone access was blocked. Allow it for this site and try again.'); return; }
+  const mime = pickMime();
+  recorder = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined);
+  recChunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onstop = uploadTake;
+  recorder.start();
+  recStarted = Date.now();
+  lastResult = null;
+  $('take-result').style.display = 'none';
+  const rb = $('rec-btn');
+  rb.textContent = '⏹ Stop and check';
+  rb.className = 'recording';
+  $('rec-timer').textContent = '0:00';
+  recTick = setInterval(() => { $('rec-timer').textContent = fmtTime((Date.now() - recStarted) / 1000); }, 500);
+  renderRecorder();
+}
+
+function stopRecording() {
+  if (!recorder) return;
+  clearInterval(recTick);
+  recorder.stop();
+  recStream.getTracks().forEach(t => t.stop());
+}
+
+async function uploadTake() {
+  const idx = recIndex;
+  const type = (recorder && recorder.mimeType) || recChunks[0]?.type || 'audio/webm';
+  const blob = new Blob(recChunks, { type });
+  recorder = null;
+  $('rec-timer').textContent = '';
+  const rb = $('rec-btn');
+  rb.disabled = true;
+  rb.className = '';
+  rb.textContent = 'Checking…';
+  const res = $('take-result');
+  res.style.display = 'block';
+  res.className = 'take-result wait';
+  res.textContent = '👂 Listening back to your take…';
+  try {
+    const { take } = await api(`/api/longform/projects/${project.id}/scenes/${idx}/take`, {
+      method: 'POST', headers: { 'Content-Type': type.split(';')[0] }, body: blob,
+    });
+    lastResult = take;
+    project.scenes[idx].take = take;
+    project.narration = null;
+    rb.disabled = false;
+    render();
+    if (take.ok) {
+      const next = project.scenes.findIndex((s, i) => i > idx && !sceneReady(s));
+      if (next !== -1) setTimeout(() => { if (!recorder && recIndex === idx) { recIndex = next; lastResult = null; renderRecorder(); } }, 1500);
+    }
+  } catch (e) {
+    rb.disabled = false;
+    lastResult = null;
+    renderRecorder();
+    res.style.display = 'block';
+    res.className = 'take-result bad';
+    res.textContent = '⚠️ ' + e.message;
+  }
+}
+
+$('rec-btn').addEventListener('click', () => { if (recorder) stopRecording(); else startRecording(); });
+$('prev-scene').addEventListener('click', () => { if (recIndex > 0) { recIndex--; lastResult = null; renderRecorder(); } });
+$('next-scene').addEventListener('click', () => { if (recIndex < project.scenes.length - 1) { recIndex++; lastResult = null; renderRecorder(); } });
+$('play-take').addEventListener('click', () => {
+  const a = $('take-audio');
+  a.src = `/api/longform/projects/${project.id}/scenes/${recIndex}/take?t=${Date.now()}`;
+  a.play();
+});
+$('keep-take').addEventListener('click', async () => {
+  try {
+    project = await api(`/api/longform/projects/${project.id}/scenes/${recIndex}/keep`, { method: 'POST' });
+    lastResult = null;
+    render();
+  } catch (e) { alert(e.message); }
+});
+
+// ---------- narration ----------
+function renderNarration() {
+  const scenes = project.scenes;
+  const ready = scenes.filter(sceneReady).length;
+  const all = ready === scenes.length;
+  $('build-narration').disabled = !all;
+  $('narration-hint').textContent = all
+    ? (project.narration ? `Narration ready: ${fmtTime(project.narration.duration)} long.` : 'Every scene is recorded. Join them into one narration track.')
+    : `${ready} of ${scenes.length} scenes recorded. Record the rest to continue.`;
+  const out = $('narration-out');
+  if (project.narration) {
+    out.style.display = 'block';
+    const src = `/api/longform/projects/${project.id}/narration?t=${Math.round(project.narration.built_at || 0)}`;
+    if ($('narration-audio').getAttribute('src') !== src) $('narration-audio').setAttribute('src', src);
+    $('narration-dl').href = src;
+    $('build-narration').textContent = '🎧 Join again';
+  } else {
+    out.style.display = 'none';
+    $('build-narration').textContent = '🎧 Join into one narration';
+  }
+}
+
+$('build-narration').addEventListener('click', async () => {
+  const b = $('build-narration');
+  b.disabled = true;
+  b.textContent = 'Joining…';
+  try {
+    project = await api(`/api/longform/projects/${project.id}/narration`, { method: 'POST' });
+    render();
+  } catch (e) { alert(e.message); render(); }
+});
+
+$('delete-project').addEventListener('click', async () => {
+  if (!confirm("Delete this video, its script and every recorded take? This can’t be undone.")) return;
+  try { await api(`/api/longform/projects/${project.id}`, { method: 'DELETE' }); showList(); } catch (e) { alert(e.message); }
+});
+$('to-list').addEventListener('click', () => { if (recorder) stopRecording(); showList(); });
+
+const startId = new URLSearchParams(location.search).get('v');
+if (startId) openProject(startId); else showList();
 </script>
 </body>
 </html>
