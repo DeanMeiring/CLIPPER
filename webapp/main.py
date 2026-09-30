@@ -245,6 +245,10 @@ class JobRequest(BaseModel):
     # The channel mascot in the corner and the channel name stamped beside it
     # for the first few seconds (captions.brand_dialogues).
     branding: bool = True
+    # Render every clip as the whole scene (reframe.LetterboxLayout) instead
+    # of auto-detecting a facecam. Any clip can still be switched to a
+    # facecam split afterwards with the manual box-picker.
+    irl_layout: bool = True
     # Which tracked-streamer list / YouTube account / on-clip brand this job
     # belongs to (see CHANNEL_PROFILES). Defaults to the original channel so
     # every existing client that doesn't send this keeps working unchanged.
@@ -428,7 +432,7 @@ def _run_job(job_id: str) -> None:
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     profile = _profile_or_default(req.channel_profile)
     _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
-         channel_profile=profile)
+         channel_profile=profile, irl_layout=req.irl_layout)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -528,7 +532,7 @@ def _run_job(job_id: str) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, render_base, [],
         hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
-        channel_profile=profile,
+        channel_profile=profile, irl_layout=req.irl_layout,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
@@ -660,7 +664,7 @@ def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, tea
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
     hook_text: bool = True, pacing: bool = True, teaser: bool = False, branding: bool = True,
-    channel_profile: str = DEFAULT_CHANNEL_PROFILE,
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE, irl_layout: bool = True,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -671,7 +675,8 @@ def _render_all(
     control the edits in clipper/edit_plan.py; branding adds the channel
     mascot and name stamp -- channel_profile picks *which* channel's name/
     mascot colour (see CHANNEL_PROFILES), so a Spanish-channel job doesn't
-    get stamped with the main channel's name."""
+    get stamped with the main channel's name. irl_layout renders every clip
+    as the whole scene; off, each clip's facecam is auto-detected."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
     profile_cfg = CHANNEL_PROFILES.get(channel_profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
@@ -685,7 +690,10 @@ def _render_all(
              message=f'Rendering clip {out_index}/{start_index + len(render_items)}: "{pick.title}"')
         _progress(job_id, render_base + render_span * ((i - 1) / len(render_items)))
         clip_words = [w for w in words if w.start >= pick.start and w.end <= pick.end]
-        layout = compute_layout(video_path, pick.start, pick.end, target_w=1080, target_h=1920)
+        layout = (
+            LetterboxLayout() if irl_layout
+            else compute_layout(video_path, pick.start, pick.end, target_w=1080, target_h=1920)
+        )
         out_path = out_dir / f"clip_{out_index:02d}.mp4"
         ass_path = out_dir / f"_clip_{out_index:02d}.ass"
         burned_hook = clean_hook_text(pick.hook_caption) if hook_text else ""
@@ -832,6 +840,10 @@ def _render_all(
             # button "Adjust" (something's there, maybe wrong) rather than
             # "Add" (nothing's there) for a clip nobody has touched yet.
             "facecam_trusted": has_trusted_facecam,
+            # Rendered as the whole scene -- by default, or because a wide
+            # multi-person shot was detected. The UI offers "switch to
+            # facecam" for these.
+            "is_irl_scene": isinstance(final_layout, LetterboxLayout),
             # The frame the manual box-picker draws on. Always saved now
             # (see above) so any clip's facecam can be overridden by hand,
             # not just ones the pipeline itself flagged as uncertain.
@@ -1257,6 +1269,9 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # it's the channel's look now, not a per-job experiment.
         branding = job.get("branding", True)
         channel_profile = job.get("channel_profile", DEFAULT_CHANNEL_PROFILE)
+        # Older jobs predate the flag; their new clips follow the current
+        # default rather than the old auto-detected facecam behaviour.
+        irl_layout = job.get("irl_layout", True)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1343,7 +1358,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, 0.15, existing_clips,
         hook_text=hook_text, pacing=pacing, teaser=teaser, branding=branding,
-        channel_profile=channel_profile,
+        channel_profile=channel_profile, irl_layout=irl_layout,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
@@ -1400,6 +1415,7 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
                     c["facecam_uncertain"] = False
                     c["facecam_manual"] = True
                     c["facecam_boxes"] = [list(b) for b in boxes]
+                    c["is_irl_scene"] = False
         _persist(job_id)
 
     _progress(job_id, 1.0)
@@ -4222,6 +4238,11 @@ __NAV_LINKS__
 </div>
 
 <div class="checkbox-row">
+  <input id="irl_layout" type="checkbox" checked>
+  <label for="irl_layout">IRL layout (whole scene)<div class="hint">Shows the whole stream in every clip instead of splitting out the facecam. Any clip can be switched to facecam afterwards with its Switch to facecam button. Untick to auto-detect the facecam instead.</div></label>
+</div>
+
+<div class="checkbox-row">
   <input id="hook_text" type="checkbox" checked>
   <label for="hook_text">Hook text on screen<div class="hint">Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.</div></label>
 </div>
@@ -4323,7 +4344,7 @@ __NAV_LINKS__
     <div class="modal-actions" style="margin-top:12px">
       <button id="facecam-go-btn" type="button">Re-render with these boxes</button>
       <button id="facecam-clear-btn" type="button" class="ghost">Clear boxes</button>
-      <button id="facecam-irl-btn" type="button" class="ghost">This isn't a facecam -- it's an IRL scene</button>
+      <button id="facecam-irl-btn" type="button" class="ghost">🎬 Use the IRL layout (whole scene)</button>
       <button id="facecam-cancel-btn" type="button" class="ghost">Skip for now</button>
     </div>
   </div>
@@ -4819,6 +4840,7 @@ async function submitJob() {
     pacing: document.getElementById('pacing').checked,
     teaser: document.getElementById('teaser').checked,
     branding: document.getElementById('branding').checked,
+    irl_layout: document.getElementById('irl_layout').checked,
     channel_profile: currentProfile,
   };
   const resp = await fetch('/api/jobs', {
@@ -4956,9 +4978,10 @@ async function openFacecamModal(jobId, clip, othersMissing) {
   facecamDrawStart = null;
   facecamPendingSourceBoxes = clip.facecam_boxes || lastFacecamSourceBoxes;
   let why;
+  facecamIrlBtn.style.display = clip.is_irl_scene ? 'none' : '';
   if (clip.is_irl_scene) {
-    facecamModalTitle.textContent = `IRL scene -- "${clip.title}"`;
-    why = "This clip is set to render as a wide IRL shot, no facecam. Draw a box below if it actually does have one.";
+    facecamModalTitle.textContent = `Switch to facecam -- "${clip.title}"`;
+    why = "This clip shows the whole scene (IRL layout). To split out a facecam instead, draw a box around it below.";
   } else if (clip.facecam_uncertain) {
     facecamModalTitle.textContent = `Fix the facecam position -- "${clip.title}"`;
     why = 'Detection found a facecam here but the automatic check rejected where it landed, so this clip shipped without one.';
@@ -5172,7 +5195,7 @@ facecamIrlBtn.addEventListener('click', async () => {
     attachToJob(jobId);
   } finally {
     facecamIrlBtn.disabled = false;
-    facecamIrlBtn.textContent = "This isn't a facecam -- it's an IRL scene";
+    facecamIrlBtn.textContent = "🎬 Use the IRL layout (whole scene)";
   }
 });
 
@@ -5648,7 +5671,7 @@ async function poll(jobId) {
         // a modal that can only ever fail.
         const fixBtn = document.createElement('button');
         fixBtn.type = 'button';
-        fixBtn.textContent = c.is_irl_scene ? '🎬 IRL scene'
+        fixBtn.textContent = c.is_irl_scene ? '🎯 Switch to facecam'
           : c.facecam_uncertain ? '🎯 Fix facecam'
           : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam' : '🎯 Add facecam';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
@@ -5842,6 +5865,9 @@ _UI_STRINGS_ES: list = [
     (">Channel mascot + name<", ">Mascota + nombre del canal<"),
     ("Puts the channel's mascot in the top-left corner of every clip, with the channel name next to it for the first 3 seconds, so viewers start to recognise the channel.",
      "Pone la mascota del canal en la esquina superior izquierda de cada clip, con el nombre del canal al lado durante los primeros 3 segundos, para que la gente empiece a reconocer el canal."),
+    (">IRL layout (whole scene)<", ">Formato IRL (escena completa)<"),
+    ("Shows the whole stream in every clip instead of splitting out the facecam. Any clip can be switched to facecam afterwards with its Switch to facecam button. Untick to auto-detect the facecam instead.",
+     "Muestra el directo completo en cada clip en vez de separar la facecam. Puedes pasar cualquier clip a facecam después con su botón Cambiar a facecam. Desmárcalo para detectar la facecam automáticamente."),
     (">Hook text on screen<", ">Texto gancho en pantalla<"),
     ("Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.",
      "Pone una frase corta arriba de cada clip durante sus primeros 3 segundos, diciendo por qué seguir mirando. Es justo cuando la gente decide si desliza o no."),
@@ -5915,11 +5941,11 @@ _UI_STRINGS_ES: list = [
     ('alt="Source frame"', 'alt="Fotograma original"'),
     ("Re-render with these boxes", "Volver a renderizar con estos recuadros"),
     (">Clear boxes<", ">Borrar recuadros<"),
-    ("This isn't a facecam -- it's an IRL scene", "No es una facecam: es una escena IRL"),
+    ("🎬 Use the IRL layout (whole scene)", "🎬 Usar formato IRL (escena completa)"),
     ("Skip for now", "Omitir por ahora"),
-    ('IRL scene -- "${clip.title}"', 'Escena IRL — "${clip.title}"'),
-    ("This clip is set to render as a wide IRL shot, no facecam. Draw a box below if it actually does have one.",
-     "Este clip se renderiza como plano IRL abierto, sin facecam. Dibuja un recuadro abajo si en realidad sí tiene una."),
+    ('Switch to facecam -- "${clip.title}"', 'Cambiar a facecam — "${clip.title}"'),
+    ("This clip shows the whole scene (IRL layout). To split out a facecam instead, draw a box around it below.",
+     "Este clip muestra la escena completa (formato IRL). Para separar la facecam, dibuja un recuadro a su alrededor abajo."),
     ('Fix the facecam position -- "${clip.title}"', 'Corrige la posición de la facecam — "${clip.title}"'),
     ("Detection found a facecam here but the automatic check rejected where it landed, so this clip shipped without one.",
      "Se detectó una facecam aquí, pero la comprobación automática rechazó dónde quedó, así que este clip salió sin ella."),
@@ -6012,7 +6038,7 @@ _UI_STRINGS_ES: list = [
     ("'Copy description'", "'Copiar descripción'"),
     ("'Copied!'", "'¡Copiado!'"),
     ("Download ${c.file}", "Descargar ${c.file}"),
-    ("🎬 IRL scene", "🎬 Escena IRL"),
+    ("🎯 Switch to facecam", "🎯 Cambiar a facecam"),
     ("🎯 Fix facecam", "🎯 Corregir facecam"),
     ("🎯 Adjust facecam", "🎯 Ajustar facecam"),
     ("🎯 Add facecam", "🎯 Añadir facecam"),
