@@ -287,6 +287,15 @@ def beats_context(project_dir: Path, library: dict, brand: str):
                dossier.get("articles") or [], brand)
 
 
+def scene_output(project_dir: Path, scene: dict, index: int, duration: float, library: dict, brand: str,
+                 bg: Optional[Tuple[str, float]] = None) -> Path:
+    """Where a scene's finished segment lives; the name changes whenever
+    anything that goes into the scene changes, so an existing file is
+    exactly this scene as it is now."""
+    clip = library.get(scene.get("clip") or "")
+    return project_dir / "render" / f"scene{index:02d}_{_scene_key(scene, duration, brand, clip and clip['file'], bg)}.mp4"
+
+
 def render_scene(project_dir: Path, scene: dict, index: int, duration: float, library: dict, brand: str,
                  chapter_no: int, bg: Optional[Tuple[str, float]] = None) -> Path:
     """One scene as a finished segment. `bg` is (clip id, start) of the
@@ -298,7 +307,7 @@ def render_scene(project_dir: Path, scene: dict, index: int, duration: float, li
     rdir.mkdir(parents=True, exist_ok=True)
     clip = library.get(scene.get("clip") or "")
     clip_path = project_dir / clip["file"] if clip else None
-    out = rdir / f"scene{index:02d}_{_scene_key(scene, duration, brand, clip and clip['file'], bg)}.mp4"
+    out = scene_output(project_dir, scene, index, duration, library, brand, bg)
     if out.exists():
         return out
     tmp = out.with_name(f".{out.name}")
@@ -374,28 +383,49 @@ def preview_still(project_dir: Path, scene: dict, library: dict, brand: str, out
 MUSIC_LEVELS = {"quiet": -37.0, "normal": -34.0, "loud": -31.0}
 
 
-def render_documentary(
-    project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]], brand: str,
-    music: Optional[Path], on_progress: Callable[[float, str], None] = lambda p, m: None,
-    music_level: str = "normal",
-) -> Tuple[Path, List[float], float]:
-    """Render every scene, add the end card, join, and lay optional music
-    under it. Returns (final video, each scene's start time, total length)."""
-    rdir = project_dir / "render"
-    rdir.mkdir(parents=True, exist_ok=True)
+def _scene_plan(scenes: List[dict], library: dict, take_durations: List[Optional[float]]) -> List[Tuple[float, int, Optional[Tuple[str, float]]]]:
+    """(duration, chapter number, chapter-card background) for each scene."""
     n = len(scenes)
-    parts, starts, t, titles_seen = [], [], 0.0, 0
+    out, titles_seen = [], 0
     for i, sc in enumerate(scenes):
-        on_progress(0.03 + 0.85 * i / max(n, 1), f"Rendering scene {i + 1} of {n}...")
-        chapter = 0
+        chapter, bg = 0, None
         if sc.get("kind") == "title":
             titles_seen += 1
             chapter = titles_seen - 1  # the first card is the episode title, then Chapter 1, 2, ...
-        dur = scene_duration(sc, take_durations[i], last=(i == n - 1))
-        bg = None
-        if sc.get("kind") == "title":
             nxt = next((s for s in scenes[i + 1:] if s.get("clip") in library), None)
             bg = (nxt["clip"], float(nxt.get("start") or 0)) if nxt else None
+        out.append((scene_duration(sc, take_durations[i], last=(i == n - 1)), chapter, bg))
+    return out
+
+
+def changed_scenes(project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]],
+                   brand: str) -> List[int]:
+    """Scene numbers (1-based) that have no finished segment for how they
+    are now -- i.e. what a render would have to redo. Empty means a render
+    only redoes the final mix (music), which takes a minute or two."""
+    return [i + 1 for i, (sc, (dur, _c, bg)) in enumerate(zip(scenes, _scene_plan(scenes, library, take_durations)))
+            if not scene_output(project_dir, sc, i, dur, library, brand, bg).exists()]
+
+
+def render_documentary(
+    project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]], brand: str,
+    music: Optional[Path], on_progress: Callable[[float, str], None] = lambda p, m: None,
+    music_level: str = "normal", music_only: bool = False,
+) -> Tuple[Path, List[float], float]:
+    """Render every scene, add the end card, join, and lay optional music
+    under it. Returns (final video, each scene's start time, total length).
+    music_only: reuse the finished scenes and only redo the join and the
+    music -- refuses (instead of quietly rendering) if a scene changed."""
+    rdir = project_dir / "render"
+    rdir.mkdir(parents=True, exist_ok=True)
+    if music_only:
+        changed = changed_scenes(project_dir, scenes, library, take_durations, brand)
+        if changed:
+            raise RuntimeError("scenes " + ", ".join(map(str, changed)) + " changed since the last render -- use Render again")
+    n = len(scenes)
+    parts, starts, t = [], [], 0.0
+    for i, (sc, (dur, chapter, bg)) in enumerate(zip(scenes, _scene_plan(scenes, library, take_durations))):
+        on_progress(0.03 + 0.85 * i / max(n, 1), "Reusing the finished scenes..." if music_only else f"Rendering scene {i + 1} of {n}...")
         path = render_scene(project_dir, sc, i, dur, library, brand, chapter, bg)
         real = media_duration(path)
         parts.append(path)
