@@ -5,125 +5,133 @@ video (YouTube link, Twitch VOD, or a local file) into a batch of short,
 vertical (9:16), captioned highlight clips — the kind of tool Opus Clip /
 Vizard / Klap sell as a subscription, except this one runs on your own
 machine (or your own Railway deployment), for the cost of a few cents of
-Claude API usage per video. Built to run my own clipping workflow — I post
-a couple of clips a day, picked and rendered through this instead of a
-paid SaaS.
+Claude API usage per video. Built to run my own clipping workflow for the
+**Caught On Stream** channel — I post a couple of clips a day, picked and
+rendered through this instead of a paid SaaS.
 
 Usable two ways: as a **command-line tool** (`clipper/`) for one-off local
-runs, or as a small **web app** (`webapp/`) — see
-[Web app (Railway)](#web-app-railway) below — that wraps the whole
-pipeline plus a few extra features (weekly/per-game recaps, channel
-analytics, competitor discovery, direct YouTube upload) behind a browser
-UI you can deploy and check from your phone.
+runs, or as a **web app** (`webapp/`, see [Web app](#web-app)) that wraps
+the whole pipeline behind a browser UI you can deploy to Railway and use
+from your phone. The web app adds finding what to clip, uploading straight
+to YouTube, channel analytics that feed back into how clips are picked, and
+a long-form documentary series tool.
 
 ## Key features
 
 - **AI clip selection** — Claude reads the full transcript and picks the
   most "clippable" moments (funny lines, hot takes, payoffs, hooks),
-  steerable with a `--focus` prompt, and explains *why* it picked each one.
-- **Smart reframing** — face detection (OpenCV, with an optional Claude
-  vision fallback for tricky facecam overlays) picks a 9:16 crop, and
-  splits gameplay-plus-facecam footage into a stacked layout automatically.
-  In the web app, clips default to the IRL layout (the whole scene,
-  letterboxed) instead; each clip's "Switch to facecam" button opens a
-  box-picker for a facecam split, and unticking "IRL layout" brings back
-  automatic detection for a job.
-- **Karaoke-style burned-in captions** — word-by-word highlighted
-  subtitles rendered via ffmpeg/libass, not just a plain subtitle track.
-- **Long-form Twitch VOD support** — finds candidate highlight windows
-  from chat-activity spikes and existing viewer clips *before* downloading
-  anything, so an hours-long stream doesn't need to be fully fetched and
-  transcribed just to find the good parts.
-- **Weekly and per-game recap videos** — auto-assembles a landscape
-  countdown compilation of the week's best Twitch clips (across tracked
-  streamers, or across every streamer playing one game), with intro/outro
-  cards and rank badges.
-- **Channel insights & strategy** — a no-auth heuristic (public YouTube
-  Data API) or, with OAuth, real YouTube Analytics (day-of-week
-  performance, retention, traffic sources), plus a Claude-written
-  plain-language take on what to post more of.
-- **Competitor discovery** — finds other channels clipping the same
-  streamer and pulls their top-performing shorts' transcripts and loud
-  moments as comparison signal.
-- **One-click YouTube upload** and **auto-generated thumbnails** for any
-  rendered clip, plus optional **Telegram notifications** when a job
-  finishes.
+  steerable with a focus prompt, and explains *why* it picked each one,
+  with a score and a breakdown (hook, controversy, reaction, payoff, makes
+  sense alone). Cuts land exactly on word boundaries.
+- **It learns from your channel** — the web app reads your channel's real
+  YouTube retention curves and view counts, compares what your posted
+  Shorts had in common, and feeds those findings (plus a saved AI strategy
+  overview) back into how the next clips are picked and titled.
+- **IRL layout by default** — every clip shows the whole scene,
+  letterboxed into 9:16. Any clip can be switched to a facecam-over-gameplay
+  split with a box-picker (once per job is enough: "apply to the other
+  clips"), or you can untick "IRL layout" to have facecams auto-detected
+  (OpenCV face detection with a Claude-vision check).
+- **Karaoke-style burned-in captions** — word-by-word highlighted captions
+  (ffmpeg/libass), plus a hook line at the top for the first 3 seconds, the
+  channel mascot and name, and quiet pauses cut out.
+- **Long Twitch VODs** — finds candidate highlight windows from chat
+  spikes and existing viewer clips *before* downloading anything, so an
+  hours-long stream doesn't need to be fully fetched and transcribed.
+- **Finding what to clip** — tracked streamers' latest VODs and uploads,
+  yesterday's VODs, what's trending live on Twitch, suggested creators, a
+  creator search, and an AI "which VOD to clip today" recommendation.
+- **Posting** — one-click upload to YouTube as a Short (with a trim step),
+  generated titles/descriptions, downloadable thumbnails (a real frame plus
+  one bold line of text) and a separate spoiler-style "hook line" pass.
+- **Long-form documentaries** — "The Story Of <streamer>", a bi-weekly
+  series: research, a Claude-written script, you record the narration
+  scene by scene, keyword visuals, render, upload, and two promo Shorts.
+- **Telegram notifications** when a job finishes, plus a Sunday reminder
+  to post.
 
-## What it does
+## What it does (the clip pipeline)
 
-1. Downloads the source video (`yt-dlp`) — or just points at a local file
-   you already have — and grabs YouTube's auto-captions if available.
-2. Gets a transcript with word-level timing (from the captions, or from
-   local Whisper if you pass `--whisper` / the source has no captions).
-3. Sends the transcript to Claude, which picks the N most "clippable"
-   moments (funny lines, hot takes, payoffs, hooks — you can steer this
-   with `--focus`) and returns start/end times, a title, and a hook
-   caption for each.
-4. For each picked moment: detects faces to choose a smart 9:16 crop
-   (falls back to a center crop if no face is found), builds burned-in
-   karaoke-style word-by-word captions, and renders the final clip with
+1. Downloads the source video (`yt-dlp`), or points at a local file, and
+   grabs YouTube's auto-captions if available. For a long Twitch VOD it
+   first scans chat replay and existing viewer clips for highlight
+   windows, then downloads only those.
+2. Gets a transcript with word-level timing (local Whisper by default in
+   the web app; YouTube's captions are the faster option).
+3. Scans the audio for loud moments (shouting, big reactions) as an extra
+   signal.
+4. Sends the transcript to Claude, which picks the N most clippable
+   moments and writes a title, a hook caption, an upload title and a
+   description for each. Its rough times are snapped to exact word
+   boundaries.
+5. For each moment: cuts quiet pauses (optional), picks the layout (IRL by
+   default), builds the burned-in captions, and renders the clip with
    ffmpeg.
-5. Writes all clips plus a `clips.json` (titles, timestamps, hook text,
-   why Claude picked each one) to your output folder.
+6. Writes the clips plus their metadata (titles, timestamps, hook text, why
+   Claude picked each one). The CLI writes a `clips.json`; the web app
+   keeps it with the job.
 
 ## Tech stack
 
-- **Python 3.9+** — `clipper/` (CLI + pipeline logic) and `webapp/`
-  (FastAPI web app), same codebase for both.
-- **[Claude](https://www.anthropic.com/claude)** (Anthropic API) — moment
-  selection, content-strategy summaries, and optional facecam
-  vision-detection fallback.
-- **yt-dlp** — YouTube/Twitch video + caption download.
-- **faster-whisper** — local speech-to-text fallback for word-level timing
-  when a source has no captions.
-- **OpenCV** — Haar-cascade face detection for the 9:16 crop/facecam split.
-- **ffmpeg** (via subprocess) — cutting, cropping, and burning in `.ass`
-  subtitles for every rendered clip.
-- **chat-downloader** — Twitch VOD chat replay, for highlight detection on
-  long streams.
-- **FastAPI + Uvicorn** — the web app, deployed as a **Docker** container
-  on **Railway**.
+- **Python 3.10+**: `clipper/` (CLI + pipeline) and `webapp/` (FastAPI),
+  one codebase for both.
+- **[Claude](https://www.anthropic.com/claude)** (Anthropic API): moment
+  selection, facecam checks, strategy overviews, hook lines, and the
+  long-form research, scripts and visual plans.
+- **yt-dlp** (with Deno for YouTube's signature challenge): video and
+  caption downloads.
+- **faster-whisper**: local speech-to-text with word-level timing.
+- **OpenCV**: face detection for automatic facecam layouts.
+- **ffmpeg** (via subprocess): cutting, cropping, burning in `.ass`
+  captions.
+- **Pillow**: long-form cards, captions and frames.
+- **chat-downloader**: Twitch VOD chat replay for highlight detection.
+- **pocket-tts** (Kyutai Pocket TTS, CPU PyTorch): the long-form "AI voice",
+  a clone of your own voice for patching narration lines.
+- **FastAPI + Uvicorn**: the web app, deployed as a **Docker** container on
+  **Railway**.
 
 ## Setup (Windows)
 
 You'll need three things installed once:
 
-1. **Python 3.9+** — https://www.python.org/downloads/ (tick "Add python.exe
-   to PATH" during install).
-2. **ffmpeg** — https://www.gyan.dev/ffmpeg/builds/ (grab the "essentials"
+1. **Python 3.10+**: https://www.python.org/downloads/ (tick "Add
+   python.exe to PATH" during install).
+2. **ffmpeg**: https://www.gyan.dev/ffmpeg/builds/ (grab the "essentials"
    build, unzip it, add the `bin` folder to your PATH). Confirm with
    `ffmpeg -version` in a new terminal.
-3. **This tool's Python dependencies**:
+3. **This tool's Python dependencies**, from the repo folder:
 
    ```
-   cd clipper
    pip install -r requirements.txt
    ```
 
    (or `pip install -e .` if you want the `clipper` command available
    globally instead of running it as `python -m clipper.cli`).
+   `requirements.txt` includes the long-form AI voice (`pocket-tts`, which
+   pulls in PyTorch). For CLI-only use, installing the other lines is
+   enough.
 
 ### Anthropic API key
 
 Clip selection is done by Claude, so you need an API key:
 
-1. Get one at https://console.anthropic.com/ (pay-as-you-go — this tool's
-   prompts are text-only and cheap, typically a few cents per video even
-   on long ones).
+1. Get one at https://console.anthropic.com/ (pay-as-you-go; the clip
+   prompts are text-only and cheap, typically a few cents per video).
 2. Set it as an environment variable before running:
 
    ```
    setx ANTHROPIC_API_KEY "sk-ant-your-key-here"
    ```
-   (close and reopen your terminal after `setx`, or just set it for the
-   current session with `set ANTHROPIC_API_KEY=sk-ant-...`)
+   (close and reopen your terminal after `setx`, or set it for the current
+   session only with `set ANTHROPIC_API_KEY=sk-ant-...`)
 
    Or copy `.env.example` to `.env`, fill in your key, and load it however
-   you prefer (e.g. `python-dotenv`, or just `set /p` it in a batch file).
+   you prefer.
 
-## Usage
+## Usage (command line)
 
-Basic — 5 clips from a YouTube video, using its own captions:
+Basic: 5 clips from a YouTube video, using its own captions:
 
 ```
 python -m clipper.cli "https://www.youtube.com/watch?v=XXXXXXXXXXX"
@@ -137,7 +145,7 @@ More options:
 ```
 python -m clipper.cli SOURCE [options]
 
-  SOURCE                  YouTube URL or path to a local video file
+  SOURCE                  YouTube/Twitch URL or path to a local video file
 
   -o, --out PATH          Output folder (default: ./clips)
   -n, --clips N           Number of clips to produce (default: 5)
@@ -145,11 +153,10 @@ python -m clipper.cli SOURCE [options]
   --max-len SECONDS       Maximum clip length (default: 90)
   --focus "TEXT"          Steer what Claude looks for,
                           e.g. --focus "funniest moments"
-                          e.g. --focus "moments that explain a concept simply"
   --whisper               Force local Whisper transcription instead of
                           YouTube's captions (slower, but works on videos
                           with no captions, and is more accurate)
-  --whisper-model SIZE     tiny / base / small (default) / medium / large-v3
+  --whisper-model SIZE    tiny / base / small (default) / medium / large-v3
                           -- bigger = more accurate, slower, more RAM
   --api-key KEY           Anthropic API key (defaults to ANTHROPIC_API_KEY)
   --width / --height      Output resolution (default: 1080x1920, i.e. 9:16)
@@ -159,88 +166,87 @@ python -m clipper.cli SOURCE [options]
 Examples:
 
 ```
-# Local file, 3 short punchy clips, no captions
+# Local file, 3 short clips, no captions
 python -m clipper.cli "C:\Videos\podcast_ep12.mp4" -n 3 --max-len 45 --no-captions
 
 # YouTube video with no captions -- use Whisper, look for funny bits
 python -m clipper.cli "https://youtu.be/XXXXXXXXXXX" --whisper --focus "funniest moments"
 ```
 
-## A note on whose videos to clip
+The CLI uses automatic layouts (face detection) and plain captions. The IRL
+default, pacing edits, branding, uploads and analytics are web-app features.
 
-This tool works the same way on your own uploads and on other people's
-public videos -- it's just software, it doesn't know the difference. The
-difference that matters is legal/platform, not technical: clipping your
-own content is obviously fine; clipping someone else's and re-publishing
-it can run into copyright and platform ToS issues depending on how much
-you use, how you use it (commentary/criticism/fair use vs. straight
-re-upload), and where you post it. Worth a quick gut-check per video
-before you publish, not before you experiment locally.
-
-## How it's organized (if you want to poke at it)
+## How it's organized
 
 ```
-clipper/
-  clipper/                    # core pipeline + CLI, importable on its own
-    download.py                # yt-dlp wrapper + caption fetch (incl. ranged downloads)
-    transcribe.py               # VTT parsing / Whisper fallback -> word-level timing
-    select_moments.py           # Claude call -> which parts to clip, and why
-    loud_moments.py              # loudness-spike detection, a secondary signal for selection
-    reframe.py                   # face detection -> smart 9:16 crop / facecam split layout
-    facecam_vision.py             # Claude-vision fallback for tricky facecam overlays
-    captions.py                    # word-level timing -> burned-in .ass karaoke captions
-    render.py                       # ffmpeg crop+scale+caption render
-    thumbnail.py                     # frame + burned caption -> downloadable thumbnail
-    cli.py                             # command-line entry point, ties it all together
-    highlights.py               # chat-spike + viewer-clip signals for long Twitch VODs
-    long_vod.py                  # long-VOD pipeline: candidate windows -> download -> select
-    trending.py                   # tracked streamers'/channels' latest content lookups
-    competitor_discovery.py        # find channels clipping a given streamer
-    competitor_content.py           # pull a competitor short's transcript + loud moments
-    weekly_recap.py              # cross-streamer weekly countdown recap render
-    game_recap.py                 # per-game weekly recap (reuses weekly_recap's pipeline)
-    channel_insights.py          # no-auth best-day-to-post heuristic (public Data API)
-    youtube_analytics.py          # real Analytics data for the OAuth-connected channel
-    youtube_oauth.py               # Google OAuth flow for the connected channel
-    channel_strategy.py             # Claude-written content-strategy summary
-    youtube_upload.py            # resumable upload of a rendered clip to YouTube
-    notify.py                     # Telegram notification on job completion
-  webapp/
-    main.py               # FastAPI app: job queue, all API routes, HTML pages
-  pyproject.toml
-  requirements.txt
-  .env.example
+clipper/                    # pipeline + CLI, importable on its own
+  cli.py                     # command-line entry point
+  download.py                # yt-dlp wrapper + captions (incl. ranged downloads)
+  transcribe.py              # captions / Whisper -> word-level timing
+  select_moments.py          # Claude: which parts to clip, and why
+  cut_points.py              # snap rough clip times to exact word boundaries
+  loud_moments.py            # loudness spikes, an extra selection signal
+  highlights.py              # chat-spike + viewer-clip signals for long Twitch VODs
+  long_vod.py                # long-VOD pipeline: candidate windows -> download -> select
+  edit_plan.py               # pacing: cut dead air, optional payoff teaser
+  reframe.py                 # layouts: IRL letterbox, face-detected crop, facecam split
+  facecam_vision.py          # Claude-vision check of facecam placement
+  captions.py                # burned-in .ass captions, hook text, mascot + name stamp
+  render.py                  # ffmpeg cut/crop/caption render, trim, hook-line overlay
+  hook_line.py               # spoiler-style flash hook line for a finished clip
+  thumbnail.py               # real frame + one bold line -> downloadable thumbnail
+  trending.py                # tracked streamers' latest content, trending live, VOD candidates
+  clip_registry.py           # every rendered clip, kept after its job is deleted
+  clip_features.py           # measurable traits of a clip (time to speech, pacing...)
+  clip_performance.py        # posted Shorts' real retention vs what the clips had in common
+  channel_insights.py        # no-auth channel snapshot + best-day-to-post heuristic
+  youtube_analytics.py       # real Analytics for the OAuth-connected channel
+  youtube_oauth.py           # Google OAuth flow for the connected channel
+  youtube_upload.py          # resumable upload of a clip (or long-form video) to YouTube
+  channel_strategy.py        # Claude-written strategy overview + "which VOD today"
+  competitor_discovery.py    # find channels clipping a given streamer
+  competitor_content.py      # what's in a competitor's top Shorts (transcript + loudness)
+  notify.py                  # Telegram notifications
+  documentary.py             # long-form: research + story for "The Story Of"
+  longform.py                # long-form: projects, scene-by-scene recording, misread check
+  longform_beats.py          # long-form: keyword visuals timed to the narration
+  longform_lessons.py        # long-form: editing lessons fed back into the prompts
+  longform_video.py          # long-form: rendering (Pillow frames into ffmpeg)
+  visual_sources.py          # long-form: free visuals (emoji, stock, CC0 photos, X posts)
+  voice_clone.py             # long-form: your cloned voice (Pocket TTS)
+  assets/                    # bundled emoji (Fluent Emoji 3D, MIT) and fonts (OFL)
+webapp/
+  main.py                    # FastAPI app: job queue, API routes, HTML pages
+Dockerfile
+pyproject.toml
+requirements.txt
+.env.example
 ```
 
-Each `clipper/` module works standalone too, if you ever want to script
-around just one piece of it (e.g. use `reframe.py` on its own to
-auto-crop existing clips you already made elsewhere).
+## Web app
 
-## Web app (Railway)
+`webapp/main.py` is a FastAPI app around the same pipeline: paste a video
+URL (or pick one it suggests), it downloads, transcribes, picks and renders
+in the background, and you review, download or upload the clips from the
+page. One job runs at a time; jobs are saved to disk, so they survive a
+restart.
 
-`webapp/main.py` is a small FastAPI wrapper around the same pipeline: paste
-a video URL in the browser, it downloads/transcribes/picks/renders in the
-background, and you download the resulting clips from the page. One job
-runs at a time.
+Deploy: push this repo to Railway (the `Dockerfile` installs ffmpeg, Deno,
+CPU-only PyTorch and the Python deps), set `ANTHROPIC_API_KEY`, mount a
+volume and point `CLIPPER_JOBS_DIR` at it, and generate a domain. "Sleep on
+idle" is safe to enable: while a job runs, the app pings its own `/healthz`
+so the container isn't put to sleep mid-render.
 
-Deploy: push this repo to Railway (the included `Dockerfile` installs
-ffmpeg and the Python deps), set `ANTHROPIC_API_KEY` as a service
-variable, and generate a domain. Enable "sleep on idle" in the Railway
-service settings if you want it to spin down between uses and wake on the
-next visit.
+**Password-protect it** (recommended for a public domain) by setting
+`APP_PASSWORD`. Every route except `/healthz` then requires HTTP Basic
+auth (any username, that password). Leave it unset for local dev.
 
-**Password-protect it** (recommended for a public Railway domain) by
-setting an `APP_PASSWORD` variable — every route except `/healthz` then
-requires HTTP Basic auth (any username, that password) before it'll run.
-Leave `APP_PASSWORD` unset for local dev to skip auth entirely.
-
-**YouTube downloads from a cloud IP** — Railway's IPs (like most datacenter
-IPs) regularly hit YouTube's "sign in to confirm you're not a bot" wall,
-which only real session cookies get past. If you hit that, export cookies
-from a logged-in browser (e.g. the "Get cookies.txt LOCALLY" extension) and
-set the file's contents as the `YTDLP_COOKIES` variable — it's written to
-a temp file and passed to yt-dlp automatically. (Or point `YTDLP_COOKIES_FILE`
-at a path already on disk, e.g. a mounted volume.)
+**YouTube downloads from a cloud IP**: datacenter IPs regularly hit
+YouTube's "sign in to confirm you're not a bot" wall, which only real
+session cookies get past. Export cookies from a logged-in browser (e.g. the
+"Get cookies.txt LOCALLY" extension) and paste the file's contents into the
+`YTDLP_COOKIES` variable, or point `YTDLP_COOKIES_FILE` at a file already
+on disk.
 
 Runs locally too:
 
@@ -249,102 +255,114 @@ pip install -r requirements.txt
 uvicorn webapp.main:app --reload
 ```
 
-### Other web app features
+### Pages
 
-Beyond the core "paste a link, get clips" flow, the web app also has:
+**Home (`/`)**: making clips.
 
-- **Weekly recap** — assembles a landscape, long-form countdown video of
-  the week's best Twitch clips across whichever streamers you track (see
-  `TRENDING_TWITCH_LOGINS` below), from weakest to biggest hit, with a
-  rank badge burned into each clip.
-- **Game recap** — the same idea, but across every streamer playing one
-  game, discovered directly from Twitch rather than only your tracked list.
-- **Competitor discovery** — search for a streamer and see which other
-  channels are actively clipping them, with each one's top short's
-  transcript and loudness signal pulled in as context.
-- **Upload to YouTube** — a button on any rendered clip that uploads it
-  straight to your connected channel via the Data API's resumable upload
-  (needs the same YouTube OAuth setup as Channel insights, below).
-- **Auto-generated thumbnails** — pulls a real frame from a clip and burns
-  one bold caption line over it.
-- **Telegram notifications** — optional ping to a Telegram bot when a job
-  finishes (or fails), so you don't have to keep the tab open.
+- *What to clip*: yesterday's VODs from your tracked streamers, the latest
+  VODs and uploads, what's trending live on Twitch (100k+ viewers),
+  suggested creators not on your watchlist, a creator search, and
+  "Recommend one" (Claude ranks your tracked streamers' recent VODs and
+  checks the top picks are actually downloadable).
+- *Options per job*: number and length of clips, a focus or mood,
+  Whisper captions, tighten pacing, payoff teaser, mascot + channel name,
+  IRL layout, hook text.
+- *Per clip*: preview, score and breakdown, copy title/description,
+  **Upload to YouTube** (Unlisted by default, optional trim; uploads over
+  60 s are refused because they wouldn't become Shorts), **Thumbnail**
+  (pick one of several real frames, edit the text, download), **Switch to
+  facecam / Adjust facecam**, delete.
+- *Per job*: "Generate more clips" reuses the downloaded source with no
+  re-download; stop/save a running job; an "Active & saved jobs" list.
+- A link to the long-form page.
+
+**Analytics (`/analytics`)**: channel insights and best day to post, "Is it
+growing?", "What your Shorts actually do" (real retention curves compared
+across what your clips had in common), your top 10 videos, comparison
+against other channels clipping the same streamers, and an AI strategy
+overview. The retention findings and the latest saved overview are fed
+into clip selection, which is how the app learns from your channel. Connect
+your YouTube account here (see [YouTube OAuth](#youtube-oauth-analytics-and-upload)).
+
+**Hook Line (`/hook-line`)**: pick a finished clip, have Claude write a
+spoiler-style one-liner (or write your own), and render it flashed at the
+very start of the clip as a separate pass. The original clip isn't touched.
+
+**Long-form (`/long-form`)**: "The Story Of <streamer>", a bi-weekly
+documentary series for the same channel.
+
+1. Pick a streamer (a schedule slot every 14 days, or start one now). It
+   researches their Twitch profile, their most-viewed clips (all-time and
+   per year, downloaded and transcribed), Wikipedia, any article links and
+   your notes.
+2. Claude writes the story as scenes: narration (you read it, over a
+   clip), moments (a clip playing at full volume with subtitles) and
+   chapter cards. It's editable, and facts and quotes must come from the
+   research.
+3. Record each narrated scene in the browser. Misreads are flagged. "Use my
+   AI voice" can patch a line with a clone of your own voice; the page
+   warns if you lean on it for more than a third of the scenes.
+4. Keyword visuals change on the words you say: emoji, stats, stock video,
+   photos, posts, headlines, timelines. Optional background music has
+   quieter/normal/louder levels.
+5. Render (1080p), write a title and a description with chapters and
+   credits, upload to YouTube as a regular video (private by default), and
+   make two promo Shorts that link back to it.
+
+Editing lessons (seeded from YouTube's review of the first episode, and
+anything you paste in) are kept and fed into the next scripts.
+
+Other background behaviour: a Telegram message when a job finishes (and
+how many clips need a facecam placed), and a Sunday reminder to post.
 
 ### Environment variables
 
 All configuration is via environment variables (Railway service variables,
-or a local `.env`) — never hardcoded. Names only below; get real values
-from each service's own dashboard.
+or a local `.env`), never hardcoded.
 
-| Variable | Required for | Notes |
+| Variable | Needed for | Notes |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | everything | Claude API key, used for clip selection everywhere |
-| `CLIPPER_SELECT_MODEL` | — | Claude model id for picking and cutting clips (optional; default `claude-opus-5`) |
-| `CLIPPER_MODEL` | — | Claude model id for everything else -- facecam checks, hook lines, recaps, channel analysis -- and the backup when the clip-picking model is unavailable (optional) |
-| `CLIPPER_BRAND_NAME` | — | channel name stamped next to the mascot in each clip's opening (optional; default `Caught On Stream`) |
-| `APP_PASSWORD` | — | HTTP Basic auth password for the whole app; unset = no auth (local dev only) |
-| `CLIPPER_JOBS_DIR` | — | where job state/output lives; point at a mounted volume in production |
-| `YTDLP_COOKIES` / `YTDLP_COOKIES_FILE` | YouTube downloads from a cloud IP | exported browser cookies, to get past YouTube's bot check |
-| `TRENDING_TWITCH_LOGINS` | trending / weekly recap | comma-separated Twitch logins to track (main channel) |
-| `TRENDING_YOUTUBE_CHANNELS` | trending | comma-separated YouTube channel IDs / `@handles` (main channel) |
-| `TRENDING_TWITCH_LOGINS_ES` | second-channel trending / yesterday's VODs | comma-separated Twitch logins for the second (Spanish) channel profile -- see "Channel profiles" below |
-| `CLIPPER_BRAND_NAME_ES` | — | channel name stamped on the second channel's clips (optional; default `Pillado En Directo`) |
-| `YOUTUBE_API_KEY` | trending, channel insights, competitor discovery | public YouTube Data API v3 key |
-| `YOUTUBE_OWN_CHANNEL` | no-auth channel insights | your own channel's ID / `@handle` |
-| `YOUTUBE_OAUTH_CLIENT_ID` / `YOUTUBE_OAUTH_CLIENT_SECRET` | real Analytics + YouTube upload | Google Cloud OAuth Web client, see below |
-| `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | long-VOD viewer-clip signal | Twitch developer app credentials |
+| `ANTHROPIC_API_KEY` | everything | Claude API key |
+| `CLIPPER_SELECT_MODEL` | — | Claude model for picking and cutting clips (optional; default `claude-opus-5`) |
+| `CLIPPER_MODEL` | — | Claude model for everything else, and the fallback when the clip-picking model is unavailable (optional) |
+| `APP_PASSWORD` | — | HTTP Basic auth password; unset = no auth (local dev only) |
+| `CLIPPER_JOBS_DIR` | production | where jobs, clips, the clip registry and long-form projects live; point it at a mounted volume |
+| `CLIPPER_BRAND_NAME` | — | channel name stamped beside the mascot (optional; default `Caught On Stream`) |
+| `YTDLP_COOKIES` / `YTDLP_COOKIES_FILE` | YouTube downloads from a cloud IP | exported browser cookies (contents, or a path) |
+| `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | Twitch lookups | trending, VOD suggestions, viewer-clip signal for long VODs, long-form research |
+| `TRENDING_TWITCH_LOGINS` | tracked streamers | comma-separated Twitch logins |
+| `TRENDING_YOUTUBE_CHANNELS` | — | comma-separated YouTube channel IDs / `@handles` for the "latest uploads" row |
+| `YOUTUBE_API_KEY` | trending, channel insights, competitor search | public YouTube Data API v3 key |
+| `YOUTUBE_OWN_CHANNEL` | no-auth channel insights | your channel's ID / `@handle` |
+| `YOUTUBE_OAUTH_CLIENT_ID` / `YOUTUBE_OAUTH_CLIENT_SECRET` | Analytics + uploads | Google Cloud OAuth web client (see below) |
+| `RAILWAY_PUBLIC_DOMAIN` | OAuth, keepalive | set by Railway automatically; used for the OAuth redirect URI and the self-ping |
 | `TELEGRAM_BOT_TOKEN` (or `CLIPPER_BOT_API`) | Telegram notifications | bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | — | optional; auto-discovered from the bot's recent messages if unset |
+| `TELEGRAM_CHAT_ID` | — | optional; discovered from the bot's recent messages if unset |
+| `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) | long-form AI voice | Hugging Face token from an account that accepted the terms at huggingface.co/kyutai/pocket-tts |
+| `PEXELS_API_KEY` / `PIXABAY_API_KEY` | long-form stock video | free keys; without them stock video is skipped |
+| `CLIPPER_FFMPEG` | — | ffmpeg binary for long-form rendering (optional; default `ffmpeg`) |
 
-### Channel profiles — a second, parallel clip channel
+### Channel profiles
 
-The app can run two channels side by side out of one deployment: the
-original ("main") channel plus a second ("es", labeled "Español") that
-tracks its own Twitch streamers, uploads to its own connected YouTube
-account, and stamps clips with its own name (default "Pillado En Directo")
-and an orange mascot instead of the main channel's yellow one -- same
-pipeline, different watchlist and destination. Each channel is its
-own page (`/` for the main channel, `/espanol` for the second one, both
-linked from every page's top nav) rather than a switcher on one page, so
-each has its own bookmarkable URL and its own "Active & saved jobs" list
--- a job only ever shows up on the page for the channel it was created
-under.
+Channel-specific settings live in `CHANNEL_PROFILES` in `webapp/main.py`:
+which Twitch logins to track, the on-clip brand name and mascot colour,
+the YouTube token file and the language Claude writes clip text in. Today
+there is one profile, `main` (Caught On Stream). A second channel can be
+added as another entry. Jobs remember which profile they were made for, and
+a clip only ever uploads through that profile's connected YouTube account.
 
-The Spanish channel's page is in Spanish (`_UI_STRINGS_ES` in
-`webapp/main.py`; a startup log line flags any entry the English page no
-longer matches), and its profile's `output_language` makes Claude write
-each clip's title, burned-in hook text, upload title and description in
-Spanish. Progress messages sent from the server while a job runs are still
-in English.
+### YouTube OAuth (analytics and upload)
 
-To set the second channel up: set `TRENDING_TWITCH_LOGINS_ES` to the
-streamers to track (comma-separated Twitch logins), optionally
-`CLIPPER_BRAND_NAME_ES` for its on-clip name, then use the `/espanol`
-page's Connect YouTube button to authorize its YouTube account (it reuses
-the same `YOUTUBE_OAUTH_CLIENT_ID`/`SECRET` as the main channel -- just a
-second Google account consenting). A job's clips always upload through
-the YouTube account connected to the channel it was created under.
+Channel insights has two sources:
 
-Adding a third profile is a matter of adding an entry to `CHANNEL_PROFILES`
-in `webapp/main.py` (its own Twitch-logins env var, brand name, mascot
-accent colour, YouTube token file, and page path) -- `_render_channel_home`
-and `_nav_links` pick it up automatically and it gets its own page and nav
-link for free.
-
-### Channel insights — best day to post
-
-The web app has a "Channel insights" panel showing a best-day-to-post
-suggestion and channel-performance signals, from two independent sources:
-
-- **A no-auth heuristic** — works immediately, no setup. Set the
-  `YOUTUBE_OWN_CHANNEL` variable to your channel's ID (starts with `UC...`),
-  `@handle`, or legacy username, and it uses the public YouTube Data API
-  (the same `YOUTUBE_API_KEY` already used for trending lookups) to guess a
-  best day from your recent uploads' view counts, normalized by video age.
-  Noisy, especially with few videos.
+- **A no-auth heuristic** works immediately. Set `YOUTUBE_OWN_CHANNEL` to
+  your channel's ID (starts with `UC...`), `@handle` or legacy username,
+  and it uses the public Data API (`YOUTUBE_API_KEY`) to guess a best day
+  from your recent uploads' view counts, normalized by video age. Noisy,
+  especially with few videos.
 - **Real YouTube Analytics** (day-of-week views, retention, traffic
-  sources) for your own connected channel — much more accurate, needs a
-  one-time OAuth setup:
+  sources) for your connected channel. This is also what the upload
+  buttons and the retention learning use. One-time setup:
 
   1. Open the [Google Cloud Console](https://console.cloud.google.com/) and
      create a project (or pick an existing one) via the project selector at
@@ -366,13 +384,10 @@ suggestion and channel-performance signals, from two independent sources:
   5. Copy the generated **Client ID** and **Client secret**, and set them as
      Railway service variables: `YOUTUBE_OAUTH_CLIENT_ID` and
      `YOUTUBE_OAUTH_CLIENT_SECRET`.
-  6. Redeploy, open the app, and click **Connect YouTube account** in the
-     Channel insights panel — it'll walk you through Google's consent
-     screen and back.
+  6. Redeploy, open the app, and click **Connect YouTube** (on Home or
+     Analytics). It walks you through Google's consent screen and back.
 
-  Note: even with a real connected account, YouTube's Analytics API has no
-  "hour of day" dimension on regular reports — the audience-activity
-  heatmap YouTube Studio shows isn't exposed via any public API. "Best day
-  to post" here means best *day of the week*, from your channel's real
-  views/watch-time data, which is the accurate ceiling of what's obtainable
-  through official APIs.
+  Note: even with a connected account, YouTube's Analytics API has no
+  "hour of day" dimension on regular reports, so the audience-activity
+  heatmap YouTube Studio shows isn't available. "Best day to post" means
+  best *day of the week*, which is the most the official APIs expose.

@@ -223,6 +223,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   `environment-status` to confirm the deploy went out clean before telling
   Dean it's live.
 
+## Whose videos get clipped
+
+- The README deliberately says nothing about whose videos to clip. Keep it
+  out of there; this is the place for it.
+- The tool works the same on Dean's own uploads and on other people's
+  public videos. The difference is legal/platform, not technical:
+  re-publishing someone else's content can run into copyright and
+  platform ToS issues depending on how much is used, how (commentary /
+  criticism / fair use vs. straight re-upload) and where it's posted.
+  That's a per-video gut-check before publishing, not before
+  experimenting locally.
+
 ## Other standing preferences
 
 - No paid signups/subscriptions for libraries or tools — check for a free
