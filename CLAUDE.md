@@ -127,7 +127,13 @@ merge it yourself; merging stays Dean's call per the rule above.
   with `pip install --dry-run --report`). YouTube doesn't require the
   altered-content label for cloning your own voice for voiceover. The
   model can't be downloaded in the sandbox (HF blocked), so test with a
-  fake `pocket_tts` module.
+  fake `pocket_tts` module. Dean: it sounds right but "butchered numbers",
+  so `voice_clone.spoken_text` spells numbers out before TTS ("2019" ->
+  "twenty nineteen", "4.3M" -> "four point three million", "March 14" ->
+  "March fourteenth"); the script and captions keep digits. The Railway
+  variable was once saved as " HF_TOKEN" with a leading space: if the page
+  says it isn't switched on, check the name (Railway MCP `list-variables`
+  shows names only).
 - Quiz format: prototyped (higher-or-lower on clip views, who-said-it,
   guess-the-year) and shelved once Dean said he'll use his voice. The
   documentary is the one long-form format for now.

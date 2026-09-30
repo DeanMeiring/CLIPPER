@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import threading
 import time
 import wave
@@ -126,6 +127,118 @@ def _write_wav(path: Path, samples, sample_rate: int) -> None:
         w.writeframes((pcm * 32767.0).astype("<i2").tobytes())
 
 
+# ------------------------------------------------------ numbers as words ---
+# The scripts write numbers as digits ("2019", "1,240,000", "4.3M"), which
+# Pocket TTS reads badly. The AI voice gets them spelled out the way a
+# person says them; the script itself (and so the captions) keep digits.
+
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+         "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+_SCALES = [(10 ** 12, "trillion"), (10 ** 9, "billion"), (10 ** 6, "million"), (1000, "thousand")]
+_ORD = {"one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
+        "nine": "ninth", "twelve": "twelfth"}
+
+
+def _under_1000(n: int) -> str:
+    parts = []
+    if n >= 100:
+        parts.append(f"{_ONES[n // 100]} hundred")
+        n %= 100
+    if n >= 20:
+        parts.append(_TENS[n // 10] + (f"-{_ONES[n % 10]}" if n % 10 else ""))
+    elif n or not parts:
+        parts.append(_ONES[n])
+    return " ".join(parts)
+
+
+def number_words(n: int) -> str:
+    if n < 0:
+        return "minus " + number_words(-n)
+    if n < 1000:
+        return _under_1000(n)
+    parts = []
+    for size, name in _SCALES:
+        if n >= size:
+            parts.append(f"{number_words(n // size)} {name}")
+            n %= size
+    if n:
+        parts.append(_under_1000(n))
+    return " ".join(parts)
+
+
+def _decimal_words(s: str) -> str:
+    whole, _, frac = s.replace(",", "").partition(".")
+    out = number_words(int(whole or 0))
+    if frac:
+        out += " point " + " ".join(_ONES[int(d)] for d in frac)
+    return out
+
+
+def year_words(y: int) -> str:
+    if 2000 <= y <= 2009:
+        return "two thousand" + (f" {_ONES[y - 2000]}" if y > 2000 else "")
+    hi, lo = divmod(y, 100)
+    if lo == 0:
+        return f"{_under_1000(hi)} hundred"
+    return f"{_under_1000(hi)} {'oh ' + _ONES[lo] if lo < 10 else _under_1000(lo)}"
+
+
+def _ordinal(words: str) -> str:
+    head, sep, last = words.rpartition("-" if "-" in words.split(" ")[-1] else " ")
+    if last in _ORD:
+        last = _ORD[last]
+    elif last.endswith("y"):
+        last = last[:-1] + "ieth"
+    else:
+        last += "th"
+    return head + sep + last
+
+
+def _plural(words: str) -> str:
+    head, sep, last = words.rpartition(" ")
+    last = last[:-1] + "ies" if last.endswith("y") else last + "s"
+    return head + sep + last
+
+
+_YEAR = r"(?:1[1-9]\d\d|20\d\d)"
+_NUM = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
+# Not part of a bigger number: "2,019" or "1.2019" aren't years, but
+# "since 2020, he..." is.
+_B = r"(?<!\d)(?<!\d,)(?<!\d\.)"
+_A = r"(?!\d|,\d|\.\d)"
+_SUFFIX = {"k": "thousand", "m": "million", "b": "billion", "thousand": "thousand", "million": "million", "billion": "billion"}
+
+
+def spoken_text(text: str) -> str:
+    """The narration with every number written the way it's said aloud:
+    "2019" -> "twenty nineteen", "1,240,000" -> "one million two hundred
+    forty thousand", "4.3M views" -> "four point three million views",
+    "50%" -> "fifty percent", "$1.5M" -> "one point five million dollars",
+    "3rd" -> "third", "2019-2021" -> "twenty nineteen to twenty twenty-one",
+    "the 2010s" -> "the twenty tens", "#1" -> "number one"."""
+    t = text
+    t = re.sub(r"#(\d+)\b", lambda m: "number " + number_words(int(m.group(1))), t)
+
+    def money(m):
+        amount = _decimal_words(m.group(1))
+        scale = _SUFFIX.get((m.group(2) or "").lower())
+        return f"{amount}{' ' + scale if scale else ''} dollars"
+    t = re.sub(rf"\$({_NUM})(?:\s?(k|m|b|thousand|million|billion)\b)?", money, t, flags=re.I)
+    t = re.sub(rf"({_NUM})\s?%", lambda m: _decimal_words(m.group(1)) + " percent", t)
+    t = re.sub(rf"{_B}({_YEAR})\s?[-\u2013\u2014]\s?({_YEAR}){_A}",
+               lambda m: f"{year_words(int(m.group(1)))} to {year_words(int(m.group(2)))}", t)
+    t = re.sub(rf"{_B}({_YEAR})s\b", lambda m: _plural(year_words(int(m.group(1)))), t)
+    t = re.sub(r"(?<![\w,.])'?([1-9]0)s\b", lambda m: _plural(number_words(int(m.group(1)))), t)
+    t = re.sub(rf"(?<![\w,.])({_NUM})([kmb])\b", lambda m: f"{_decimal_words(m.group(1))} {_SUFFIX[m.group(2).lower()]}", t, flags=re.I)
+    t = re.sub(r"(?<![\w,.])(\d+)(st|nd|rd|th)\b", lambda m: _ordinal(number_words(int(m.group(1)))), t, flags=re.I)
+    t = re.sub(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b(?![\d:])",
+               lambda m: f"{m.group(1)} {_ordinal(number_words(int(m.group(2))))}", t)
+    t = re.sub(rf"{_B}({_YEAR}){_A}", lambda m: year_words(int(m.group(1))), t)
+    t = re.sub(rf"(?<![\w,.])({_NUM})(?![\w])", lambda m: _decimal_words(m.group(1)), t)
+    return t
+
+
 def synthesize(voice_dir: Path, text: str, out_path: Path) -> None:
     """Say `text` in Dean's voice and write it as a mono 16-bit wav at the
     model's own rate (24 kHz); callers convert it like any other take."""
@@ -139,5 +252,5 @@ def synthesize(voice_dir: Path, text: str, out_path: Path) -> None:
         if _voice_key != key:
             _voice_state = model.get_state_for_audio_prompt(sample, truncate=True)
             _voice_key = key
-        audio = model.generate_audio(_voice_state, text.strip())
+        audio = model.generate_audio(_voice_state, spoken_text(text).strip())
         _write_wav(out_path, audio.detach().cpu().numpy(), model.sample_rate)
