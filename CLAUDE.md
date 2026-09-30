@@ -12,6 +12,13 @@ When asked to watch/babysit a PR (or by default after opening one), subscribe
 to PR activity and drive it to green per the standing PR rules — but never
 merge it yourself; merging stays Dean's call per the rule above.
 
+- **No hourly "still no change" check-in loops.** Dean told a session to stop
+  them. This repo has no CI checks, so a scheduled poll on an open PR finds
+  nothing to do; rely on the PR-activity subscription instead, and re-check
+  the PR only when an event arrives or he asks.
+- Don't commit a new change onto a branch that already backs an open PR —
+  it silently joins that PR. Cut a fresh branch from `origin/main`.
+
 ## Branches
 
 - Everything uses **flat** paths: `clipper/*.py`, `webapp/main.py`.
@@ -59,6 +66,26 @@ merge it yourself; merging stays Dean's call per the rule above.
   `rm -rf "$VAR"/…` is refused by a safety check; use literal paths.
 - After checking out another branch, a stray `webapp/__pycache__` can be
   left behind; it's untracked and safe to delete.
+- `_persist(job_id)` takes `jobs_lock` itself, and `jobs_lock` is a plain
+  (non-reentrant) `threading.Lock`. Call it *after* leaving a
+  `with jobs_lock:` block, never inside one — inside, the request deadlocks.
+- Words in the clip-picking prompt leak into generated titles/descriptions.
+  That includes the mood buttons' `data-mood` text, which is sent verbatim
+  as the `focus`. "banter", "insane", "chaos" etc. in prompt text made the
+  output sound AI-written; keep hype words out of anything the model reads.
+
+## Testing without ffmpeg or API keys
+
+- `import webapp.main` is fast (it starts daemon worker threads). Set
+  `CLIPPER_JOBS_DIR` to a temp dir, leave `APP_PASSWORD` unset (auth is
+  skipped), then use FastAPI's `TestClient` and patch the ffmpeg/Claude
+  helpers as `webapp.main.<name>` (e.g. `trim_clip`, `_render_atomic`).
+- A hung request: run under `timeout` with
+  `faulthandler.dump_traceback_later(N, exit=True)` to see where it's stuck.
+- Page JS lives in Python triple-quoted strings (`_CHANNEL_HOME_TEMPLATE`,
+  `*_HTML`). To syntax-check it, evaluate the string with
+  `ast.literal_eval` first, then `node --check` the `<script>` body. A raw
+  regex extract keeps `\\'` escapes unprocessed and reports false errors.
 
 ## Railway deploys
 
