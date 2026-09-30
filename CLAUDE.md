@@ -85,6 +85,31 @@ merge it yourself; merging stays Dean's call per the rule above.
   Commentary over clips is what keeps it on the right side of fair use and
   YouTube's July 2025 "inauthentic content" rule — Dean's own narration is
   the point, never AI voice.
+- **Keyword visuals (Sept 2026):** Dean said the voice-over was fine but
+  the visuals were the problem: one dimmed clip looping under a 20-40 s
+  scene. Now `clipper/longform_beats.py` cuts each narrated scene into
+  beats that change on the words he says (every ~3-6 s), timed by
+  Whisper word timings of his take (cached as `takes/<file>.words.json`)
+  aligned to the script. Cue types: words, emoji, stat, stock, photo,
+  clip, post, headline, timeline; between cues his clips play with slow
+  zooms and quick cuts; word-by-word captions throughout; animated
+  chapter cards. `documentary.plan_visuals` (Claude) picks the cues right
+  after the story is written; `normalize_cues` drops anything untrue: the
+  phrase must be in the narration, a stat's number and a timeline's years
+  must be in the research. Story editor shows them as removable chips.
+- Free-only visual sources (Dean: "free, not free to an extent"):
+  bundled Fluent Emoji 3D (MIT, 326 picked, `clipper/assets/emoji`),
+  bundled fonts Inter/Anton/Source Serif 4 (OFL, `clipper/assets/fonts`,
+  opened by path, never registered with fontconfig so Shorts captions are
+  unchanged), Pexels + Pixabay (free keys `PEXELS_API_KEY`,
+  `PIXABAY_API_KEY`; without them stock video is skipped), Openverse
+  limited to CC0/public domain (no key), X posts via the public embed
+  endpoint `cdn.syndication.twimg.com` (no key). Credits go in the
+  YouTube description automatically. All of these hosts are blocked in
+  the sandbox: test with mocks and the scikit-video sample clips
+  (`pip download scikit-video`, `skvideo/datasets/data/*.mp4`).
+- Rendering is Pillow frames piped into ffmpeg, about 2x real time on
+  CPU (a 12-minute episode renders in ~25 min).
 - **AI voice (Sept 2026):** Dean narrates with his own voice (never his
   face). `clipper/voice_clone.py` clones it with Kyutai Pocket TTS (100M
   params, CPU, ~0.6 GB RAM, CC-BY-4.0 weights) to patch lines he'd rather

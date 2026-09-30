@@ -43,9 +43,13 @@ _ENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv
 
 # ----------------------------------------------------------------- fonts ---
 
+_ASSET_FONTS = Path(__file__).parent / "assets" / "fonts"
+# Long-form only: the bundled Inter (OFL) first. These files are opened by
+# path, never registered with fontconfig, so the Shorts' ASS captions keep
+# their fonts exactly as before.
 _FONT_FILES = {
-    "sans": ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
-    "bold": ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
+    "sans": [str(_ASSET_FONTS / "Inter-Regular.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+    "bold": [str(_ASSET_FONTS / "Inter-Black.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
 }
 _FC_NAMES = {"sans": "DejaVu Sans", "bold": "DejaVu Sans:bold"}
 _font_cache: dict = {}
@@ -231,19 +235,6 @@ def _encode_still(img_path: Path, audio: Optional[Path], duration: float, out: P
     _run(cmd)
 
 
-def _encode_narrate_clip(clip: Path, start: float, take: Path, overlay_png: Path, duration: float, out: Path) -> None:
-    cmd = [_ffmpeg(), "-y", "-v", "error", "-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", str(clip),
-           "-i", str(take), "-i", str(overlay_png)]
-    fc = f"[0:v]{_vchain(True)}[bv];[bv][2:v]overlay=0:0,fade=t=in:st=0:d=0.25[v];"
-    fc += "[1:a]aresample=48000,aformat=channel_layouts=stereo,apad[vo];"
-    if has_audio(clip):
-        fc += "[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.10[bg];[vo][bg]amix=inputs=2:duration=first:normalize=0[a]"
-    else:
-        fc += "[vo]anull[a]"
-    cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "[a]", "-t", f"{duration:.3f}", *_ENC, str(out)]
-    _run(cmd)
-
-
 def _encode_moment(clip: Path, start: float, end: float, overlay_png: Path, subs: List[Tuple[float, float, Path]], out: Path) -> None:
     length = end - start
     cmd = [_ffmpeg(), "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{length:.3f}", "-i", str(clip), "-i", str(overlay_png)]
@@ -276,22 +267,38 @@ def scene_duration(scene: dict, take_duration: Optional[float], last: bool) -> f
     return max(1.0, float(take_duration or 0) + (LAST_SCENE_TAIL if last else SCENE_GAP_SECONDS))
 
 
-def _scene_key(scene: dict, duration: float, brand: str, clip_file: Optional[str]) -> str:
-    keep = {k: scene.get(k) for k in ("kind", "narration", "clip", "start", "end", "caption", "title")}
+def _scene_key(scene: dict, duration: float, brand: str, clip_file: Optional[str], extra=None) -> str:
+    keep = {k: scene.get(k) for k in ("kind", "narration", "clip", "start", "end", "caption", "title", "cues")}
     keep["take"] = (scene.get("take") or {}).get("file")
-    blob = json.dumps({"s": keep, "d": round(duration, 3), "b": brand, "c": clip_file, "v": 2}, sort_keys=True)
+    blob = json.dumps({"s": keep, "d": round(duration, 3), "b": brand, "c": clip_file, "x": extra, "v": 3}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
+def beats_context(project_dir: Path, library: dict, brand: str):
+    """What the keyword visuals draw from: the research (profile, pasted
+    posts and articles) and the clip library."""
+    from .longform_beats import Ctx
+
+    try:
+        dossier = json.loads((project_dir / "dossier.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        dossier = {}
+    return Ctx(_ffmpeg(), project_dir, library, dossier.get("profile") or {}, dossier.get("posts") or [],
+               dossier.get("articles") or [], brand)
+
+
 def render_scene(project_dir: Path, scene: dict, index: int, duration: float, library: dict, brand: str,
-                 chapter_no: int) -> Path:
+                 chapter_no: int, bg: Optional[Tuple[str, float]] = None) -> Path:
+    """One scene as a finished segment. `bg` is (clip id, start) of the
+    footage a chapter card is laid over (the chapter's first clip)."""
+    from . import longform_beats as beats
     from .documentary import clip_words
 
     rdir = project_dir / "render"
     rdir.mkdir(parents=True, exist_ok=True)
     clip = library.get(scene.get("clip") or "")
     clip_path = project_dir / clip["file"] if clip else None
-    out = rdir / f"scene{index:02d}_{_scene_key(scene, duration, brand, clip and clip['file'])}.mp4"
+    out = rdir / f"scene{index:02d}_{_scene_key(scene, duration, brand, clip and clip['file'], bg)}.mp4"
     if out.exists():
         return out
     tmp = out.with_name(f".{out.name}")
@@ -299,10 +306,10 @@ def render_scene(project_dir: Path, scene: dict, index: int, duration: float, li
     try:
         kind = scene.get("kind")
         if kind == "title":
-            img = rdir / f".card{index:02d}.png"
-            work.append(img)
-            card_image(scene["title"], f"Chapter {chapter_no}" if chapter_no else "").save(img)
-            _encode_still(img, None, duration, tmp, fade_out=True)
+            bg_clip = library.get((bg or ("",))[0])
+            bg_path = project_dir / bg_clip["file"] if bg_clip else None
+            beats.render_title(_ffmpeg(), scene["title"], f"Chapter {chapter_no}" if chapter_no else "", duration,
+                               bg_path if bg_path and bg_path.exists() else None, float(bg[1]) if bg else 0.0, brand, tmp)
         elif kind == "moment" and clip_path and clip_path.exists():
             ov = rdir / f".ov{index:02d}.png"
             work.append(ov)
@@ -316,16 +323,8 @@ def render_scene(project_dir: Path, scene: dict, index: int, duration: float, li
             _encode_moment(clip_path, float(scene["start"]), float(scene["end"]), ov, subs, tmp)
         else:
             take = project_dir / "takes" / scene["take"]["file"]
-            if clip_path and clip_path.exists():
-                ov = rdir / f".ov{index:02d}.png"
-                work.append(ov)
-                overlay_layer(scene.get("caption") or "", brand).save(ov)
-                _encode_narrate_clip(clip_path, float(scene.get("start") or 0), take, ov, duration, tmp)
-            else:
-                img = rdir / f".card{index:02d}.png"
-                work.append(img)
-                card_image(scene.get("caption") or brand).save(img)
-                _encode_still(img, take, duration, tmp)
+            ctx = beats_context(project_dir, library, brand)
+            beats.render_narrate(ctx, scene, duration, take, beats.take_words(take), tmp)
         tmp.replace(out)
     finally:
         tmp.unlink(missing_ok=True)
@@ -342,8 +341,12 @@ def preview_still(project_dir: Path, scene: dict, library: dict, brand: str, out
 
     out.parent.mkdir(parents=True, exist_ok=True)
     clip = library.get(scene.get("clip") or "")
-    if scene.get("kind") == "title" or not clip or not (project_dir / clip["file"]).exists():
-        img = card_image(scene.get("title") or scene.get("caption") or brand).convert("RGBA")
+    if scene.get("kind") == "title":
+        from .longform_beats import title_frame, _Blank
+
+        img = title_frame(_Blank(True).next(), 2.0, scene.get("title") or brand, "", brand).convert("RGBA")
+    elif not clip or not (project_dir / clip["file"]).exists():
+        img = card_image(scene.get("caption") or brand).convert("RGBA")
     else:
         t = float(scene.get("start") or 0) + (1.5 if scene.get("kind") == "moment" else 1.0)
         tmp = out.with_suffix(".src.jpg")
@@ -379,7 +382,11 @@ def render_documentary(
             titles_seen += 1
             chapter = titles_seen - 1  # the first card is the episode title, then Chapter 1, 2, ...
         dur = scene_duration(sc, take_durations[i], last=(i == n - 1))
-        path = render_scene(project_dir, sc, i, dur, library, brand, chapter)
+        bg = None
+        if sc.get("kind") == "title":
+            nxt = next((s for s in scenes[i + 1:] if s.get("clip") in library), None)
+            bg = (nxt["clip"], float(nxt.get("start") or 0)) if nxt else None
+        path = render_scene(project_dir, sc, i, dur, library, brand, chapter, bg)
         real = media_duration(path)
         parts.append(path)
         starts.append(round(t, 2))

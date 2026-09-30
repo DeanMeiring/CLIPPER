@@ -35,6 +35,7 @@ from clipper import documentary
 from clipper import longform
 from clipper import longform_video
 from clipper import voice_clone
+from clipper import visual_sources
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -2990,6 +2991,9 @@ def _longform_project(pid: str) -> dict:
         if project.get("status") == status and not _longform_is_busy(pid, kind):
             fallback = "research_ready" if kind == "write" and project.get("library") else "error"
             project = _longform_store.update(pid, lambda pr, f=fallback, m=msg: pr.update(status=f, error=m, message=None))
+    if (project.get("visuals") or {}).get("status") == "planning" and not _longform_is_busy(pid, "visuals"):
+        project = _longform_store.update(pid, lambda pr: pr.update(
+            visuals={"status": "error", "error": "Interrupted by a restart -- click Plan visuals again."}))
     if (project.get("render") or {}).get("status") == "rendering" and not _longform_is_busy(pid, "render"):
         project = _longform_store.update(pid, lambda pr: pr.update(
             render={"status": "error", "error": "Interrupted by a restart -- click Render again.", "progress": 0}))
@@ -3038,7 +3042,7 @@ def _longform_write(pid: str) -> None:
         dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
         scenes = documentary.write_script(dossier, project["library"], d, _longform_brand())
         _longform_store.update(pid, lambda pr: pr.update(status="script_ready", error=None, message=None, scenes=scenes,
-                                                         render=None, publish=None))
+                                                         render=None, publish=None, visuals=None))
     except Exception as e:
         print(f"[longform] story for {pid} failed: {e}", flush=True)
         err = str(e)
@@ -3048,6 +3052,51 @@ def _longform_write(pid: str) -> None:
             pass
     finally:
         _longform_release(pid, "write")
+    # The story is in: plan its keyword visuals straight away (in the
+    # background -- the story can be read and recorded meanwhile).
+    try:
+        if _longform_store.load(pid).get("status") == "script_ready":
+            _longform_claim(pid, "visuals")
+            _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "planning", "message": "Planning the visuals..."}))
+            threading.Thread(target=_longform_visuals, args=(pid, True), daemon=True).start()
+    except Exception as e:
+        print(f"[longform] couldn't start visuals for {pid}: {e}", flush=True)
+
+
+def _longform_visuals(pid: str, replan: bool) -> None:
+    """Plan the keyword visuals (Claude) and download the free footage and
+    photos they need. Runs after the story is written, and again from the
+    "Plan visuals again" button. Only scenes whose words haven't changed
+    meanwhile get the new visuals."""
+    say = lambda m: _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "planning", "message": m}))  # noqa: E731
+    try:
+        project = _longform_store.load(pid)
+        d = _longform_store.path(pid)
+        dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
+        scenes = project.get("scenes") or []
+        if replan:
+            say("Claude is picking the key words and their visuals...")
+            scenes = documentary.plan_visuals(dossier, project.get("library") or [], scenes)
+        scenes = documentary.fetch_visuals(scenes, dossier, d, on_progress=say)
+        planned = {i: sc.get("cues") or [] for i, sc in enumerate(scenes) if sc.get("kind") == "narrate"}
+        texts = {i: sc.get("narration") for i, sc in enumerate(scenes)}
+
+        def apply(pr: dict) -> None:
+            for i, sc in enumerate(pr.get("scenes") or []):
+                if i in planned and sc.get("narration") == texts.get(i):
+                    sc["cues"] = planned[i]
+            n = sum(len(c) for c in planned.values())
+            pr["visuals"] = {"status": "done", "message": None, "error": None, "count": n, "at": time.time()}
+        _longform_store.update(pid, apply)
+    except Exception as e:
+        print(f"[longform] visuals for {pid} failed: {e}", flush=True)
+        err = str(e)
+        try:
+            _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "error", "error": err, "message": None}))
+        except Exception:
+            pass
+    finally:
+        _longform_release(pid, "visuals")
 
 
 def _longform_start(pid: str, kind: str, target, status: str, message: str) -> None:
@@ -3496,6 +3545,43 @@ def longform_remove_music(pid: str) -> dict:
     return _longform_store.update(pid, lambda pr: pr.update(music=None))
 
 
+@protected.post("/api/longform/projects/{pid}/visuals")
+def longform_plan_visuals(pid: str) -> dict:
+    project = _longform_project(pid)
+    if project.get("status") != "script_ready":
+        raise HTTPException(409, "write the story first")
+    _longform_claim(pid, "visuals")
+    _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "planning", "message": "Starting..."}))
+    threading.Thread(target=_longform_visuals, args=(pid, True), daemon=True).start()
+    return {"ok": True}
+
+
+_VISUAL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+_VISUAL_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".mp4": "video/mp4"}
+
+
+@protected.get("/api/longform/projects/{pid}/visuals/{name}")
+def longform_visual_file(pid: str, name: str) -> FileResponse:
+    _longform_project(pid)
+    path = _longform_store.path(pid) / "visuals" / name
+    if not _VISUAL_NAME.match(name) or name.startswith(".") or path.suffix.lower() not in _VISUAL_TYPES or not path.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(path, media_type=_VISUAL_TYPES[path.suffix.lower()], headers={"Cache-Control": "max-age=86400"})
+
+
+@protected.get("/api/longform/emoji/{code}")
+def longform_emoji(code: str) -> FileResponse:
+    path = visual_sources.EMOJI_DIR / f"{code}.webp"
+    if not re.fullmatch(r"[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,4}", code) or not path.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "max-age=604800"})
+
+
+@protected.get("/api/longform/visual-sources")
+def longform_visual_sources() -> dict:
+    return visual_sources.stock_available()
+
+
 def _longform_render(pid: str) -> None:
     started = time.time()
 
@@ -3536,6 +3622,8 @@ def longform_start_render(pid: str) -> dict:
     missing = [i + 1 for i, s in enumerate(scenes) if not longform.scene_ready(s)]
     if missing:
         raise HTTPException(409, "record these scenes first: " + ", ".join(map(str, missing)))
+    if _longform_is_busy(pid, "visuals"):
+        raise HTTPException(409, "the visuals are still being planned -- give it a minute")
     _longform_claim(pid, "render")
     _longform_store.update(pid, lambda pr: pr.update(render={"status": "rendering", "progress": 0.0, "message": "Starting..."}))
     threading.Thread(target=_longform_render, args=(pid,), daemon=True).start()
@@ -3570,7 +3658,8 @@ async def longform_publish_text(pid: str) -> dict:
         raise HTTPException(409, "render the video first")
     try:
         text = await run_in_threadpool(longform_video.write_publish_text, project.get("streamer") or {"login": project.get("login")},
-                                       _longform_brand(), project["scenes"], render.get("starts") or [], _longform_sources(project))
+                                       _longform_brand(), project["scenes"], render.get("starts") or [],
+                                       _longform_sources(project) + documentary.visual_credits(project["scenes"]))
     except Exception as e:
         raise HTTPException(500, f"Couldn't write the title and description: {e}")
     return _longform_store.update(pid, lambda pr: pr.update(publish=text))
@@ -6913,6 +7002,17 @@ LONGFORM_HTML = """<!doctype html>
   .scene .row { display: flex; gap: 6px; align-items: center; }
   .scene .row input { width: 90px; }
   .scene .excerpt { font-size: 0.78rem; color: var(--muted); margin-top: 5px; font-style: italic; }
+  .cues { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .cue { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 8px; border-radius: 9px; font-size: 0.76rem;
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border: 1px solid var(--border); max-width: 100%; }
+  .cue .at { font-weight: 700; }
+  .cue .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; min-width: 0; }
+  .scene > div { min-width: 0; }
+  .cue img, .cue video { width: 34px; height: 22px; object-fit: cover; border-radius: 4px; background: #0b0c10; }
+  .cue img.emo { width: 22px; height: 22px; object-fit: contain; background: none; }
+  .cue button { margin: 0; padding: 0 5px; font-size: 0.72rem; background: transparent; color: var(--muted); border: none; }
+  .visuals-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; font-size: 0.85rem; }
+  .visuals-bar button { margin-top: 0; }
   .scene.narrate { }
   .scene.moment .kind { color: #0891b2; }
   .scene.title .kind { color: #b45309; }
@@ -6952,7 +7052,9 @@ LONGFORM_HTML = """<!doctype html>
   @media (max-width: 600px) {
     .card { padding: 20px 16px 24px; }
     .prompter { font-size: 1.2rem; padding: 18px; }
-    .scene { grid-template-columns: 1fr; }
+    .scene { grid-template-columns: minmax(0, 1fr); }
+    .cue { flex-wrap: wrap; }
+    .cue .what { white-space: normal; max-width: 100%; }
     .scene img { width: 100%; }
     .slot { grid-template-columns: 90px 1fr; }
     .slot > :last-child { grid-column: 2; justify-self: start; }
@@ -7043,6 +7145,12 @@ LONGFORM_HTML = """<!doctype html>
       <h3><span class="n">2</span>Story</h3>
       <div class="hint">🎙 Narrated scenes are what you read. 🎬 Moments are clips that play with their own sound. 📖 Chapter cards become YouTube chapters. Edit anything, then save.</div>
       <div class="meta" id="story-meta"></div>
+      <div class="visuals-bar">
+        <span id="visuals-status"></span>
+        <button id="plan-visuals" type="button" class="secondary">🎨 Plan visuals again</button>
+      </div>
+      <div class="hint" id="visuals-hint">The picture changes on key words: big text, 3D emoji, stat cards, posts and headlines you pasted, timelines, and free stock footage. Remove any you don’t want (✕) and save.</div>
+      <div class="hint" id="stock-hint"></div>
       <details id="story-details">
         <summary id="story-summary">Show and edit the story</summary>
         <div id="scenes"></div>
@@ -7272,7 +7380,8 @@ async function loadProject(id, resetIndex) {
   }
   render();
   stopPolling();
-  const busy = ['researching', 'writing'].includes(project.status) || (project.render || {}).status === 'rendering';
+  const busy = ['researching', 'writing'].includes(project.status) || (project.render || {}).status === 'rendering'
+    || (project.visuals || {}).status === 'planning';
   if (busy) pollTimer = setInterval(() => loadProject(project.id, project.status !== 'script_ready'), 3000);
 }
 
@@ -7393,7 +7502,41 @@ function renderStory() {
   wrap.innerHTML = '';
   scenes.forEach((s, i) => wrap.appendChild(sceneRow(s, i)));
   $('save-story').disabled = true;
+  renderVisualsBar();
 }
+
+let stockKeys = null;
+function renderVisualsBar() {
+  if (stockKeys === null) { stockKeys = {}; api('/api/longform/visual-sources').then(r => { stockKeys = r; renderVisualsBar(); }).catch(() => {}); }
+  const sh = $('stock-hint');
+  sh.innerHTML = '';
+  if (stockKeys.pexels === false && stockKeys.pixabay === false) {
+    sh.textContent = 'Stock video is off until you add a free Pexels key (PEXELS_API_KEY on Railway, from pexels.com/api). Photos still come from Openverse’s copyright-free collection.';
+  } else if (stockKeys.pexels || stockKeys.pixabay) {
+    sh.appendChild(document.createTextNode('Free stock photos and videos provided by '));
+    [['Pexels', 'https://www.pexels.com'], ['Pixabay', 'https://pixabay.com'], ['Openverse', 'https://openverse.org']].forEach(([n, u], k) => {
+      const a = el('a', '', n); a.href = u; a.target = '_blank'; a.rel = 'noopener'; sh.appendChild(a);
+      sh.appendChild(document.createTextNode(k < 2 ? (k === 1 ? ' and ' : ', ') : '.'));
+    });
+  }
+  const v = project.visuals || {};
+  const n = (project.scenes || []).reduce((k, s) => k + (s.cues || []).length, 0);
+  const planning = v.status === 'planning';
+  $('visuals-status').textContent = planning ? '⏳ ' + (v.message || 'Planning the visuals…')
+    : v.status === 'error' ? '⚠️ Visuals: ' + (v.error || 'failed')
+    : n ? `🎨 ${n} key-word visuals planned` : '🎨 No key-word visuals yet';
+  $('plan-visuals').disabled = planning;
+  $('plan-visuals').textContent = n ? '🎨 Plan visuals again' : '🎨 Plan visuals';
+}
+$('plan-visuals').addEventListener('click', async () => {
+  if (storyDirty && !confirm('Save your story changes first? Planning again replaces the visuals of every scene.')) return;
+  if (!storyDirty && (project.scenes || []).some(s => (s.cues || []).length) && !confirm('Plan all the visuals again? Your current ones are replaced.')) return;
+  try {
+    if (storyDirty) { project = await api(`/api/longform/projects/${project.id}/scenes`, jsonOpts('PUT', { scenes: collectScenes() })); storyDirty = false; }
+    await api(`/api/longform/projects/${project.id}/visuals`, { method: 'POST' });
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
+});
 
 function clipSelect(value, allowNone) {
   const sel = el('select');
@@ -7423,6 +7566,9 @@ function sceneRow(s, i) {
   } else {
     if (s.kind === 'narrate') {
       const ta = el('textarea'); ta.value = s.narration; ta.dataset.f = 'narration'; ta.addEventListener('input', markDirty); body.appendChild(ta);
+      const cw = el('div', 'cues'); cw.dataset.cues = JSON.stringify(s.cues || []);
+      renderCues(cw);
+      body.appendChild(cw);
     }
     const sel = clipSelect(s.clip, s.kind === 'narrate'); sel.dataset.f = 'clip'; sel.addEventListener('change', markDirty); body.appendChild(sel);
     if (s.kind === 'moment') {
@@ -7450,10 +7596,47 @@ function sceneRow(s, i) {
   return row;
 }
 
+const CUE_ICON = { words: '🔠', emoji: '', stat: '📊', stock: '🎞', photo: '🖼', clip: '🎬', post: '💬', headline: '📰', timeline: '📅' };
+function emojiCode(e) { return [...e].map(c => c.codePointAt(0).toString(16)).filter(h => h !== 'fe0f').join('-'); }
+function cueWhat(c) {
+  if (c.type === 'words') return `big words “${c.text || c.at}”`;
+  if (c.type === 'emoji') return c.text ? `“${c.text}”` : 'emoji';
+  if (c.type === 'stat') return `${c.label || 'stat'}: ${c.value}`;
+  if (c.type === 'stock' || c.type === 'photo') return `${c.type === 'stock' ? 'footage' : 'photo'}: ${c.query}` + (c.credit && c.credit.source ? ` (${c.credit.source})` : '');
+  if (c.type === 'clip') return `clip ${c.clip} at ${Math.round(c.start || 0)}s`;
+  if (c.type === 'post') return 'your pasted post' + (c.highlight ? `: “${c.highlight}”` : '');
+  if (c.type === 'headline') return 'article headline' + (c.highlight ? `: “${c.highlight}”` : '');
+  if (c.type === 'timeline') return 'timeline ' + (c.points || []).map(p => p[0]).join(' → ');
+  return c.type;
+}
+function renderCues(cw) {
+  const cues = JSON.parse(cw.dataset.cues || '[]');
+  cw.innerHTML = '';
+  cues.forEach((c, k) => {
+    const chip = el('span', 'cue');
+    if (c.type === 'emoji' && c.emoji) { const im = el('img', 'emo'); im.src = `/api/longform/emoji/${emojiCode(c.emoji)}`; im.alt = c.emoji; chip.appendChild(im); }
+    else if (c.type === 'photo' && c.asset) { const im = el('img'); im.loading = 'lazy'; im.src = `/api/longform/projects/${project.id}/visuals/${c.asset}`; chip.appendChild(im); }
+    else if (c.type === 'stock' && c.asset) {
+      const src = `/api/longform/projects/${project.id}/visuals/${c.asset}`;
+      if (c.asset.endsWith('.mp4')) { const v = el('video'); v.muted = true; v.preload = 'metadata'; v.src = src + '#t=1'; chip.appendChild(v); }
+      else { const im = el('img'); im.loading = 'lazy'; im.src = src; chip.appendChild(im); }
+    } else chip.appendChild(el('span', '', CUE_ICON[c.type] || '•'));
+    chip.appendChild(el('span', 'at', `“${c.at}”`));
+    chip.appendChild(el('span', 'what', '→ ' + cueWhat(c)));
+    const x = el('button', '', '✕'); x.type = 'button'; x.title = 'Remove this visual';
+    x.addEventListener('click', () => { cues.splice(k, 1); cw.dataset.cues = JSON.stringify(cues); renderCues(cw); markDirty(); });
+    chip.appendChild(x);
+    cw.appendChild(chip);
+  });
+  if (!cues.length) cw.appendChild(el('span', 'hint', 'No key-word visuals yet: clips with slow zooms and captions play under this one.'));
+}
+
 function collectScenes() {
   return [...$('scenes').querySelectorAll('.scene')].map(row => {
     const out = { kind: row.dataset.kind };
     row.querySelectorAll('[data-f]').forEach(f => { out[f.dataset.f] = f.value; });
+    const cw = row.querySelector('.cues');
+    if (cw) out.cues = JSON.parse(cw.dataset.cues || '[]');
     if (out.start !== undefined) out.start = parseFloat(out.start);
     if (out.end !== undefined) out.end = parseFloat(out.end);
     return out;
