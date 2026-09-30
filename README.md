@@ -176,17 +176,6 @@ python -m clipper.cli "https://youtu.be/XXXXXXXXXXX" --whisper --focus "funniest
 The CLI uses automatic layouts (face detection) and plain captions. The IRL
 default, pacing edits, branding, uploads and analytics are web-app features.
 
-## A note on whose videos to clip
-
-This tool works the same way on your own uploads and on other people's
-public videos — it's just software, it doesn't know the difference. The
-difference that matters is legal/platform, not technical: clipping your
-own content is obviously fine; clipping someone else's and re-publishing
-it can run into copyright and platform ToS issues depending on how much
-you use, how you use it (commentary/criticism/fair use vs. straight
-re-upload), and where you post it. Worth a quick gut-check per video
-before you publish, not before you experiment locally.
-
 ## How it's organized
 
 ```
