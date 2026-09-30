@@ -106,6 +106,16 @@ def pdf_text(data: bytes) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
+    if reader.is_encrypted:
+        # NTSB reports are "encrypted" only to set copy/print permissions --
+        # they open with an empty password. Decrypting them needs the
+        # cryptography package (see requirements.txt).
+        try:
+            ok = reader.decrypt("")
+        except Exception as e:
+            raise RuntimeError(f"Couldn't open this report PDF ({e}).") from e
+        if not ok:
+            raise RuntimeError("This report PDF is password-protected -- try a different copy of it.")
     pages = []
     for page in reader.pages:
         try:
