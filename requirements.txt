@@ -8,3 +8,5 @@ uvicorn>=0.29.0
 chat-downloader>=0.2.0
 requests>=2.31.0
 pypdf>=4.0
+# pypdf needs this to open NTSB report PDFs, which are AES-encrypted (empty password).
+cryptography>=3.1
