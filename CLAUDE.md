@@ -85,6 +85,27 @@ merge it yourself; merging stays Dean's call per the rule above.
   Commentary over clips is what keeps it on the right side of fair use and
   YouTube's July 2025 "inauthentic content" rule — Dean's own narration is
   the point, never AI voice.
+- **AI voice (Sept 2026):** Dean narrates with his own voice (never his
+  face). `clipper/voice_clone.py` clones it with Kyutai Pocket TTS (100M
+  params, CPU, ~0.6 GB RAM, CC-BY-4.0 weights) to patch lines he'd rather
+  not re-read. It is NOT meant to replace his reading of whole episodes;
+  the page nudges him when over a third of the scenes use it. One sample
+  (him reading `SAMPLE_TEXT`) lives in `BASE_DIR/_longform/_voice/`; the
+  "🤖 Use my AI voice" button on a narrated scene makes a take with
+  `"voice": "ai"`, checked by the same misread check. The cloning weights
+  are gated on Hugging Face (free, auto-approved), so Railway needs
+  `HF_TOKEN` from an account that accepted the terms at
+  huggingface.co/kyutai/pocket-tts. Chatterbox was rejected: ~7.5 GB RAM
+  on CPU, and the box has 8 GB that already peaks near full. The
+  Dockerfile installs CPU-only torch first. From PyPI it would pull GBs of
+  CUDA. Adding pocket-tts changed no existing package version (checked
+  with `pip install --dry-run --report`). YouTube doesn't require the
+  altered-content label for cloning your own voice for voiceover. The
+  model can't be downloaded in the sandbox (HF blocked), so test with a
+  fake `pocket_tts` module.
+- Quiz format: prototyped (higher-or-lower on clip views, who-said-it,
+  guess-the-year) and shelved once Dean said he'll use his voice. The
+  documentary is the one long-form format for now.
 - Old aviation projects on the volume show as "old aviation test" and can
   only be deleted. pypdf/cryptography and the map/chart/Pexels code were
   removed with that format.
