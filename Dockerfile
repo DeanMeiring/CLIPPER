@@ -16,6 +16,11 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
+# The long-form "AI voice" (pocket-tts, in requirements.txt) needs PyTorch.
+# Install the CPU-only build first: from PyPI, pip would pull the CUDA build
+# and several GB of NVIDIA libraries this GPU-less box can't use.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
