@@ -3571,8 +3571,15 @@ def longform_visual_file(pid: str, name: str) -> FileResponse:
 
 @protected.get("/api/longform/emoji/{code}")
 def longform_emoji(code: str) -> FileResponse:
-    path = visual_sources.EMOJI_DIR / f"{code}.webp"
-    if not re.fullmatch(r"[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,4}", code) or not path.is_file():
+    if not re.fullmatch(r"[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,4}", code):
+        raise HTTPException(404, "not found")
+    # The page drops U+FE0F from the code; some bundled files keep it (🎙 is
+    # 1f399-fe0f.webp), so look the emoji up the way the renderer does.
+    try:
+        path = visual_sources.emoji_file("".join(chr(int(h, 16)) for h in code.split("-")))
+    except ValueError:  # not a real code point
+        path = None
+    if path is None:
         raise HTTPException(404, "not found")
     return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "max-age=604800"})
 
