@@ -282,6 +282,28 @@ clip -- only pick it if the content itself earns it.
 """
 
 
+def _viewer_clips_block(viewer_clips: Optional[List[dict]]) -> str:
+    """Twitch viewer-made clips of this same video (dicts with vod_offset,
+    duration, view_count, title) as a hint block -- empty string when there
+    are none, so the prompt is unchanged for every non-Twitch source."""
+    if not viewer_clips:
+        return ""
+    listing = "\n".join(
+        f"- {float(c['vod_offset']):.0f}s-{float(c['vod_offset']) + float(c.get('duration') or 30):.0f}s "
+        f"({c.get('view_count') or 0} views) \"{c.get('title') or ''}\""
+        for c in viewer_clips
+    )
+    return f"""
+Twitch viewers already clipped these moments of this stream themselves (with
+Twitch's own Clip button), most-viewed first -- a real audience saying "this
+part was worth saving". Strongly consider these moments, but still check the
+transcript: a viewer clip can be an inside joke that doesn't stand alone, and
+great moments nobody clipped are still fair game. Timestamps are where the
+viewer clip sits; widen or tighten to the best self-contained clip around it.
+{listing}
+"""
+
+
 _GROUP_BANTER_NOTE = """
 A transcript that reads messily -- overlapping speech, interruptions, cut-off
 sentences, unclear who's talking -- is often just what it looks like in text
@@ -444,6 +466,7 @@ def select_clips(
     strategy_notes: Optional[str] = None,
     performance_notes: Optional[str] = None,
     output_language: Optional[str] = None,
+    viewer_clips: Optional[List[dict]] = None,
 ) -> List[ClipPick]:
     """Return up to n_clips non-overlapping ClipPicks, sorted by start time.
     output_language (e.g. "Spanish") makes Claude write the on-screen and
@@ -452,7 +475,7 @@ def select_clips(
     language_line = _output_language_block(output_language)
     focus_line = f"\nThe creator specifically wants: {focus}\n" if focus else ""
     source_line = f"\nSource video title: {source_title}\n" if source_title else ""
-    loud_line = _loud_moments_block(loud_moments)
+    loud_line = _loud_moments_block(loud_moments) + _viewer_clips_block(viewer_clips)
     performance_line = _performance_block(performance_notes)
     strategy_line = _strategy_notes_block(strategy_notes)
 

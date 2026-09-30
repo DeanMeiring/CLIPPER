@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from clipper.captions import build_ass, clean_hook_text, rank_badge_dialogue, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video, usable_render_duration
 from clipper import hook_line
+from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
@@ -394,6 +395,38 @@ def _estimate_recap_seconds(num_candidates: int) -> float:
     return lookup + candidates + concat
 
 
+# How many of a Twitch VOD's viewer-made clips the job page shows (and the
+# short-video picker is told about), most-viewed first.
+TWITCH_VIEWER_CLIPS_SHOWN = 10
+
+
+def _twitch_viewer_clips(info) -> list:
+    """The most-viewed clips Twitch viewers made (Clip button) of this exact
+    VOD, slimmed to what the job page and the clip picker need. Empty for
+    anything that isn't a Twitch VOD, or when the lookup fails -- this is
+    extra signal, never a reason for a job to fail."""
+    extractor = (info.extractor or "") if info else ""
+    if "twitch" not in extractor or "vod" not in extractor or not info.broadcaster_login or not info.id:
+        return []
+    try:
+        clips = fetch_vod_clips(info.broadcaster_login, info.id, created_at=info.created_at, duration=info.duration)
+    except Exception as e:
+        print(f"[job] Twitch viewer clips lookup failed: {e}", flush=True)
+        return []
+    return [
+        {
+            "title": c.get("title") or "",
+            "url": c.get("url") or "",
+            "view_count": int(c.get("view_count") or 0),
+            "duration": float(c.get("duration") or 0.0),
+            "vod_offset": float(c["vod_offset"]),
+            "creator_name": c.get("creator_name") or "",
+            "thumbnail_url": c.get("thumbnail_url") or "",
+        }
+        for c in clips[:TWITCH_VIEWER_CLIPS_SHOWN]
+    ]
+
+
 def _run_job(job_id: str) -> None:
     with jobs_lock:
         pending_regenerate = jobs[job_id].pop("pending_regenerate", None)
@@ -446,6 +479,13 @@ def _run_job(job_id: str) -> None:
             info = probe_video(req.source)
         except Exception:
             info = None  # fall through to the normal download pipeline
+
+    # Clips Twitch viewers already made of this VOD: shown on the job page,
+    # and a hint to the picker (the long-VOD path already turns them into
+    # candidate windows inside gather_candidates).
+    twitch_clips = _twitch_viewer_clips(info)
+    if twitch_clips:
+        _set(job_id, twitch_clips=twitch_clips)
 
     # Both pipelines below normalize to: source_title, and a list of
     # (video_path, words, pick) tuples ready for the shared render loop.
@@ -520,6 +560,7 @@ def _run_job(job_id: str) -> None:
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
             output_language=_profile_output_language(profile),
+            viewer_clips=[c for c in twitch_clips if c["vod_offset"] < dl.duration] or None,
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -1272,6 +1313,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # Older jobs predate the flag; their new clips follow the current
         # default rather than the old auto-detected facecam behaviour.
         irl_layout = job.get("irl_layout", True)
+        twitch_clips = list(job.get("twitch_clips") or [])
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1341,6 +1383,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             focus=focus, source_title=source_title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
             output_language=_profile_output_language(channel_profile),
+            viewer_clips=[c for c in twitch_clips if c["vod_offset"] < cached["duration"]] or None,
         )
 
         def _overlaps_used(p) -> bool:
@@ -4082,6 +4125,20 @@ _CHANNEL_HOME_TEMPLATE = """<!doctype html>
   .clip a:hover { text-decoration: underline; }
   .clip strong { font-size: 0.98rem; }
   .clip em { color: var(--muted); font-size: 0.88rem; display: block; margin-top: 4px; font-style: italic; }
+  #twitch-clips { margin-top: 20px; }
+  #twitch-clips .hint { margin: 4px 0 4px; }
+  .twitch-clip {
+    display: flex; gap: 12px; align-items: center; margin-top: 10px; padding: 10px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    color: var(--text); text-decoration: none;
+  }
+  .twitch-clip:hover { border-color: var(--accent); }
+  .twitch-clip img { width: 128px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; flex-shrink: 0; background: var(--border); }
+  .twitch-clip-info { min-width: 0; }
+  .twitch-clip-title { font-weight: 700; font-size: 0.92rem; overflow-wrap: anywhere; }
+  .twitch-clip-meta { color: var(--muted); font-size: 0.8rem; margin-top: 3px; }
+  .twitch-clip-rank { color: var(--accent); font-weight: 800; margin-right: 4px; }
+  @media (max-width: 480px) { .twitch-clip img { width: 96px; } }
   .clip-primary-row { display: flex; gap: 8px; margin-top: 12px; }
   .clip-primary-row button { flex: 1; margin-top: 0; padding: 10px 14px; font-size: 0.86rem; }
   .clip-secondary-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -4262,6 +4319,7 @@ __NAV_LINKS__
 </div>
 <div id="clips"></div>
 <button id="delete-btn" type="button">🗑 I've downloaded these — delete from server</button>
+<div id="twitch-clips"></div>
 
 <div id="jobs-panel">
   <label style="margin-top:0">Active &amp; saved jobs</label>
@@ -4431,6 +4489,77 @@ __NAV_LINKS__
 const statusEl = document.getElementById('status');
 const clipsEl = document.getElementById('clips');
 const deleteBtn = document.getElementById('delete-btn');
+const twitchClipsEl = document.getElementById('twitch-clips');
+let twitchClipsKey = '';
+
+function fmtVodTime(sec) {
+  const t = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), r = t % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
+}
+
+function fmtViews(n) {
+  n = n || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
+  return String(n);
+}
+
+// Twitch's own clips of the job's source VOD (made by viewers with the Clip
+// button), most-viewed first. Rebuilt only when the list changes, not on
+// every 2s poll, so the thumbnails don't flicker.
+function renderTwitchClips(jobId, job) {
+  const list = (job && job.twitch_clips) || [];
+  const key = list.length ? `${jobId}:${list.map(c => c.url).join(',')}` : '';
+  if (key === twitchClipsKey) return;
+  twitchClipsKey = key;
+  twitchClipsEl.innerHTML = '';
+  if (!list.length) return;
+  const heading = document.createElement('label');
+  heading.textContent = '🔥 Most-viewed Twitch clips of this stream';
+  twitchClipsEl.appendChild(heading);
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent = 'Clips Twitch viewers made themselves with the Clip button. Claude was shown these moments when picking your clips.';
+  twitchClipsEl.appendChild(hint);
+  list.forEach((c, i) => {
+    const a = document.createElement('a');
+    a.className = 'twitch-clip';
+    a.href = c.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    if (c.thumbnail_url) {
+      const img = document.createElement('img');
+      img.src = c.thumbnail_url;
+      img.alt = '';
+      img.loading = 'lazy';
+      a.appendChild(img);
+    }
+    const info = document.createElement('div');
+    info.className = 'twitch-clip-info';
+    const title = document.createElement('div');
+    title.className = 'twitch-clip-title';
+    const rank = document.createElement('span');
+    rank.className = 'twitch-clip-rank';
+    rank.textContent = `#${i + 1}`;
+    title.appendChild(rank);
+    title.appendChild(document.createTextNode(c.title || 'Untitled clip'));
+    info.appendChild(title);
+    const meta = document.createElement('div');
+    meta.className = 'twitch-clip-meta';
+    const parts = [
+      `👁 ${fmtViews(c.view_count)} views`,
+      `at ${fmtVodTime(c.vod_offset)} in the stream`,
+      `${Math.round(c.duration || 0)}s`,
+    ];
+    if (c.creator_name) parts.push(`clipped by ${c.creator_name}`);
+    meta.textContent = parts.join(' · ');
+    info.appendChild(meta);
+    a.appendChild(info);
+    twitchClipsEl.appendChild(a);
+  });
+}
 const submitBtn = document.getElementById('submit');
 const cancelBtn = document.getElementById('cancel-btn');
 const progressWrap = document.getElementById('progress-wrap');
@@ -4824,6 +4953,7 @@ function setRunning(running) {
 
 async function submitJob() {
   clipsEl.innerHTML = '';
+  renderTwitchClips(null, null);
   statusEl.textContent = 'Submitting...';
   setRunning(true);
   progressBar.style.width = '0%';
@@ -5520,6 +5650,7 @@ async function poll(jobId) {
     progressEta.textContent = 'estimating...';
   }
 
+  renderTwitchClips(jobId, job);
   clipsEl.innerHTML = '';
   const scored = (job.clips || []).filter(c => typeof c.score === 'number' && !c.is_recap);
   const bestScore = scored.length > 1 ? Math.max(...scored.map(c => c.score)) : null;
@@ -5702,6 +5833,7 @@ async function poll(jobId) {
             // the just-deleted clip on screen until a manual refresh.
             clipsEl.innerHTML = '';
             statusEl.textContent = '';
+            renderTwitchClips(null, null);
             progressWrap.style.display = 'none';
             await loadJobsList();
           } else {
@@ -5747,6 +5879,7 @@ deleteBtn.addEventListener('click', async () => {
   if (resp.ok) {
     clipsEl.innerHTML = '';
     statusEl.textContent = 'Deleted.';
+    renderTwitchClips(null, null);
     deleteBtn.style.display = 'none';
     currentJobId = null;
     loadJobsList();
@@ -6047,6 +6180,13 @@ _UI_STRINGS_ES: list = [
     ("'Deleting...'", "'Borrando...'"),
     ("Delete these clips from the server? This can\\'t be undone.", "¿Borrar estos clips del servidor? No se puede deshacer."),
     ("'Deleted.'", "'Borrado.'"),
+    ("'🔥 Most-viewed Twitch clips of this stream'", "'🔥 Clips de Twitch más vistos de este directo'"),
+    ("'Clips Twitch viewers made themselves with the Clip button. Claude was shown these moments when picking your clips.'",
+     "'Clips que los espectadores hicieron con el botón Clip de Twitch. Claude tuvo en cuenta estos momentos al elegir tus clips.'"),
+    ("'Untitled clip'", "'Clip sin título'"),
+    ("`👁 ${fmtViews(c.view_count)} views`", "`👁 ${fmtViews(c.view_count)} vistas`"),
+    ("`at ${fmtVodTime(c.vod_offset)} in the stream`", "`en el ${fmtVodTime(c.vod_offset)} del directo`"),
+    ("`clipped by ${c.creator_name}`", "`clipeado por ${c.creator_name}`"),
 ]
 
 _UI_TRANSLATIONS: dict = {"es": _UI_STRINGS_ES}
