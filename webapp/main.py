@@ -74,9 +74,62 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 JOB_META_NAME = "job.json"
 TERMINAL_STATES = ("done", "error", "cancelled")
 
-# Persists on the same volume job data lives on, so the connected YouTube
-# account survives restarts/redeploys -- see clipper/youtube_oauth.py.
-_youtube_token_store = youtube_oauth.TokenStore(BASE_DIR / "_youtube_oauth_token.json")
+# A "channel profile" is a second, parallel content pipeline -- same clipping
+# code, different tracked streamers / YouTube channel / on-clip branding.
+# Added for a Spanish-language clip channel alongside the original one.
+# Adding another profile is just another entry here: a Twitch-logins env var,
+# a display name to stamp on clips, an accent colour for the mascot so the
+# two channels' clips don't look identical, and its own YouTube OAuth token
+# file so it can be connected independently of the main channel.
+CHANNEL_PROFILES: dict = {
+    "main": {
+        "label": "Main (English)",
+        "twitch_env": "TRENDING_TWITCH_LOGINS",
+        "brand_name": os.environ.get("CLIPPER_BRAND_NAME", "Caught On Stream"),
+        "mascot_accent": "00CCFF",
+        "token_file": "_youtube_oauth_token.json",
+        "page_path": "/",
+        # Language Claude writes clip titles/hook text/descriptions in --
+        # None leaves the selection prompt exactly as it always was.
+        "output_language": None,
+    },
+    "es": {
+        "label": "Español",
+        "twitch_env": "TRENDING_TWITCH_LOGINS_ES",
+        "brand_name": os.environ.get("CLIPPER_BRAND_NAME_ES", "Pillado En Directo"),
+        # ASS colours are &HBBGGRR: this is orange (RGB FF7A1A), next to the
+        # main channel's yellow (RGB FFCC00) face.
+        "mascot_accent": "1A7AFF",
+        "token_file": "_youtube_oauth_token_es.json",
+        "page_path": "/espanol",
+        "output_language": "Spanish",
+    },
+}
+DEFAULT_CHANNEL_PROFILE = "main"
+
+
+def _profile_logins(profile: str) -> List[str]:
+    cfg = CHANNEL_PROFILES.get(profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
+    return [l.strip().lower() for l in os.environ.get(cfg["twitch_env"], "").split(",") if l.strip()]
+
+
+def _profile_or_default(profile: Optional[str]) -> str:
+    return profile if profile in CHANNEL_PROFILES else DEFAULT_CHANNEL_PROFILE
+
+
+def _profile_output_language(profile: Optional[str]) -> Optional[str]:
+    return CHANNEL_PROFILES[_profile_or_default(profile)]["output_language"]
+
+
+# Persists on the same volume job data lives on, so each connected YouTube
+# account survives restarts/redeploys -- see clipper/youtube_oauth.py. One
+# TokenStore per channel profile, each its own file, so connecting the
+# Spanish channel's YouTube account never touches the main channel's token.
+_youtube_token_stores: dict = {
+    profile: youtube_oauth.TokenStore(BASE_DIR / cfg["token_file"])
+    for profile, cfg in CHANNEL_PROFILES.items()
+}
+_youtube_token_store = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE]  # back-compat alias for the main profile
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _recap_scheduler_state_path = BASE_DIR / "_recap_scheduler_state.json"
@@ -133,10 +186,10 @@ def _load_performance_notes() -> Optional[str]:
     return clip_performance.render_prompt_text(performance)
 
 
-# CSRF state for the OAuth login flow: state -> issued_at. Short-lived and
-# in-memory is fine -- a login round-trip through Google takes seconds, not
-# something that needs to survive a restart.
-_youtube_oauth_states: dict[str, float] = {}
+# CSRF state for the OAuth login flow: state -> (issued_at, channel_profile).
+# Short-lived and in-memory is fine -- a login round-trip through Google
+# takes seconds, not something that needs to survive a restart.
+_youtube_oauth_states: dict[str, tuple] = {}
 
 
 class JobCancelled(Exception):
@@ -192,6 +245,10 @@ class JobRequest(BaseModel):
     # The channel mascot in the corner and the channel name stamped beside it
     # for the first few seconds (captions.brand_dialogues).
     branding: bool = True
+    # Which tracked-streamer list / YouTube account / on-clip brand this job
+    # belongs to (see CHANNEL_PROFILES). Defaults to the original channel so
+    # every existing client that doesn't send this keeps working unchanged.
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE
 
 
 class RegenerateRequest(BaseModel):
@@ -369,7 +426,9 @@ def _run_job(job_id: str) -> None:
     # the upload button, so clamp here rather than let a job silently
     # produce something that was never eligible.
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
-    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding)
+    profile = _profile_or_default(req.channel_profile)
+    _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
+         channel_profile=profile)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -417,6 +476,7 @@ def _run_job(job_id: str) -> None:
             candidates, n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, api_key=None, source_title=source_title,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(profile),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -455,6 +515,7 @@ def _run_job(job_id: str) -> None:
             n_clips=req.num_clips, min_len=req.min_len, max_len=req.max_len,
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(profile),
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -467,6 +528,7 @@ def _run_job(job_id: str) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, render_base, [],
         hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
+        channel_profile=profile,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
@@ -598,6 +660,7 @@ def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, tea
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
     hook_text: bool = True, pacing: bool = True, teaser: bool = False, branding: bool = True,
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -606,9 +669,14 @@ def _render_all(
     starts empty or with clips from a prior run. hook_text burns each pick's
     hook_caption into the top of its first few seconds; pacing and teaser
     control the edits in clipper/edit_plan.py; branding adds the channel
-    mascot and name stamp."""
+    mascot and name stamp -- channel_profile picks *which* channel's name/
+    mascot colour (see CHANNEL_PROFILES), so a Spanish-channel job doesn't
+    get stamped with the main channel's name."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
+    profile_cfg = CHANNEL_PROFILES.get(channel_profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
+    brand_name = profile_cfg["brand_name"]
+    mascot_accent = profile_cfg["mascot_accent"]
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
     for i, (video_path, words, pick) in enumerate(render_items, start=1):
         cancel()
@@ -626,7 +694,8 @@ def _render_all(
             caption_words, caption_start, out_duration = remap_words(clip_words, pick.start, plan), 0.0, plan.duration
         else:
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
+        build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
+                  brand_name=brand_name, mascot_accent=mascot_accent)
         try:
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
         except RuntimeError as e:
@@ -637,7 +706,8 @@ def _render_all(
             print(f"[edit_plan] edited render of {out_path.name} failed, rendering it without edits: {e}", flush=True)
             plan = None
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
-            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding)
+            build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
+                      brand_name=brand_name, mascot_accent=mascot_accent)
             _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
 
         facecam_uncertain = False
@@ -1186,6 +1256,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # Jobs from before branding existed get it on their new clips too:
         # it's the channel's look now, not a per-job experiment.
         branding = job.get("branding", True)
+        channel_profile = job.get("channel_profile", DEFAULT_CHANNEL_PROFILE)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1235,6 +1306,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             candidates, n_clips=num_clips, min_len=min_len, max_len=max_len,
             focus=focus, api_key=None, source_title=source_title,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(channel_profile),
         )
         cand_words = {c["index"]: c["words"] for c in candidates}
         render_items = [(video_path, cand_words[pick.window_index], pick) for video_path, pick in mapped]
@@ -1253,6 +1325,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             n_clips=num_clips + len(used_ranges), min_len=min_len, max_len=max_len,
             focus=focus, source_title=source_title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
+            output_language=_profile_output_language(channel_profile),
         )
 
         def _overlaps_used(p) -> bool:
@@ -1270,6 +1343,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, 0.15, existing_clips,
         hook_text=hook_text, pacing=pacing, teaser=teaser, branding=branding,
+        channel_profile=channel_profile,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
@@ -1523,6 +1597,7 @@ def create_job(req: JobRequest) -> dict:
             "error": None,
             "saved": False,
             "request": req,
+            "channel_profile": _profile_or_default(req.channel_profile),
         }
         cancel_events[job_id] = threading.Event()
     _persist(job_id)
@@ -1849,10 +1924,16 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
         clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
         if clip is None:
             raise HTTPException(404, "clip not found")
+        channel_profile = job.get("channel_profile", DEFAULT_CHANNEL_PROFILE)
 
-    access_token = _youtube_token_store.get_valid_access_token()
+    # A job's clips always go to the same channel they were generated for --
+    # a Spanish-channel job's clips upload through the Spanish channel's own
+    # connected YouTube account, never the main one, even if both happen to
+    # be connected at once.
+    access_token = _youtube_token_stores[_profile_or_default(channel_profile)].get_valid_access_token()
     if not access_token:
-        raise HTTPException(409, "Connect your YouTube account on the analytics page first.")
+        label = CHANNEL_PROFILES[_profile_or_default(channel_profile)]["label"]
+        raise HTTPException(409, f"Connect the {label} YouTube account first.")
 
     path = BASE_DIR / job_id / filename
     if not path.is_file():
@@ -3220,31 +3301,102 @@ def delete_all_clips(job_id: str) -> dict:
     return {"ok": True, "clips": []}
 
 
-_trending_cache: dict = {"at": 0.0, "sections": {}}
+_trending_cache: dict = {}  # profile -> {"at": float, "sections": dict}
 _TRENDING_CACHE_SECONDS = 180.0
 
 
+@protected.get("/api/profiles")
+def list_channel_profiles() -> dict:
+    """Which channel profiles exist (see CHANNEL_PROFILES), and whether each
+    one's YouTube account is currently connected -- backs the channel
+    switcher in the UI."""
+    return {
+        "profiles": [
+            {
+                "id": profile,
+                "label": cfg["label"],
+                "brand_name": cfg["brand_name"],
+                "twitch_logins": _profile_logins(profile),
+                "youtube_connected": _youtube_token_stores[profile].is_connected(),
+            }
+            for profile, cfg in CHANNEL_PROFILES.items()
+        ],
+        "default": DEFAULT_CHANNEL_PROFILE,
+    }
+
+
 @protected.get("/api/trending")
-def trending() -> dict:
+def trending(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
     """Four rows for the UI: configured creators' latest YouTube upload,
     configured creators' latest Twitch VOD, Twitch's biggest live streams
     globally, and popular Twitch creators not already on the watchlist
-    (see clipper/trending.py). Cached briefly so refreshing the page
-    doesn't re-hit the Twitch/YouTube APIs (and YouTube's daily quota)
-    every time."""
+    (see clipper/trending.py). profile picks which channel's watchlist to
+    use (see CHANNEL_PROFILES) -- defaults to the main channel. Cached
+    briefly per profile so refreshing the page doesn't re-hit the Twitch/
+    YouTube APIs (and YouTube's daily quota) every time."""
+    profile = _profile_or_default(profile)
+    cache = _trending_cache.setdefault(profile, {"at": 0.0, "sections": {}})
     now = time.time()
-    if now - _trending_cache["at"] > _TRENDING_CACHE_SECONDS:
+    if now - cache["at"] > _TRENDING_CACHE_SECONDS:
         try:
-            sections = get_trending_sections()
+            # Only the main profile has a configured YouTube watchlist row
+            # today -- a second profile just shows its own Twitch rows.
+            youtube_channels = None if profile == DEFAULT_CHANNEL_PROFILE else []
+            sections = get_trending_sections(twitch_logins=_profile_logins(profile), youtube_channels=youtube_channels)
         except Exception as e:
-            print(f"[trending] lookup failed: {e}", flush=True)
-            sections = _trending_cache["sections"]
-        _trending_cache["sections"] = sections
-        _trending_cache["at"] = now
+            print(f"[trending] lookup failed for profile {profile!r}: {e}", flush=True)
+            sections = cache["sections"]
+        cache["sections"] = sections
+        cache["at"] = now
     return {
         name: [vars(e) for e in entries]
-        for name, entries in _trending_cache["sections"].items()
+        for name, entries in cache["sections"].items()
     }
+
+
+@protected.get("/api/vods/yesterday")
+def yesterday_vods(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
+    """Yesterday's VODs (by UTC calendar date) from a channel profile's
+    tracked streamers -- built for the Spanish channel, where the streamers
+    are big enough that browsing "what did they stream yesterday" and
+    picking one by hand is the actual workflow, rather than the single
+    latest-VOD row /api/trending shows. Reuses get_recommendation_candidates
+    (the same Twitch lookup /api/recommend-vod uses) with a wider per-
+    streamer pull and no AI ranking -- this just lists what's there for a
+    human to pick from and feed into the normal /api/jobs flow, exactly
+    like any other source URL."""
+    from datetime import datetime, timezone, timedelta
+
+    profile = _profile_or_default(profile)
+    logins = _profile_logins(profile)
+    if not logins:
+        raise HTTPException(
+            409,
+            f"No streamers configured for this profile -- set {CHANNEL_PROFILES[profile]['twitch_env']} first.",
+        )
+
+    today_utc = datetime.now(timezone.utc).date()
+    yesterday_utc = today_utc - timedelta(days=1)
+
+    try:
+        candidates = get_recommendation_candidates(logins, per_streamer=10, max_age_days=2.5)
+    except Exception as e:
+        raise HTTPException(502, f"Twitch lookup failed: {e}") from e
+
+    results = []
+    for c in candidates:
+        if not c.published_at:
+            continue
+        try:
+            published = datetime.fromisoformat(c.published_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if published.astimezone(timezone.utc).date() != yesterday_utc:
+            continue
+        results.append(vars(c).copy())
+
+    results.sort(key=lambda c: c.get("view_count") or 0, reverse=True)
+    return {"date": yesterday_utc.isoformat(), "results": results}
 
 
 @protected.get("/api/search-creator")
@@ -3372,10 +3524,16 @@ def _youtube_redirect_uri() -> str:
 
 
 @protected.get("/auth/youtube/login")
-def youtube_login() -> RedirectResponse:
-    """Kick off the OAuth flow for the channel owner's own YouTube account
-    (see clipper/youtube_oauth.py) -- reads real Analytics data instead of
-    just the public Data API's view counts."""
+def youtube_login(profile: str = DEFAULT_CHANNEL_PROFILE) -> RedirectResponse:
+    """Kick off the OAuth flow for one channel profile's YouTube account
+    (see clipper/youtube_oauth.py and CHANNEL_PROFILES) -- reads real
+    Analytics data instead of just the public Data API's view counts. Both
+    profiles share one registered Google OAuth client (just a different
+    Google account consenting each time); which profile this login is for
+    is carried through the round trip in _youtube_oauth_states, keyed by
+    the CSRF state, since Google's redirect back doesn't let us pass our
+    own query params through untouched."""
+    profile = _profile_or_default(profile)
     if not youtube_oauth.is_configured():
         raise HTTPException(
             400,
@@ -3384,12 +3542,12 @@ def youtube_login() -> RedirectResponse:
         )
     redirect_uri = _youtube_redirect_uri()
     state = secrets.token_urlsafe(24)
-    _youtube_oauth_states[state] = time.time()
+    _youtube_oauth_states[state] = (time.time(), profile)
     # Prune old, abandoned login attempts instead of growing forever --
     # this dict only ever holds a handful of entries for a single-tenant
     # app, so a plain sweep on every login is plenty.
     cutoff = time.time() - 600
-    for s, issued_at in list(_youtube_oauth_states.items()):
+    for s, (issued_at, _profile) in list(_youtube_oauth_states.items()):
         if issued_at < cutoff:
             _youtube_oauth_states.pop(s, None)
     return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state))
@@ -3399,17 +3557,24 @@ def youtube_login() -> RedirectResponse:
 def youtube_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
     if error:
         return RedirectResponse(f"/analytics?youtube_error={error}")
-    issued_at = _youtube_oauth_states.pop(state, None)
-    if issued_at is None or time.time() - issued_at > 600:
+    issued = _youtube_oauth_states.pop(state, None)
+    if issued is None or time.time() - issued[0] > 600:
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
+    profile = _profile_or_default(issued[1])
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
-    _youtube_token_store.save(token)
-    return RedirectResponse("/analytics?youtube_connected=1")
+    _youtube_token_stores[profile].save(token)
+    # The main channel's connect flow also lives on the analytics page (it
+    # reads real Analytics data there); every profile's own channel page
+    # (see CHANNEL_PROFILES' page_path) shows connect status too, and is
+    # where a second profile's connect button sends you from.
+    if profile == DEFAULT_CHANNEL_PROFILE:
+        return RedirectResponse("/analytics?youtube_connected=1")
+    return RedirectResponse(f"{CHANNEL_PROFILES[profile]['page_path']}?youtube_connected=1")
 
 
 @protected.post("/api/youtube/disconnect")
-def youtube_disconnect() -> dict:
-    _youtube_token_store.clear()
+def youtube_disconnect(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
+    _youtube_token_stores[_profile_or_default(profile)].clear()
     return {"ok": True}
 
 
@@ -3717,6 +3882,11 @@ def index() -> str:
     return INDEX_HTML
 
 
+@protected.get("/espanol", response_class=HTMLResponse)
+def espanol_page() -> str:
+    return SPANISH_HTML
+
+
 @protected.get("/analytics", response_class=HTMLResponse)
 def analytics_page() -> str:
     return ANALYTICS_HTML
@@ -3740,12 +3910,12 @@ def hook_line_page() -> str:
 app.include_router(protected)
 
 
-INDEX_HTML = """<!doctype html>
+_CHANNEL_HOME_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>clipper</title>
+<title>clipper — __PROFILE_LABEL__</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -3783,11 +3953,11 @@ INDEX_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -3809,16 +3979,19 @@ INDEX_HTML = """<!doctype html>
   h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
   .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 24px; }
   label { display: block; margin-top: 16px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
-  input, textarea {
+  input, textarea, select {
     width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem;
     background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 10px;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input:focus, textarea:focus {
+  input:focus, textarea:focus, select:focus {
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
   }
+  #profile-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; }
+  #profile-row .hint { margin: 0; }
+  #profile-row button { width: auto; white-space: nowrap; padding: 8px 14px; margin-top: 0; font-size: 0.85rem; }
   .row { display: flex; gap: 12px; }
   .row > div { flex: 1; }
   button {
@@ -3953,17 +4126,22 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <div class="page">
-<div class="topnav">
-  <a href="/" class="active">Home</a>
-  <a href="/weekly-recap">Weekly Recap</a>
-  <a href="/game-recap">Game Recap</a>
-  <a href="/analytics">Analytics</a>
-  <a href="/hook-line">Hook Line</a>
-</div>
+__NAV_LINKS__
 <div class="card">
 
-<div class="brand"><span class="logo">🎬</span><h1>clipper</h1></div>
+<div class="brand"><span class="logo">🎬</span><h1>clipper — __PROFILE_LABEL__</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
+
+<div id="profile-row">
+  <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
+  <button id="profile-youtube-btn" type="button">Connect YouTube</button>
+</div>
+
+<div class="trending-section" id="yesterday-vods-section" style="display:none">
+  <label style="margin-top:0">Yesterday's VODs</label>
+  <div class="hint" id="yesterday-vods-status" style="display:none"></div>
+  <div id="yesterday-vods-results"></div>
+</div>
 
 <label style="margin-top:0">Search a creator</label>
 <div id="search-row">
@@ -4245,6 +4423,7 @@ let timer = null;
 let jobsTimer = null;
 let currentJobId = null;
 let pendingDeleteOnCancel = false;
+const currentProfile = '__PROFILE_ID__';
 
 function formatViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'K';
@@ -4286,7 +4465,7 @@ function buildCreatorCard(c) {
 
 async function loadTrending() {
   try {
-    const resp = await fetch('/api/trending');
+    const resp = await fetch(`/api/trending?profile=${encodeURIComponent(currentProfile)}`);
     if (!resp.ok) return;
     const sections = await resp.json();
     TRENDING_SECTIONS.forEach(key => {
@@ -4302,7 +4481,79 @@ async function loadTrending() {
     // trending is a nice-to-have -- never block the rest of the page on it
   }
 }
+
+const yesterdayVodsSection = document.getElementById('yesterday-vods-section');
+const yesterdayVodsStatus = document.getElementById('yesterday-vods-status');
+const yesterdayVodsResults = document.getElementById('yesterday-vods-results');
+
+async function loadYesterdayVods() {
+  yesterdayVodsResults.innerHTML = '';
+  yesterdayVodsStatus.style.display = 'none';
+  try {
+    const resp = await fetch(`/api/vods/yesterday?profile=${encodeURIComponent(currentProfile)}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      // No streamers configured for this profile yet -- just hide the
+      // section instead of showing an error for something that isn't a
+      // real problem (e.g. the main profile, which uses Recommend VOD instead).
+      yesterdayVodsSection.style.display = 'none';
+      return;
+    }
+    const results = data.results || [];
+    if (!results.length) {
+      yesterdayVodsSection.style.display = 'block';
+      yesterdayVodsStatus.style.display = 'block';
+      yesterdayVodsStatus.textContent = `No VODs found from yesterday (${data.date}) for this channel's tracked streamers.`;
+      return;
+    }
+    yesterdayVodsSection.style.display = 'block';
+    results.forEach(c => yesterdayVodsResults.appendChild(buildRecommendCard(c, c.name)));
+  } catch (e) {
+    yesterdayVodsSection.style.display = 'none';
+  }
+}
+
+const profileYoutubeBtn = document.getElementById('profile-youtube-btn');
+const profileYoutubeStatus = document.getElementById('profile-youtube-status');
+let profileYoutubeConnected = false;
+
+function renderProfileYoutubeStatus(label) {
+  if (profileYoutubeConnected) {
+    profileYoutubeStatus.textContent = `YouTube connected for ${label}.`;
+    profileYoutubeBtn.textContent = 'Disconnect YouTube';
+  } else {
+    profileYoutubeStatus.textContent = `YouTube not connected for ${label} -- uploads for this channel won't work until it is.`;
+    profileYoutubeBtn.textContent = 'Connect YouTube';
+  }
+}
+
+profileYoutubeBtn.addEventListener('click', async () => {
+  if (profileYoutubeConnected) {
+    if (!confirm('Disconnect the __PROFILE_LABEL__ YouTube account?')) return;
+    await fetch(`/api/youtube/disconnect?profile=${encodeURIComponent(currentProfile)}`, { method: 'POST' });
+    await loadProfileYoutubeStatus();
+  } else {
+    window.location.href = `/auth/youtube/login?profile=${encodeURIComponent(currentProfile)}`;
+  }
+});
+
+async function loadProfileYoutubeStatus() {
+  try {
+    const resp = await fetch('/api/profiles');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const p = (data.profiles || []).find(p => p.id === currentProfile);
+    if (!p) return;
+    profileYoutubeConnected = p.youtube_connected;
+    renderProfileYoutubeStatus(p.label);
+  } catch (e) {
+    // connect status is a nice-to-have -- generating/uploading still work
+  }
+}
+
+loadProfileYoutubeStatus();
 loadTrending();
+loadYesterdayVods();
 
 function formatDuration(d) {
   // Twitch's own format is already compact (e.g. "3h20m10s") -- just
@@ -4445,7 +4696,9 @@ async function loadJobsList() {
     if (!resp.ok) return;
     const { jobs } = await resp.json();
     jobsListEl.innerHTML = '';
-    jobs.forEach(job => {
+    // Jobs from before channel profiles existed have no channel_profile at
+    // all -- they belong to the main channel, not to neither.
+    jobs.filter(job => (job.channel_profile || 'main') === currentProfile).forEach(job => {
       const row = document.createElement('div');
       row.className = 'job-row';
 
@@ -4566,6 +4819,7 @@ async function submitJob() {
     pacing: document.getElementById('pacing').checked,
     teaser: document.getElementById('teaser').checked,
     branding: document.getElementById('branding').checked,
+    channel_profile: currentProfile,
   };
   const resp = await fetch('/api/jobs', {
     method: 'POST',
@@ -5498,6 +5752,312 @@ notifyTestBtn.addEventListener('click', async () => {
 """
 
 
+def _nav_links(active_path: str) -> str:
+    """The shared topnav, repeated on every page -- active_path marks which
+    link (by href) gets the highlighted style. One extra link per channel
+    profile (see CHANNEL_PROFILES) beyond the fixed Weekly Recap/Game
+    Recap/Analytics/Hook Line pages."""
+    links = [("Home", CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]["page_path"]),
+             ("Weekly Recap", "/weekly-recap"), ("Game Recap", "/game-recap"),
+             ("Analytics", "/analytics"), ("Hook Line", "/hook-line")]
+    for profile, cfg in CHANNEL_PROFILES.items():
+        if profile != DEFAULT_CHANNEL_PROFILE:
+            links.append((cfg["label"], cfg["page_path"]))
+
+    def _link(label: str, href: str) -> str:
+        active_attr = ' class="active"' if href == active_path else ""
+        return f'<a href="{href}"{active_attr}>{label}</a>'
+
+    rows = "\n  ".join(_link(label, href) for label, href in links)
+    return f'<div class="topnav">\n  {rows}\n</div>'
+
+
+# The Spanish channel page's interface text: (exact English text in
+# _CHANNEL_HOME_TEMPLATE, Spanish replacement). Short or ambiguous strings
+# carry their surrounding quotes/tags so only display text is swapped, never
+# a logic value like a key name or HTTP method. Single-quoted JS strings
+# must not gain an apostrophe. Longer strings come before any shorter one
+# they contain.
+_UI_STRINGS_ES: list = [
+    ("<html>", '<html lang="es">'),
+    ("Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.",
+     "Pega un enlace de YouTube o Twitch y recibe clips verticales cortos con los mejores momentos, elegidos por Claude."),
+    (">Connect YouTube<", ">Conectar YouTube<"),
+    ("'Connect YouTube'", "'Conectar YouTube'"),
+    ("'Disconnect YouTube'", "'Desconectar YouTube'"),
+    ("YouTube connected for ${label}.", "YouTube conectado para ${label}."),
+    ("YouTube not connected for ${label} -- uploads for this channel won't work until it is.",
+     "YouTube no está conectado para ${label}: las subidas de este canal no funcionarán hasta que lo conectes."),
+    ("Disconnect the __PROFILE_LABEL__ YouTube account?", "¿Desconectar la cuenta de YouTube de este canal?"),
+    (">Home</a>", ">Principal</a>"),
+    (">Weekly Recap</a>", ">Semanal</a>"),
+    (">Game Recap</a>", ">Juegos</a>"),
+    (">Analytics</a>", ">Analíticas</a>"),
+    (">Hook Line</a>", ">Ganchos</a>"),
+    ("'🗑 Delete'", "'🗑 Borrar'"),
+    ("'🖼 Thumbnail'", "'🖼 Miniatura'"),
+    ("No VODs found from yesterday (${data.date}) for this channel's tracked streamers.",
+     "No hay VODs de ayer (${data.date}) de los streamers que sigue este canal."),
+    ("Yesterday's VODs", "VODs de ayer"),
+    (">Search a creator<", ">Buscar un creador<"),
+    ('placeholder="Twitch login or YouTube handle..."', 'placeholder="Usuario de Twitch o @ de YouTube..."'),
+    (">Search<", ">Buscar<"),
+    ("'Searching...'", "'Buscando...'"),
+    ('No creator found for "${q}".', 'No se encontró ningún creador para "${q}".'),
+    ("Search failed -- try again.", "La búsqueda falló: inténtalo de nuevo."),
+    (">Recommended VOD to clip today<", ">VOD recomendado para clipear hoy<"),
+    (">🎯 Recommend one<", ">🎯 Recomiéndame uno<"),
+    ("Checking your tracked streamers' recent VODs -- this can take up to a minute since it double-checks each one is actually downloadable...",
+     "Revisando los VODs recientes de tus streamers: puede tardar hasta un minuto porque comprueba que cada uno se pueda descargar..."),
+    ("Could not get a recommendation -- try again.", "No se pudo obtener una recomendación: inténtalo de nuevo."),
+    ("'Could not get a recommendation.'", "'No se pudo obtener una recomendación.'"),
+    ("'Top pick'", "'Mejor opción'"),
+    ("'Runner-up'", "'Segunda opción'"),
+    ("'Use this VOD'", "'Usar este VOD'"),
+    ("${formatViewers(entry.view_count)} views", "${formatViewers(entry.view_count)} vistas"),
+    ("`LIVE · ${formatViewers(c.viewers)} viewers` : 'LIVE'",
+     "`EN DIRECTO · ${formatViewers(c.viewers)} espectadores` : 'EN DIRECTO'"),
+    (">Latest uploads — YouTube<", ">Últimos videos — YouTube<"),
+    (">Latest VODs — Twitch<", ">Últimos VODs — Twitch<"),
+    (">Trending live now — Twitch (100k+ viewers)<", ">En directo ahora — Twitch (más de 100k espectadores)<"),
+    (">Suggested creators — Twitch (popular, not on your watchlist)<",
+     ">Creadores sugeridos — Twitch (populares, fuera de tu lista)<"),
+    (">Video URL<", ">URL del video<"),
+    (">Focus (optional)<", ">Enfoque (opcional)<"),
+    ('placeholder="e.g. funniest moments"', 'placeholder="p. ej. los momentos más graciosos"'),
+    ("># clips<", ">Nº de clips<"),
+    (">Min length (s)<", ">Duración mín. (s)<"),
+    (">Max length (s)<", ">Duración máx. (s)<"),
+    ("Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.",
+     "Máximo 60 s: por encima, YouTube puede subirlo como video normal en vez de Short."),
+    (">Accurate captions (Whisper)<", ">Subtítulos precisos (Whisper)<"),
+    ("Slower, but word timing is aligned to the audio. Uncheck to use YouTube's own captions instead (faster, but timing can lag the audio).",
+     "Más lento, pero cada palabra va sincronizada con el audio. Desmárcalo para usar los subtítulos de YouTube (más rápido, pero pueden ir con retraso)."),
+    (">Tighten pacing<", ">Ritmo más ágil<"),
+    ("Cuts quiet pauses out of each clip so it never goes slow.",
+     "Corta las pausas en silencio de cada clip para que nunca se haga lento."),
+    (">Payoff teaser<", ">Adelanto del clímax<"),
+    ("Opens each clip on a 1-second flash of its biggest moment, then plays it from the start. A strong hook, but try it on a few clips before making it a habit.",
+     "Abre cada clip con un flash de 1 segundo de su mejor momento y luego lo reproduce desde el principio. Es un gancho fuerte, pero pruébalo en unos pocos clips antes de usarlo siempre."),
+    (">Channel mascot + name<", ">Mascota + nombre del canal<"),
+    ("Puts the channel's mascot in the top-left corner of every clip, with the channel name next to it for the first 3 seconds, so viewers start to recognise the channel.",
+     "Pone la mascota del canal en la esquina superior izquierda de cada clip, con el nombre del canal al lado durante los primeros 3 segundos, para que la gente empiece a reconocer el canal."),
+    (">Hook text on screen<", ">Texto gancho en pantalla<"),
+    ("Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.",
+     "Pone una frase corta arriba de cada clip durante sus primeros 3 segundos, diciendo por qué seguir mirando. Es justo cuando la gente decide si desliza o no."),
+    (">Generate clips<", ">Generar clips<"),
+    ("Emergency stop", "Parada de emergencia"),
+    ("🗑 I've downloaded these — delete from server", "🗑 Ya los descargué — borrar del servidor"),
+    ("Active &amp; saved jobs", "Trabajos activos y guardados"),
+    ("🔔 Test Telegram notification", "🔔 Probar notificación de Telegram"),
+    ("'Sending...'", "'Enviando...'"),
+    ("✅ Sent -- check Telegram", "✅ Enviado: revisa Telegram"),
+    ("❌ Failed -- check CLIPPER_BOT_API is set and message the bot first",
+     "❌ Falló: revisa que CLIPPER_BOT_API esté configurado y escríbele primero al bot"),
+    (">Stop this job now?<", ">¿Detener este trabajo ahora?<"),
+    ("A step already in progress (a download, a render) finishes first -- this isn't instant.",
+     "Un paso que ya esté en marcha (una descarga, un render) termina primero: no es instantáneo."),
+    (">Save progress<", ">Guardar progreso<"),
+    (">Yes, stop &amp; delete<", ">Sí, detener y borrar<"),
+    (">No, continue<", ">No, continuar<"),
+    ("save ? 'Saving & stopping...' : 'Stopping...'", "save ? 'Guardando y deteniendo...' : 'Deteniendo...'"),
+    (">What mood are you looking for?<", ">¿Qué tipo de momentos buscas?<"),
+    ("This becomes the instruction Claude uses when picking clips -- pick one, or skip to let it judge freely.",
+     "Esto se convierte en la instrucción que Claude usa al elegir clips: elige uno u omítelo para que decida libremente."),
+    ('data-mood="the funniest moments -- genuine comedy, banter, or jokes that land"',
+     'data-mood="los momentos más graciosos: comedia de verdad, vacile o chistes que funcionan"'),
+    ('data-mood="insane clutch plays -- high-pressure moments where they pull off something incredible at the last second"',
+     'data-mood="jugadas clutch épicas: momentos de máxima presión en los que logran algo increíble en el último segundo"'),
+    ('data-mood="crazy, unexpected moments -- chaotic or jaw-dropping events that make you go &quot;no way&quot;"',
+     'data-mood="momentos locos e inesperados: situaciones caóticas o alucinantes que te hacen decir &quot;no puede ser&quot;"'),
+    ('data-mood="dark humor -- edgy or morbid jokes that get a shocked laugh"',
+     'data-mood="humor negro: chistes atrevidos o macabros que sacan una risa de sorpresa"'),
+    (">😂 Funny<", ">😂 Gracioso<"),
+    (">🔥 Insane clutch<", ">🔥 Clutch épico<"),
+    (">🤯 Crazy moment<", ">🤯 Momento loco<"),
+    (">💀 Dark humor<", ">💀 Humor negro<"),
+    (">Skip -- no preference<", ">Omitir: sin preferencia<"),
+    ("Generate more clips", "Generar más clips"),
+    ("Reuses the already-downloaded source -- no re-download needed.",
+     "Reutiliza la fuente ya descargada: no hace falta volver a descargarla."),
+    (">Mood (optional)<", ">Estilo (opcional)<"),
+    (">How many more clips?<", ">¿Cuántos clips más?<"),
+    ("🔁 Start fresh (ignore previously-picked moments -- may repeat earlier clips)",
+     "🔁 Empezar de cero (ignora los momentos ya elegidos; puede repetir clips anteriores)"),
+    ("Off (default): only ever picks NEW moments, same as before. On: forgets what's already been\n"
+     "      picked so Claude can freely re-pick from everything again -- useful once repeated \"generate more\" calls\n"
+     "      have used up most of the available moments and it's only returning 1-2 clips.",
+     "Desactivado (por defecto): solo elige momentos NUEVOS, como siempre. Activado: olvida lo que ya se eligió para que"
+     " Claude pueda volver a elegir entre todo; útil cuando varios \"generar más\" ya han gastado casi todos los momentos"
+     " disponibles y solo devuelve 1-2 clips."),
+    (">Generate<", ">Generar<"),
+    ("textContent = 'Generate';", "textContent = 'Generar';"),
+    (">Cancel<", ">Cancelar<"),
+    ("'Starting...'", "'Iniciando...'"),
+    ("Could not start -- the downloaded source may be gone.",
+     "No se pudo iniciar: puede que la fuente descargada ya no esté."),
+    ("🗑 Clear clips & regenerate", "🗑 Borrar clips y regenerar"),
+    ("Delete all clips from this job? The downloaded source stays, so regenerating is still fast.",
+     "¿Borrar todos los clips de este trabajo? La fuente descargada se queda, así que regenerar sigue siendo rápido."),
+    ("'Could not clear clips.'", "'No se pudieron borrar los clips.'"),
+    (" · 🎯 ${needFacecam} need facecam placement", " · 🎯 ${needFacecam} necesitan colocar la facecam"),
+    ("return 'Running';", "return 'En curso';"),
+    ("return 'Saved';", "return 'Guardado';"),
+    ("return 'Done';", "return 'Listo';"),
+    ("return 'Stopped';", "return 'Detenido';"),
+    ("running ? 'View' : 'View clips'", "running ? 'Ver' : 'Ver clips'"),
+    ("delBtn.textContent = 'Delete';", "delBtn.textContent = 'Borrar';"),
+    ("'Submitting...'", "'Enviando...'"),
+    ("'Error submitting job: '", "'Error al enviar el trabajo: '"),
+    ("~${job.estimate_minutes} min total, ~${remainingMin.toFixed(1)} min left",
+     "~${job.estimate_minutes} min en total, quedan ~${remainingMin.toFixed(1)} min"),
+    (">Place the facecam<", ">Coloca la facecam<"),
+    ('alt="Source frame"', 'alt="Fotograma original"'),
+    ("Re-render with these boxes", "Volver a renderizar con estos recuadros"),
+    (">Clear boxes<", ">Borrar recuadros<"),
+    ("This isn't a facecam -- it's an IRL scene", "No es una facecam: es una escena IRL"),
+    ("Skip for now", "Omitir por ahora"),
+    ('IRL scene -- "${clip.title}"', 'Escena IRL — "${clip.title}"'),
+    ("This clip is set to render as a wide IRL shot, no facecam. Draw a box below if it actually does have one.",
+     "Este clip se renderiza como plano IRL abierto, sin facecam. Dibuja un recuadro abajo si en realidad sí tiene una."),
+    ('Fix the facecam position -- "${clip.title}"', 'Corrige la posición de la facecam — "${clip.title}"'),
+    ("Detection found a facecam here but the automatic check rejected where it landed, so this clip shipped without one.",
+     "Se detectó una facecam aquí, pero la comprobación automática rechazó dónde quedó, así que este clip salió sin ella."),
+    ('Adjust the facecam position -- "${clip.title}"', 'Ajusta la posición de la facecam — "${clip.title}"'),
+    ("This clip uses the boxes you placed earlier.", "Este clip usa los recuadros que colocaste antes."),
+    ("The automatic placement passed its check, but override it if it actually looks wrong.",
+     "La colocación automática pasó la comprobación, pero cámbiala si en realidad se ve mal."),
+    ('Add a facecam -- "${clip.title}"', 'Añade una facecam — "${clip.title}"'),
+    ("No facecam was detected in this clip.", "No se detectó ninguna facecam en este clip."),
+    ("${why} Click and drag on the frame to draw a box tightly around each facecam window (up to ${FACECAM_MAX_BOXES}), then re-render.",
+     "${why} Haz clic y arrastra sobre el fotograma para dibujar un recuadro ajustado a cada ventana de facecam (hasta ${FACECAM_MAX_BOXES}) y luego vuelve a renderizar."),
+    ("Also apply these boxes to the other ${othersMissing} clip(s) without an automatic facecam",
+     "Aplicar también estos recuadros a los otros ${othersMissing} clip(s) sin facecam automática"),
+    ("Loading the source frame...", "Cargando el fotograma original..."),
+    ("Couldn't load a source frame for this clip -- try again.",
+     "No se pudo cargar un fotograma original de este clip: inténtalo de nuevo."),
+    ("Couldn't load a source frame for this clip.", "No se pudo cargar un fotograma original de este clip."),
+    ("Maximum ${FACECAM_MAX_BOXES} facecam boxes -- remove one (×) to redraw it.",
+     "Máximo ${FACECAM_MAX_BOXES} recuadros de facecam: quita uno (×) para volver a dibujarlo."),
+    ("${facecamBoxes.length} box(es) drawn -- click and drag on the frame to add ${facecamBoxes.length ? 'another' : 'one'} (up to ${FACECAM_MAX_BOXES}).",
+     "${facecamBoxes.length} recuadro(s) dibujado(s): haz clic y arrastra sobre el fotograma para añadir ${facecamBoxes.length ? 'otro' : 'uno'} (hasta ${FACECAM_MAX_BOXES})."),
+    ("Draw at least one box around a facecam first.", "Primero dibuja al menos un recuadro alrededor de una facecam."),
+    ("The frame hasn't finished loading yet -- try again in a second.",
+     "El fotograma aún no ha terminado de cargar: inténtalo en un segundo."),
+    ("'Could not start the re-render.'", "'No se pudo iniciar el nuevo render.'"),
+    ("<p>Upload to YouTube</p>", "<p>Subir a YouTube</p>"),
+    ("📤 Upload to YouTube", "📤 Subir a YouTube"),
+    ("<label>Title</label>", "<label>Título</label>"),
+    ("<label>Description</label>", "<label>Descripción</label>"),
+    (">Unlisted<", ">No listado<"),
+    ("Only people with the link can see it -- good for a final check before going public.",
+     "Solo lo ve quien tenga el enlace: bueno para una última revisión antes de hacerlo público."),
+    (">Public<", ">Público<"),
+    ("Live immediately on your channel and in search/Shorts feed.",
+     "Visible al instante en tu canal, en la búsqueda y en el feed de Shorts."),
+    (">Private<", ">Privado<"),
+    (">Only you can see it.<", ">Solo tú puedes verlo.<"),
+    (">Trim before uploading (optional)<", ">Recortar antes de subir (opcional)<"),
+    ("Play the video above, pause where you want to cut, then use the buttons below -- or type seconds directly.",
+     "Reproduce el video, pausa donde quieras cortar y usa los botones de abajo, o escribe los segundos directamente."),
+    (">Off the start (s)<", ">Quitar del inicio (s)<"),
+    (">Off the end (s)<", ">Quitar del final (s)<"),
+    (">Set to current position<", ">Usar posición actual<"),
+    (">Upload<", ">Subir<"),
+    ("textContent = 'Upload';", "textContent = 'Subir';"),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- that trim leaves ${resultSeconds.toFixed(1)}s, too short. Leave at least 1s.",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: con ese recorte quedan ${resultSeconds.toFixed(1)} s, demasiado corto. Deja al menos 1 s."),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploads from the app over ${SHORTS_MAX_SECONDS}s land as regular videos, ",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: lo que se sube desde la app con más de ${SHORTS_MAX_SECONDS} s queda como video normal, "),
+    ("not Shorts. Trim at least ${(resultSeconds - SHORTS_MAX_SECONDS).toFixed(1)}s more.",
+     "no como Short. Recorta al menos ${(resultSeconds - SHORTS_MAX_SECONDS).toFixed(1)} s más."),
+    ("Clip is ${youtubeUploadDuration.toFixed(1)}s -- uploading ${resultSeconds.toFixed(1)}s after this trim.",
+     "El clip dura ${youtubeUploadDuration.toFixed(1)} s: se subirán ${resultSeconds.toFixed(1)} s tras este recorte."),
+    ("That trim would cut the whole clip -- leave at least a second.",
+     "Ese recorte eliminaría todo el clip: deja al menos un segundo."),
+    ("'Title cannot be empty.'", "'El título no puede estar vacío.'"),
+    ("'Trimming & uploading...' : 'Uploading...'", "'Recortando y subiendo...' : 'Subiendo...'"),
+    ("'Upload failed.'", "'La subida falló.'"),
+    ("`Uploaded -- ${data.url}`", "`Subido: ${data.url}`"),
+    (">Choose a thumbnail<", ">Elige una miniatura<"),
+    ("A real frame from the clip -- not AI-generated -- with one bold line of\n"
+     "      text burned over it. Pick one below, then edit the wording if you want.",
+     "Un fotograma real del clip (no generado con IA) con una línea de texto en grande encima."
+     " Elige una abajo y luego edita el texto si quieres."),
+    ('alt="Selected thumbnail"', 'alt="Miniatura seleccionada"'),
+    ("<label>Text</label>", "<label>Texto</label>"),
+    ("Regenerate with this text", "Regenerar con este texto"),
+    ("&larr; Back to choices", "&larr; Volver a las opciones"),
+    (">Download thumbnail<", ">Descargar miniatura<"),
+    (">Close<", ">Cerrar<"),
+    ("Generating thumbnail options...", "Generando opciones de miniatura..."),
+    ("'Could not generate thumbnails.'", "'No se pudieron generar las miniaturas.'"),
+    ("Click one to pick it, then edit the text if you want.", "Haz clic en una para elegirla y luego edita el texto si quieres."),
+    ("Thumbnail option ${t.index}", "Opción de miniatura ${t.index}"),
+    ("No thumbnail candidates could be generated for this clip.", "No se pudo generar ninguna miniatura para este clip."),
+    ("'Text cannot be empty.'", "'El texto no puede estar vacío.'"),
+    ("'Could not regenerate thumbnail.'", "'No se pudo regenerar la miniatura.'"),
+    ("'Regenerating...'", "'Regenerando...'"),
+    ("const kind = c.moment_type ? `${c.moment_type} · ` : '';",
+     "const kind = c.moment_type ? `${({controversy: 'polémica', drama: 'drama', fail: 'fallo', rage: 'rabia',"
+     " funny: 'gracioso', skill: 'habilidad', wholesome: 'tierno', other: 'otro'})[c.moment_type] || c.moment_type} · ` : '';"),
+    ("⭐ Post this one first · ${kind}${c.score}/10", "⭐ Publica este primero · ${kind}${c.score}/10"),
+    ("['hook', 'Hook'], ['controversy', 'Controversy'], ['reaction', 'Reaction'],",
+     "['hook', 'Gancho'], ['controversy', 'Polémica'], ['reaction', 'Reacción'],"),
+    ("['payoff', 'Payoff'], ['standalone', 'Makes sense alone'],",
+     "['payoff', 'Remate'], ['standalone', 'Se entiende solo'],"),
+    ("Overall ${c.score}/10", "Global ${c.score}/10"),
+    ("✅ Posted to YouTube", "✅ Publicado en YouTube"),
+    ("'Copy title'", "'Copiar título'"),
+    ("'Copy description'", "'Copiar descripción'"),
+    ("'Copied!'", "'¡Copiado!'"),
+    ("Download ${c.file}", "Descargar ${c.file}"),
+    ("🎬 IRL scene", "🎬 Escena IRL"),
+    ("🎯 Fix facecam", "🎯 Corregir facecam"),
+    ("🎯 Adjust facecam", "🎯 Ajustar facecam"),
+    ("🎯 Add facecam", "🎯 Añadir facecam"),
+    ("Delete ${c.file}? This can't be undone.", "¿Borrar ${c.file}? No se puede deshacer."),
+    ("'Could not delete this clip.'", "'No se pudo borrar este clip.'"),
+    ("'Deleting...'", "'Borrando...'"),
+    ("Delete these clips from the server? This can\\'t be undone.", "¿Borrar estos clips del servidor? No se puede deshacer."),
+    ("'Deleted.'", "'Borrado.'"),
+]
+
+_UI_TRANSLATIONS: dict = {"es": _UI_STRINGS_ES}
+
+
+def _translate_template(template: str, profile: str) -> str:
+    for english, translated in _UI_TRANSLATIONS.get(profile, []):
+        if english not in template:
+            # The English page changed under this entry -- say so at
+            # startup rather than leave that string silently untranslated.
+            print(f"[ui] {profile!r} translation no longer matches the page: {english[:70]!r}", flush=True)
+            continue
+        template = template.replace(english, translated)
+    return template
+
+
+def _render_channel_home(profile: str) -> str:
+    """INDEX_HTML/SPANISH_HTML are both this same template, just with the
+    fixed channel baked in (see CHANNEL_PROFILES) -- a separate page per
+    channel (its own URL, own "Active & saved jobs" list, own Connect
+    YouTube button) rather than one page with an in-page switcher, so each
+    channel bookmarks and navigates like the app's other pages do. A
+    profile with an entry in _UI_TRANSLATIONS gets its interface text in
+    that language."""
+    cfg = CHANNEL_PROFILES[profile]
+    page = _CHANNEL_HOME_TEMPLATE.replace("__NAV_LINKS__", _nav_links(cfg["page_path"]))
+    return (
+        _translate_template(page, profile)
+        .replace("__PROFILE_ID__", profile)
+        .replace("__PROFILE_LABEL__", cfg["label"])
+    )
+
+
+INDEX_HTML = _render_channel_home(DEFAULT_CHANNEL_PROFILE)
+SPANISH_HTML = _render_channel_home("es")
+
+
 ANALYTICS_HTML = """<!doctype html>
 <html>
 <head>
@@ -5558,11 +6118,11 @@ ANALYTICS_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -5669,6 +6229,7 @@ ANALYTICS_HTML = """<!doctype html>
   <a href="/game-recap">Game Recap</a>
   <a href="/analytics" class="active">Analytics</a>
   <a href="/hook-line">Hook Line</a>
+  <a href="/espanol">Español</a>
 </div>
 <div class="card">
 
@@ -6429,11 +6990,11 @@ GAME_RECAP_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -6533,6 +7094,7 @@ GAME_RECAP_HTML = """<!doctype html>
     <a href="/game-recap" class="active">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🎮</span><h1>Best game clips this week</h1></div>
@@ -7013,11 +7575,11 @@ WEEKLY_RECAP_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -7115,6 +7677,7 @@ WEEKLY_RECAP_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line">Hook Line</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">🗓</span><h1>Weekly recap</h1></div>
@@ -7560,11 +8123,11 @@ HOOK_LINE_HTML = """<!doctype html>
   }
   .page { max-width: 640px; margin: 0 auto; }
   .topnav {
-    display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .topnav a {
-    flex: 1; text-align: center; padding: 9px 10px; border-radius: 9px;
+    flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px;
     font-size: 0.84rem; font-weight: 600; color: var(--muted); text-decoration: none;
   }
   .topnav a:hover { color: var(--text); }
@@ -7631,6 +8194,7 @@ HOOK_LINE_HTML = """<!doctype html>
     <a href="/game-recap">Game Recap</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line" class="active">Hook Line</a>
+    <a href="/espanol">Español</a>
   </div>
   <div class="card">
     <div class="brand"><span class="logo">⚡</span><h1>Hook line</h1></div>

@@ -635,13 +635,21 @@ def search_creator(query: str) -> List[CreatorEntry]:
     return entries
 
 
-def get_trending_sections() -> dict:
+def get_trending_sections(
+    twitch_logins: Optional[List[str]] = None, youtube_channels: Optional[List[str]] = None,
+) -> dict:
     """The four rows the UI shows: configured creators' latest YouTube
     upload, configured creators' latest Twitch VOD, Twitch's biggest live
     streams globally (not limited to the configured list), and popular
-    Twitch creators NOT already in the configured watchlist (discovery)."""
-    twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
-    youtube_channels = os.environ.get("TRENDING_YOUTUBE_CHANNELS", "").split(",")
+    Twitch creators NOT already in the configured watchlist (discovery).
+
+    Defaults to the main channel's TRENDING_TWITCH_LOGINS/
+    TRENDING_YOUTUBE_CHANNELS env vars; pass explicit lists (e.g. a second
+    channel profile's own watchlist) to override either one."""
+    if twitch_logins is None:
+        twitch_logins = os.environ.get("TRENDING_TWITCH_LOGINS", "").split(",")
+    if youtube_channels is None:
+        youtube_channels = os.environ.get("TRENDING_YOUTUBE_CHANNELS", "").split(",")
     return {
         "youtube_channels": get_youtube_creators(youtube_channels),
         "twitch_vods": get_twitch_vods(twitch_logins),

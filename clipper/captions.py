@@ -247,9 +247,13 @@ def _brow(p0: Tuple[float, float], q: Tuple[float, float], p2: Tuple[float, floa
     return f"m {pts(a)} b {pts(c1, c2, b)} l {pts(d)} b {pts(e1, e2, f)}"
 
 
-# (layer offset, colour as ASS &HBBGGRR, extra tags, shape)
-_MASCOT_LAYERS = [
-    (0, "00CCFF", "\\bord1.4\\3c&H111111&\\shad1.2\\4c&H000000&\\4a&H60&", _ellipse(50, 50, 50, 50)),
+# (layer offset, colour as ASS &HBBGGRR, extra tags, shape). Layer 0 (the
+# circle) is the only layer that varies by channel -- see _mascot_layers --
+# the face on top of it (brackets/brows/eyes/mouth) stays the same so the
+# mascot still reads as "the same character" across channels, just on a
+# different colour badge.
+_MASCOT_ACCENT_DEFAULT = "00CCFF"
+_MASCOT_FACE_LAYERS = [
     (1, "111111", "", " ".join([
         _brackets(),
         _brow((32.75, 30.6), (39, 25.6), (45, 28.9)),
@@ -264,9 +268,19 @@ _MASCOT_LAYERS = [
 ]
 
 
-def brand_dialogues(play_res: Tuple[int, int] = _BASE_PLAY_RES, name: str = BRAND_NAME) -> List[str]:
+def _mascot_layers(accent: str) -> list:
+    circle = (0, accent, "\\bord1.4\\3c&H111111&\\shad1.2\\4c&H000000&\\4a&H60&", _ellipse(50, 50, 50, 50))
+    return [circle, *_MASCOT_FACE_LAYERS]
+
+
+def brand_dialogues(
+    play_res: Tuple[int, int] = _BASE_PLAY_RES, name: str = BRAND_NAME, accent: str = _MASCOT_ACCENT_DEFAULT,
+) -> List[str]:
     """The channel mascot (whole clip, top-left) and a name stamp beside it
-    (first _STAMP_SECONDS), as Dialogue lines for the clip's .ass file."""
+    (first _STAMP_SECONDS), as Dialogue lines for the clip's .ass file.
+    accent is the mascot's badge colour (ASS &HBBGGRR, no & delimiters) --
+    lets a second channel profile look visually distinct without a whole
+    new mascot drawing (see _mascot_layers)."""
     scale = play_res[1] / _BASE_PLAY_RES[1]
     size = _BASE_MASCOT_SIZE * scale
     cx, cy = _BASE_MASCOT_X * scale + size / 2, _BASE_MASCOT_Y * scale + size / 2
@@ -278,7 +292,7 @@ def brand_dialogues(play_res: Tuple[int, int] = _BASE_PLAY_RES, name: str = BRAN
         f"\\t(160,260,\\fscx{_num(pct)}\\fscy{_num(pct)})"
     )
     lines = []
-    for layer, colour, extra, shape in _MASCOT_LAYERS:
+    for layer, colour, extra, shape in _mascot_layers(accent):
         lines.append(
             f"Dialogue: {20 + layer},{_fmt_ts(0)},{_fmt_ts(_BRAND_END)},Mascot,,0,0,0,,"
             f"{{\\an5\\pos({_num(cx)},{_num(cy)})\\bord0\\shad0{extra}\\1c&H{colour}&{pop}\\p1}}{_SQUARE}{shape}{{\\p0}}"
@@ -316,6 +330,8 @@ def build_ass(
     hook_text: Optional[str] = None,
     punchy: bool = False,
     brand: bool = False,
+    brand_name: Optional[str] = None,
+    mascot_accent: Optional[str] = None,
 ) -> Path:
     """clip_words are absolute-time Word objects that fall within the clip;
     clip_start is subtracted so the .ass timeline starts at 0 for this clip.
@@ -324,7 +340,10 @@ def build_ass(
     HOOK_TEXT_SECONDS. It goes in this same file (not a second pass like
     hook_line_ass) so it burns in with the captions, and a later re-render
     from this file -- a manual facecam fix -- keeps it. brand adds the
-    channel mascot and name stamp (brand_dialogues) the same way.
+    channel mascot and name stamp (brand_dialogues) the same way; brand_name
+    and mascot_accent override which channel's name/badge colour get used
+    (defaulting to the main channel's), so a second channel profile's clips
+    don't get stamped with the wrong name.
 
     play_res should match the actual output frame size (width, height) --
     it's both the coordinate system the Style/Dialogue margins below are
@@ -355,6 +374,10 @@ def build_ass(
             f"{{\\fad(0,200)}}{_escape_ass_text(hook)}"
         )
     if brand:
-        lines.extend(brand_dialogues(play_res))
+        lines.extend(brand_dialogues(
+            play_res,
+            name=brand_name if brand_name is not None else BRAND_NAME,
+            accent=mascot_accent if mascot_accent is not None else _MASCOT_ACCENT_DEFAULT,
+        ))
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path
