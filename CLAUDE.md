@@ -54,47 +54,48 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
 
-## Long-form videos (second channel)
+## Long-form: "The Story Of" streamer documentaries
 
-- Dean is starting a second YouTube channel for 10–12 minute aviation
-  incident stories (suggested name "Seconds to Decide"), promoted with
-  Shorts cut from each long video. The Stable Ronaldo / Jynxzi Shorts
-  channel carries on unchanged alongside it.
-- `/long-form` (linked from Home as "Go to long-form videos") is its own
-  page, no clip controls on it. Code: `clipper/longform.py` plus the
-  `/api/longform/*` routes and `LONGFORM_HTML` in `webapp/main.py`.
-  Projects live in `BASE_DIR/_longform/<id>/` (`project.json`,
-  `report.txt`, `takes/`, `narration.wav|m4a`).
-- Flow: pick an incident (curated NTSB reports in `longform.INCIDENTS`, or
-  paste a report PDF link / upload the PDF) → Claude writes a scene-by-
-  scene script from the report (facts from the report only, no invented
-  dialogue, no victim names) → Dean records each scene in the browser →
-  Whisper transcribes the take and `check_take` compares it with the
-  script: a run of 3+ skipped/misread words, 3+ added/repeated words, or
-  low overall match flags the take and he reads that scene again (or
-  "Keep anyway"). Numbers, filler words and a single misheard word are
-  ignored on purpose. Accepted takes are joined into one narration track
-  with known scene start times.
-- Visuals and render: `clipper/longform_video.py`. "Plan visuals" has
-  Claude pick one visual per scene from the report (map points/route,
-  word-for-word cockpit lines, chart numbers, stock search words, a short
-  caption); `normalize_spec` drops anything unusable to a safe type.
-  Everything is drawn with Pillow and encoded with ffmpeg: dark
-  OpenStreetMap maps (tiles cached in `BASE_DIR/_longform_cache/tiles`,
-  "© OpenStreetMap contributors" on screen and in the credits), cockpit
-  cards, charts, the report's own images (pulled out of `report.pdf`),
-  Pexels stock (only when `PEXELS_API_KEY` is set; otherwise report images,
-  then a title card). Scenes are cached by a hash of their spec + length,
-  so re-rendering after one change only redraws that scene. Music is
-  optional and ducked under the voice. No AI images and no AI voice.
+- History: an aviation-incident format (NTSB reports, maps, charts) was
+  built, rendered once and judged "quite bad" by Dean, then replaced. The
+  research said why: channels in that niche win on 3D recreations and real
+  ATC audio, and on a narrator's voice/take, not on generated visuals.
+- Now: a bi-weekly documentary series on the **main Caught On Stream
+  channel** (same audience as the Shorts, so Shorts can link to it), a
+  different streamer each episode, SunnyV2-style ("The Story of X").
+- `/long-form` (Home link "Go to long-form videos"), its own page. Code:
+  `clipper/documentary.py` (research + story), `clipper/longform.py`
+  (projects, scene-by-scene recording, the misread check),
+  `clipper/longform_video.py` (render), `/api/longform/*` routes and
+  `LONGFORM_HTML` in `webapp/main.py`. Projects: `BASE_DIR/_longform/<id>/`
+  (`project.json`, `dossier.json`, `clips/<Cnn>/`, `takes/`, `render/`,
+  `final.mp4`); the schedule is `BASE_DIR/_longform/_series.json`.
+- Flow: schedule slot (every 14 days) → research (Twitch profile, the
+  streamer's most-viewed clips all-time + per year, Wikipedia, pasted
+  article links, Dean's notes; clips downloaded with yt-dlp and transcribed
+  with word timings) → Claude writes scenes of three kinds: `narrate`
+  (Dean reads it, over a clip), `moment` (a clip cut that plays at full
+  volume with subtitles), `title` (chapter card → YouTube chapter) →
+  editable story → record narrated scenes only (same misread check) →
+  render → title/description with chapters + credits → upload to Caught On
+  Stream as a regular (not Short) video, private by default → optional
+  promo Shorts via a normal clip job on `final.mp4`.
+- Script rules that matter: facts only from the research, quotes only from
+  clip transcripts, no accusations/private-life speculation, no hype words.
+  Commentary over clips is what keeps it on the right side of fair use and
+  YouTube's July 2025 "inauthentic content" rule — Dean's own narration is
+  the point, never AI voice.
+- Old aviation projects on the volume show as "old aviation test" and can
+  only be deleted. pypdf/cryptography and the map/chart/Pexels code were
+  removed with that format.
 - The Docker image isn't changed for fonts on purpose: ffmpeg's
   dependencies already bring DejaVu, and adding fonts could change the
   clip captions' font fallback. `longform_video.font()` falls back to
   `fc-match`, then Pillow's built-in font.
-- Still to build: upload to the second channel's YouTube account,
-  thumbnails, and promo Shorts cut from the finished video.
-- `ntsb.gov` is blocked from the Claude Code sandbox but reachable from
-  Railway; test with mocks (see the testing section).
+- Twitch, Wikipedia and ntsb-style external hosts are blocked from the
+  Claude Code sandbox; test with mocks. A standalone ffmpeg for local
+  render tests: `pip install imageio-ffmpeg` and point `CLIPPER_FFMPEG` at
+  `imageio_ffmpeg.get_ffmpeg_exe()`.
 
 ## Clip layout
 

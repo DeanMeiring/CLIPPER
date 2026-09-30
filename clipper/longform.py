@@ -1,16 +1,11 @@
-"""Long-form aviation-story videos for the second channel: an incident's
-official NTSB report -> a narrated script (written by Claude, split into
-scenes) -> the creator reads it in the web app one scene at a time.
+"""Recording side of long-form videos (see documentary.py for the streamer
+documentaries built on it): project storage, and scene-by-scene narration
+recorded in the web app.
 
 Each recorded take is transcribed with Whisper and compared against the
 scene's script (check_take) so a skipped line, a misread phrase or a
 restarted sentence gets caught right away and re-recorded, instead of being
-found by ear in a 10-minute edit. The accepted takes are joined into one
-narration track whose scene boundaries are known exactly -- what the
-visuals step times itself against.
-
-Building the video from the narration (maps, cockpit cards, charts, stock
-footage) is a later step; nothing here renders video.
+found by ear in a 10-minute edit.
 """
 from __future__ import annotations
 
@@ -25,190 +20,13 @@ from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
 from typing import List
 
-# Curated starting points -- incidents with a detailed NTSB report (cockpit
-# transcript, flight data, diagrams) and, first, ones where people survived:
-# gripping without being grim, and advertiser-friendly. Any other NTSB
-# report can be used by pasting its link or uploading the PDF.
-INCIDENTS = [
-    {
-        "id": "us1549",
-        "icon": "🌊",
-        "title": "US Airways 1549: “Miracle on the Hudson”",
-        "subtitle": "15 Jan 2009 · Airbus A320 · LaGuardia, New York · NTSB AAR-10/03",
-        "report_url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/AAR1003.pdf",
-        "tags": [["All 155 survived", "good"], ["Cockpit transcript", ""], ["Flight data", ""]],
-    },
-    {
-        "id": "ac759",
-        "icon": "🛬",
-        "title": "Air Canada 759: the near-landing on a taxiway",
-        "subtitle": "7 Jul 2017 · Airbus A320 · San Francisco · NTSB AIR-18/01",
-        "report_url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/AIR1801.pdf",
-        "tags": [["No injuries", "good"], ["Near miss", ""], ["Cockpit transcript", ""]],
-    },
-    {
-        "id": "wn1380",
-        "icon": "🔥",
-        "title": "Southwest 1380: engine failure at 32,000 ft",
-        "subtitle": "17 Apr 2018 · Boeing 737-700 · Philadelphia · NTSB AAR-19/03",
-        "report_url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/AAR1903.pdf",
-        "tags": [["1 fatality", "warn"], ["Cockpit transcript", ""], ["Flight data", ""]],
-    },
-    {
-        "id": "aq243",
-        "icon": "✈️",
-        "title": "Aloha 243: the roof tore off at 24,000 ft",
-        "subtitle": "28 Apr 1988 · Boeing 737-200 · Maui, Hawaii · NTSB AAR-89/03",
-        "report_url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/AAR8903.pdf",
-        "tags": [["1 fatality", "warn"], ["Cockpit transcript", ""], ["Diagrams", ""]],
-    },
-]
-
-VISUAL_TYPES = ["map", "cockpit", "chart", "stock", "report"]
-
 # Reading pace used for time estimates (words per minute of narration).
 NARRATION_WPM = 150
 
-# How much report text Claude gets. A full NTSB report can run 200+ pages;
-# the front (summary, history of the flight, factual findings) and the back
-# (conclusions, probable cause, recommendations, cockpit transcript
-# appendix) carry the story.
-_REPORT_HEAD_CHARS = 110_000
-_REPORT_TAIL_CHARS = 40_000
-
-# Silence between scenes when the takes are joined into one narration track.
+# Pause after each narrated scene, so scenes don't run into each other.
 SCENE_GAP_SECONDS = 0.6
 
-MAX_REPORT_BYTES = 60 * 1024 * 1024
 MAX_TAKE_BYTES = 40 * 1024 * 1024
-
-
-# ---------------------------------------------------------------- report ---
-
-def download_report(url: str) -> bytes:
-    import requests
-
-    resp = requests.get(
-        url, timeout=90, headers={"User-Agent": "Mozilla/5.0 (clipper long-form; report download)"},
-    )
-    resp.raise_for_status()
-    data = resp.content
-    if not data.startswith(b"%PDF"):
-        raise RuntimeError("That link didn't return a PDF -- try uploading the report file instead.")
-    if len(data) > MAX_REPORT_BYTES:
-        raise RuntimeError("That report is too large to read.")
-    return data
-
-
-def pdf_text(data: bytes) -> str:
-    import io
-
-    from pypdf import PdfReader
-
-    reader = PdfReader(io.BytesIO(data))
-    if reader.is_encrypted:
-        # NTSB reports are "encrypted" only to set copy/print permissions --
-        # they open with an empty password. Decrypting them needs the
-        # cryptography package (see requirements.txt).
-        try:
-            ok = reader.decrypt("")
-        except Exception as e:
-            raise RuntimeError(f"Couldn't open this report PDF ({e}).") from e
-        if not ok:
-            raise RuntimeError("This report PDF is password-protected -- try a different copy of it.")
-    pages = []
-    for page in reader.pages:
-        try:
-            pages.append(page.extract_text() or "")
-        except Exception:
-            continue
-    text = "\n".join(pages)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def trim_report(text: str) -> str:
-    if len(text) <= _REPORT_HEAD_CHARS + _REPORT_TAIL_CHARS:
-        return text
-    return text[:_REPORT_HEAD_CHARS] + "\n\n[... middle of report omitted ...]\n\n" + text[-_REPORT_TAIL_CHARS:]
-
-
-# ---------------------------------------------------------------- script ---
-
-def _script_prompt(report_text: str, incident_title: str) -> str:
-    return f"""You write narration scripts for a YouTube channel that tells the true
-stories of aviation incidents, based strictly on the official investigation
-report. The creator reads your script aloud; the video is built around their
-voice with maps, cockpit-transcript cards, charts, photos and stock footage.
-
-Incident: {incident_title}
-
-Write a script of about 1,500 to 1,800 words (10 to 12 minutes read aloud),
-split into 12 to 16 scenes.
-
-Story:
-- Scene 1 is a short cold open: the most gripping moment or line, then the
-  question the video answers. No "welcome to the channel".
-- Then tell it in order: the flight and crew, the moment things went wrong,
-  each decision the crew faced and the seconds they had, how it ended, what
-  the investigation found, and what changed in aviation because of it.
-- Explain any technical idea in one plain sentence the first time it comes
-  up. Spell out an abbreviation the first time it is used.
-
-Accuracy and tone:
-- Use ONLY facts in the report below. Never invent dialogue, times, numbers
-  or thoughts. Quote cockpit or radio lines only when the report gives them,
-  word for word.
-- Be respectful: no graphic injury detail, and never name passengers or
-  victims. Crew members named in the report may be named.
-- Calm, clear, documentary voice. No exaggerated or clickbait words.
-
-For reading aloud:
-- Short, natural spoken sentences that are easy to say in one breath.
-- Write numbers as digits (2,800 feet, 3:27 pm, 155 people).
-- Each scene's narration is 60 to 160 words.
-
-For each scene also choose the main visual, one of:
-- "map": where the aircraft is (airports, route, turn, landing spot)
-- "cockpit": a card showing a cockpit or radio line from the report
-- "chart": altitude, speed or timeline data changing over time
-- "stock": general aviation footage (takeoff, cabin, clouds, airport)
-- "report": a photo, diagram or page from the report itself
-and a short "visual_note" saying what it should show.
-
-Respond with ONLY a JSON array, no other text, in this exact shape (escape
-any double-quote characters inside a string value):
-[
-  {{"narration": "...", "visual": "map", "visual_note": "..."}}
-]
-
-Report:
-{report_text}
-"""
-
-
-def write_script(report_text: str, incident_title: str) -> List[dict]:
-    from .select_moments import DEFAULT_MODEL, _ask_claude_for_json
-
-    data = _ask_claude_for_json(_script_prompt(trim_report(report_text), incident_title), None, DEFAULT_MODEL)
-    scenes = []
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict):
-            continue
-        narration = " ".join(str(item.get("narration") or "").split())
-        if not narration:
-            continue
-        visual = str(item.get("visual") or "").strip().lower()
-        scenes.append({
-            "narration": narration,
-            "visual": visual if visual in VISUAL_TYPES else "stock",
-            "visual_note": " ".join(str(item.get("visual_note") or "").split()),
-            "take": None,
-        })
-    if not scenes:
-        raise RuntimeError("Claude didn't return a usable script -- try Rewrite script.")
-    return scenes
 
 
 # ------------------------------------------------------------ take check ---
@@ -328,17 +146,34 @@ _whisper_model = None
 _whisper_lock = threading.Lock()
 
 
-def transcribe_take(wav_path: Path) -> List[str]:
-    """Words Whisper hears in a take. One model is kept loaded between
-    takes -- a recording session is dozens of short checks in a row."""
+def _whisper():
     global _whisper_model
     from faster_whisper import WhisperModel
 
+    if _whisper_model is None:
+        _whisper_model = WhisperModel("small", compute_type="int8")
+    return _whisper_model
+
+
+def transcribe_take(wav_path: Path) -> List[str]:
+    """Words Whisper hears in a take. One model is kept loaded between
+    takes -- a recording session is dozens of short checks in a row."""
     with _whisper_lock:
-        if _whisper_model is None:
-            _whisper_model = WhisperModel("small", compute_type="int8")
-        segments, _info = _whisper_model.transcribe(str(wav_path), language="en")
+        segments, _info = _whisper().transcribe(str(wav_path), language="en")
         return [seg.text for seg in segments]
+
+
+def transcribe_words(media_path: Path) -> List[dict]:
+    """Word-level transcript ({"w", "s", "e"}) of a clip, for subtitles and
+    for picking where a moment starts and ends."""
+    with _whisper_lock:
+        segments, _info = _whisper().transcribe(str(media_path), language="en", word_timestamps=True)
+        out = []
+        for seg in segments:
+            for w in seg.words or []:
+                if w.word.strip():
+                    out.append({"w": w.word.strip(), "s": round(w.start, 2), "e": round(w.end, 2)})
+        return out
 
 
 def to_wav(src: Path, dst: Path) -> None:
@@ -357,39 +192,6 @@ def audio_duration(path: Path) -> float:
     return float(result.stdout.strip())
 
 
-def join_takes(wavs: List[Path], out_wav: Path, out_m4a: Path) -> None:
-    """Join the accepted scene takes in order, with a short breath of
-    silence between scenes, into one narration track (WAV for the video
-    build, M4A to download)."""
-    work = out_wav.parent
-    gap = work / "_gap.wav"
-    subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
-         "-t", str(SCENE_GAP_SECONDS), "-c:a", "pcm_s16le", str(gap)],
-        check=True, capture_output=True, timeout=60,
-    )
-    listing = work / "_concat.txt"
-    lines = []
-    for i, w in enumerate(wavs):
-        if i:
-            lines.append(f"file '{gap.resolve()}'")
-        lines.append(f"file '{Path(w).resolve()}'")
-    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(out_wav)],
-            check=True, capture_output=True, timeout=300,
-        )
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(out_wav), "-c:a", "aac", "-b:a", "192k", str(out_m4a)],
-            check=True, capture_output=True, timeout=300,
-        )
-    finally:
-        listing.unlink(missing_ok=True)
-        gap.unlink(missing_ok=True)
-
-
-
 # -------------------------------------------------------------- projects ---
 
 _ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -397,7 +199,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 class ProjectStore:
     """Each long-form video is a folder under base_dir with a project.json,
-    the report text, and the recorded takes."""
+    its research and clips, and the recorded takes."""
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
@@ -408,15 +210,15 @@ class ProjectStore:
             raise KeyError(pid)
         return self.base_dir / pid
 
-    def create(self, incident: dict) -> dict:
+    def create(self, fields: dict) -> dict:
         pid = uuid.uuid4().hex[:12]
         d = self.base_dir / pid
         (d / "takes").mkdir(parents=True, exist_ok=True)
         now = time.time()
         project = {
             "id": pid, "created_at": now, "updated_at": now,
-            "incident": incident, "status": "new", "error": None,
-            "scenes": [], "narration": None,
+            "status": "new", "error": None, "scenes": [],
+            **fields,
         }
         self._write(project)
         return project
@@ -450,6 +252,8 @@ class ProjectStore:
         if not self.base_dir.exists():
             return out
         for d in self.base_dir.iterdir():
+            if not _ID_RE.match(d.name):
+                continue
             try:
                 out.append(self.load(d.name))
             except (KeyError, OSError, ValueError):
@@ -463,21 +267,33 @@ class ProjectStore:
             shutil.rmtree(d, ignore_errors=True)
 
 
+def needs_take(scene: dict) -> bool:
+    """Only narrated scenes are recorded; clip moments and chapter cards
+    carry their own sound (or none)."""
+    return scene.get("kind", "narrate") == "narrate"
+
+
 def scene_ready(scene: dict) -> bool:
+    if not needs_take(scene):
+        return True
     take = scene.get("take") or {}
     return bool(take.get("file")) and bool(take.get("ok") or take.get("kept"))
 
 
 def summary(project: dict) -> dict:
     scenes = project.get("scenes") or []
-    words = sum(len(s.get("narration", "").split()) for s in scenes)
+    narrated = [s for s in scenes if needs_take(s)]
+    words = sum(len(s.get("narration", "").split()) for s in narrated)
+    moments = sum(max(0.0, float(s.get("end") or 0) - float(s.get("start") or 0)) for s in scenes if s.get("kind") == "moment")
     return {
         "id": project["id"],
-        "title": (project.get("incident") or {}).get("title") or "Untitled",
+        "kind": project.get("kind") or "aviation",
+        "title": project.get("title") or (project.get("incident") or {}).get("title") or "Untitled",
         "status": project.get("status"),
         "created_at": project.get("created_at"),
-        "scenes": len(scenes),
-        "recorded": sum(1 for s in scenes if scene_ready(s)),
-        "minutes": round(words / NARRATION_WPM, 1) if words else 0,
-        "has_narration": bool(project.get("narration")),
+        "scenes": len(narrated),
+        "recorded": sum(1 for s in narrated if scene_ready(s)),
+        "minutes": round(words / NARRATION_WPM + moments / 60, 1) if scenes else 0,
+        "rendered": (project.get("render") or {}).get("status") == "done",
+        "youtube_video_id": project.get("youtube_video_id"),
     }
