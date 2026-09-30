@@ -194,6 +194,18 @@ def fetch_vod_clips(
     creator) that were cut from this exact VOD, most-viewed first. Raw
     Helix clip dicts, each with a vod_offset. Empty if TWITCH_CLIENT_ID /
     TWITCH_CLIENT_SECRET aren't set or on any lookup failure."""
+    clips = _fetch_vod_clips_raw(broadcaster_login, vod_id, created_at=created_at, duration=duration)
+    return sorted(clips, key=lambda c: c.get("view_count") or 0, reverse=True)
+
+
+def _fetch_vod_clips_raw(
+    broadcaster_login: str,
+    vod_id: str,
+    created_at: Optional[float] = None,
+    duration: Optional[float] = None,
+) -> List[dict]:
+    """fetch_vod_clips in Twitch's own response order -- the order
+    _existing_clip_windows has always built its windows in."""
     client_id = os.environ.get("TWITCH_CLIENT_ID")
     client_secret = os.environ.get("TWITCH_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -262,7 +274,6 @@ def fetch_vod_clips(
     vod_clips = [c for c in clips if c.get("video_id") == str(vod_id) and c.get("vod_offset") is not None]
     print(f"[highlights] Twitch clips: {len(clips)} total for broadcaster_id={broadcaster_id}, "
           f"{len(vod_clips)} matched vod_id={vod_id}", flush=True)
-    vod_clips.sort(key=lambda c: c.get("view_count") or 0, reverse=True)
     _vod_clips_cache[cache_key] = (time.time(), vod_clips)
     return list(vod_clips)
 
@@ -275,7 +286,7 @@ def _existing_clip_windows(
     pad_before: float = 20.0,
     pad_after: float = 40.0,
 ) -> List[CandidateWindow]:
-    vod_clips = fetch_vod_clips(broadcaster_login, vod_id, created_at=created_at, duration=duration)
+    vod_clips = _fetch_vod_clips_raw(broadcaster_login, vod_id, created_at=created_at, duration=duration)
     if not vod_clips:
         return []
 

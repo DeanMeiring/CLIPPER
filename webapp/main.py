@@ -395,14 +395,14 @@ def _estimate_recap_seconds(num_candidates: int) -> float:
     return lookup + candidates + concat
 
 
-# How many of a Twitch VOD's viewer-made clips the job page shows (and the
-# short-video picker is told about), most-viewed first.
+# How many of a Twitch VOD's viewer-made clips the job page shows,
+# most-viewed first.
 TWITCH_VIEWER_CLIPS_SHOWN = 10
 
 
 def _twitch_viewer_clips(info) -> list:
     """The most-viewed clips Twitch viewers made (Clip button) of this exact
-    VOD, slimmed to what the job page and the clip picker need. Empty for
+    VOD, slimmed to what the job page needs. Empty for
     anything that isn't a Twitch VOD, or when the lookup fails -- this is
     extra signal, never a reason for a job to fail."""
     extractor = (info.extractor or "") if info else ""
@@ -480,9 +480,8 @@ def _run_job(job_id: str) -> None:
         except Exception:
             info = None  # fall through to the normal download pipeline
 
-    # Clips Twitch viewers already made of this VOD: shown on the job page,
-    # and a hint to the picker (the long-VOD path already turns them into
-    # candidate windows inside gather_candidates).
+    # Clips Twitch viewers already made of this VOD, shown on the job page
+    # for reference only -- clip picking doesn't use this list.
     twitch_clips = _twitch_viewer_clips(info)
     if twitch_clips:
         _set(job_id, twitch_clips=twitch_clips)
@@ -560,7 +559,6 @@ def _run_job(job_id: str) -> None:
             focus=req.focus, source_title=dl.title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
             output_language=_profile_output_language(profile),
-            viewer_clips=[c for c in twitch_clips if c["vod_offset"] < dl.duration] or None,
         )
         render_items = [(dl.video_path, words, pick) for pick in picks]
         render_base = 0.6
@@ -1313,7 +1311,6 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # Older jobs predate the flag; their new clips follow the current
         # default rather than the old auto-detected facecam behaviour.
         irl_layout = job.get("irl_layout", True)
-        twitch_clips = list(job.get("twitch_clips") or [])
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1383,7 +1380,6 @@ def _run_regenerate(job_id: str, req: dict) -> None:
             focus=focus, source_title=source_title, loud_moments=loud_moments,
             strategy_notes=_load_strategy_notes(), performance_notes=_load_performance_notes(),
             output_language=_profile_output_language(channel_profile),
-            viewer_clips=[c for c in twitch_clips if c["vod_offset"] < cached["duration"]] or None,
         )
 
         def _overlaps_used(p) -> bool:
@@ -4521,7 +4517,7 @@ function renderTwitchClips(jobId, job) {
   twitchClipsEl.appendChild(heading);
   const hint = document.createElement('div');
   hint.className = 'hint';
-  hint.textContent = 'Clips Twitch viewers made themselves with the Clip button. Claude was shown these moments when picking your clips.';
+  hint.textContent = 'Clips Twitch viewers made themselves with the Clip button.';
   twitchClipsEl.appendChild(hint);
   list.forEach((c, i) => {
     const a = document.createElement('a');
@@ -6181,8 +6177,8 @@ _UI_STRINGS_ES: list = [
     ("Delete these clips from the server? This can\\'t be undone.", "¿Borrar estos clips del servidor? No se puede deshacer."),
     ("'Deleted.'", "'Borrado.'"),
     ("'🔥 Most-viewed Twitch clips of this stream'", "'🔥 Clips de Twitch más vistos de este directo'"),
-    ("'Clips Twitch viewers made themselves with the Clip button. Claude was shown these moments when picking your clips.'",
-     "'Clips que los espectadores hicieron con el botón Clip de Twitch. Claude tuvo en cuenta estos momentos al elegir tus clips.'"),
+    ("'Clips Twitch viewers made themselves with the Clip button.'",
+     "'Clips que los espectadores hicieron con el botón Clip de Twitch.'"),
     ("'Untitled clip'", "'Clip sin título'"),
     ("`👁 ${fmtViews(c.view_count)} views`", "`👁 ${fmtViews(c.view_count)} vistas`"),
     ("`at ${fmtVodTime(c.vod_offset)} in the stream`", "`en el ${fmtVodTime(c.vod_offset)} del directo`"),
