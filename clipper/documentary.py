@@ -278,9 +278,16 @@ def clip_words(project_dir: Path, clip_id: str) -> List[dict]:
 
 def _transcript_marked(words: List[dict], limit: int = 700) -> str:
     """Transcript with [seconds] markers every few words, so Claude can say
-    exactly where a moment should start and end."""
-    out, last_mark, n = [], -99.0, 0
+    exactly where a moment should start and end -- and "(silence Ns)" where
+    nobody talks for a while, so a moment doesn't start on a silent setup
+    or trail off into dead air (YouTube's review of the first episode)."""
+    out, last_mark, n, prev_end = [], -99.0, 0, None
     for w in words:
+        gap = w["s"] - (prev_end if prev_end is not None else 0.0)
+        if gap >= 1.5:
+            out.append(f"(silence {gap:.0f}s)")
+            last_mark = -99.0
+        prev_end = w["e"]
         if w["s"] - last_mark >= 4:
             out.append(f"[{w['s']:.0f}s]")
             last_mark = w["s"]
@@ -294,7 +301,10 @@ def _transcript_marked(words: List[dict], limit: int = 700) -> str:
 
 # ---------------------------------------------------------------- script ---
 
-def _script_prompt(dossier: dict, library: List[dict], project_dir: Path, channel: str) -> str:
+def _script_prompt(dossier: dict, library: List[dict], project_dir: Path, channel: str,
+                   lessons: Optional[List[str]] = None) -> str:
+    from .longform_lessons import prompt_block
+
     p = dossier["profile"]
     facts = [
         f"Twitch login: {p['login']} (display name {p['display_name']})",
@@ -340,7 +350,8 @@ Write the episode as a list of scenes. Three kinds:
 - "moment": a clip plays at full volume with no narration. Give "clip",
   "start" and "end" in seconds from that clip's transcript markers, cut on
   full sentences, 4 to 20 seconds long. This is the payoff -- the funniest,
-  most surprising or most famous bit, not filler.
+  most surprising or most famous bit, not filler. "(silence Ns)" in a
+  transcript marks a stretch where nobody talks.
 - "title": a chapter card. Give "title" (under 32 characters).
 
 Every scene may have a short "caption" for the corner of the screen (under
@@ -375,7 +386,7 @@ Total narration: 1,100 to 1,500 words. Rules:
 - Plain words only. Don't use hype words like "insane", "crazy", "chaos",
   "legendary" or "iconic".
 
-Respond with ONLY a JSON array of scenes in order, no other text:
+{prompt_block(lessons or [])}Respond with ONLY a JSON array of scenes in order, no other text:
 [
   {{"kind": "moment", "clip": "C05", "start": 3, "end": 14, "caption": "May 2023"}},
   {{"kind": "narrate", "narration": "...", "clip": "C05", "caption": ""}},
@@ -418,14 +429,46 @@ def normalize_scenes(items, library: List[dict]) -> List[dict]:
     return scenes
 
 
-def write_script(dossier: dict, library: List[dict], project_dir: Path, channel: str) -> List[dict]:
+def write_script(dossier: dict, library: List[dict], project_dir: Path, channel: str,
+                 lessons: Optional[List[str]] = None) -> List[dict]:
     from .select_moments import DEFAULT_MODEL, _ask_claude_for_json
 
-    data = _ask_claude_for_json(_script_prompt(dossier, library, project_dir, channel), None, DEFAULT_MODEL)
-    scenes = normalize_scenes(data, library)
+    data = _ask_claude_for_json(_script_prompt(dossier, library, project_dir, channel, lessons), None, DEFAULT_MODEL)
+    scenes = tighten_moments(normalize_scenes(data, library), project_dir)
     if not any(s["kind"] == "narrate" for s in scenes):
         raise RuntimeError("Claude didn't return a usable script -- try Write the story again.")
     return scenes
+
+
+COLD_OPEN_MAX = 10.0
+
+
+def tighten_moments(scenes: List[dict], project_dir: Path) -> List[dict]:
+    """Trim dead air off the moments Claude picked (its times come from
+    markers a few seconds apart): a moment starts at most 0.8 s before the
+    first word in it and ends at most 1.5 s after the last one, and the
+    cold open (a moment as the first scene) stops by about 10 s. Only
+    trims -- a moment is never made longer, never shorter than
+    MOMENT_MIN, and one with no words in it is left alone (a visual gag).
+    Applied when the story is written, not to Dean's own edits."""
+    out = []
+    for i, sc in enumerate(scenes):
+        if sc.get("kind") != "moment":
+            out.append(sc)
+            continue
+        start, end = float(sc["start"]), float(sc["end"])
+        ws = [w for w in clip_words(project_dir, sc["clip"]) if w["e"] > start + 0.05 and w["s"] < end - 0.05]
+        if ws:
+            new_start = max(start, ws[0]["s"] - 0.8)
+            new_end = min(end, ws[-1]["e"] + 1.5)
+            if i == 0 and new_end - new_start > COLD_OPEN_MAX:
+                ends = [w["e"] for w in ws if w["e"] <= new_start + COLD_OPEN_MAX and re.search(r"[.!?]$", w["w"])]
+                if ends:
+                    new_end = min(new_end, max(ends) + 0.8)
+            if new_end - new_start >= MOMENT_MIN:
+                sc = {**sc, "start": round(new_start, 2), "end": round(new_end, 2)}
+        out.append(sc)
+    return out
 
 
 # --------------------------------------------------------------- visuals ---
@@ -563,7 +606,10 @@ def normalize_cues(cues, narration: str, library: List[dict], dossier: Optional[
     return out[:MAX_CUES_PER_SCENE]
 
 
-def _visuals_prompt(dossier: dict, library: List[dict], scenes: List[dict], emoji: str) -> str:
+def _visuals_prompt(dossier: dict, library: List[dict], scenes: List[dict], emoji: str,
+                    lessons: Optional[List[str]] = None) -> str:
+    from .longform_lessons import prompt_block
+
     p = dossier["profile"]
     name = p.get("display_name") or p.get("login")
     facts = [f"Twitch account created: {(p.get('created_at') or '')[:10] or 'unknown'}",
@@ -633,12 +679,12 @@ CLIPS (id | date | views | length | title):
 NARRATED SCENES ([scene number] narration):
 {narrated}
 
-Respond with ONLY a JSON array, one object per narrated scene:
+{prompt_block(lessons or [])}Respond with ONLY a JSON array, one object per narrated scene:
 [{{"scene": 3, "cues": [{{"at": "twelve viewers", "type": "words", "text": "12 viewers"}}, {{"at": "late at night", "type": "stock", "query": "bedroom desk at night"}}]}}]
 """
 
 
-def plan_visuals(dossier: dict, library: List[dict], scenes: List[dict]) -> List[dict]:
+def plan_visuals(dossier: dict, library: List[dict], scenes: List[dict], lessons: Optional[List[str]] = None) -> List[dict]:
     """Keyword visuals for every narrated scene. Returns the scenes with
     "cues" set (other scenes unchanged)."""
     from .select_moments import DEFAULT_MODEL, _ask_claude_for_json
@@ -646,7 +692,7 @@ def plan_visuals(dossier: dict, library: List[dict], scenes: List[dict]) -> List
 
     if not any(sc.get("kind") == "narrate" for sc in scenes):
         return scenes
-    data = _ask_claude_for_json(_visuals_prompt(dossier, library, scenes, emoji_list()), None, DEFAULT_MODEL)
+    data = _ask_claude_for_json(_visuals_prompt(dossier, library, scenes, emoji_list(), lessons), None, DEFAULT_MODEL)
     planned = {}
     for item in data if isinstance(data, list) else []:
         if isinstance(item, dict):

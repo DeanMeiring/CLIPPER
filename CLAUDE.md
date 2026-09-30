@@ -112,6 +112,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   YouTube description automatically. All of these hosts are blocked in
   the sandbox: test with mocks and the scikit-video sample clips
   (`pip download scikit-video`, `skvideo/datasets/data/*.mp4`).
+- **Lessons (Sept 2026):** `clipper/longform_lessons.py` keeps editing
+  lessons in `BASE_DIR/_longform/_lessons.json`, seeded from YouTube's
+  editing review of the first episode (StableRonaldo): long opening
+  laughter, a moment opening on a static desktop, a loud clip cut
+  straight into serious news, an 11 s still end card. They go into the
+  story and visuals prompts (`prompt_block`); Dean pastes new reviews or
+  notes on /long-form and Claude merges them (max 15, removable). Clip
+  transcripts given to Claude mark "(silence Ns)", and
+  `documentary.tighten_moments` trims dead air off Claude's moment picks
+  (≤0.8 s before the first word, ≤1.5 s after the last, cold open ≤ ~10 s)
+  when a story is written -- never Dean's own edits. Dean rated that
+  first rendered episode "really good".
 - Rendering is Pillow frames piped into ffmpeg, about 2x real time on
   CPU (a 12-minute episode renders in ~25 min). Scenes are cached by a
   hash of their inputs, so a change to the final mix only (music, music
