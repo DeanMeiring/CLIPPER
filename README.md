@@ -24,6 +24,10 @@ UI you can deploy and check from your phone.
 - **Smart reframing** — face detection (OpenCV, with an optional Claude
   vision fallback for tricky facecam overlays) picks a 9:16 crop, and
   splits gameplay-plus-facecam footage into a stacked layout automatically.
+  In the web app, clips default to the IRL layout (the whole scene,
+  letterboxed) instead; each clip's "Switch to facecam" button opens a
+  box-picker for a facecam split, and unticking "IRL layout" brings back
+  automatic detection for a job.
 - **Karaoke-style burned-in captions** — word-by-word highlighted
   subtitles rendered via ffmpeg/libass, not just a plain subtitle track.
 - **Long-form Twitch VOD support** — finds candidate highlight windows
