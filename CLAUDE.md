@@ -54,6 +54,34 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
 
+## Long-form videos (second channel)
+
+- Dean is starting a second YouTube channel for 10–12 minute aviation
+  incident stories (suggested name "Seconds to Decide"), promoted with
+  Shorts cut from each long video. The Stable Ronaldo / Jynxzi Shorts
+  channel carries on unchanged alongside it.
+- `/long-form` (linked from Home as "Go to long-form videos") is its own
+  page, no clip controls on it. Code: `clipper/longform.py` plus the
+  `/api/longform/*` routes and `LONGFORM_HTML` in `webapp/main.py`.
+  Projects live in `BASE_DIR/_longform/<id>/` (`project.json`,
+  `report.txt`, `takes/`, `narration.wav|m4a`).
+- Flow: pick an incident (curated NTSB reports in `longform.INCIDENTS`, or
+  paste a report PDF link / upload the PDF) → Claude writes a scene-by-
+  scene script from the report (facts from the report only, no invented
+  dialogue, no victim names) → Dean records each scene in the browser →
+  Whisper transcribes the take and `check_take` compares it with the
+  script: a run of 3+ skipped/misread words, 3+ added/repeated words, or
+  low overall match flags the take and he reads that scene again (or
+  "Keep anyway"). Numbers, filler words and a single misheard word are
+  ignored on purpose. Accepted takes are joined into one narration track
+  with known scene start times.
+- Still to build: visuals per scene (route maps, cockpit-transcript cards,
+  charts, free Pexels/Pixabay stock, NTSB report images) timed to the
+  narration, 1080p render, upload to the second channel's YouTube account,
+  and promo Shorts. No AI images of real crashes and no AI voice.
+- `ntsb.gov` is blocked from the Claude Code sandbox but reachable from
+  Railway; test with mocks (see the testing section).
+
 ## Clip layout
 
 - Clips render in the IRL layout by default (`reframe.LetterboxLayout`,
