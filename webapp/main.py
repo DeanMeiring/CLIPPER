@@ -37,6 +37,7 @@ from clipper import longform_video
 from clipper import voice_clone
 from clipper import visual_sources
 from clipper import longform_lessons
+from clipper import longform_promo
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -2009,7 +2010,9 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
 
     # Link the posted video back to this clip so its real retention can be
     # compared against what the clip looked like (see /api/clip-performance).
-    if not is_recap:
+    # Not for a long-form episode's cliffhanger promo: it wasn't picked by
+    # the clip pipeline, so it would skew what that learns.
+    if not is_recap and not clip.get("promo"):
         clip_id = _registry_id(job_id, clip)
         if clip_registry.get_record(_clip_registry_path, clip_id) is None:
             _backfill_clip_record(job_id, job, clip)
@@ -3784,10 +3787,55 @@ PROMO_SHORTS = 2
 
 
 def _longform_start_promo(project: dict, path: Path) -> str:
+    """Two cliffhanger Shorts cut from the episode (longform_promo.py): each
+    stops right before a payoff, so viewers go to the full video to find
+    out. They land on Home as a finished job, ready to post like any clip."""
     name = (project.get("streamer") or {}).get("display_name") or project.get("login") or "the streamer"
-    job = create_job(JobRequest(source=str(path), num_clips=PROMO_SHORTS,
-                                focus=f"the funniest or most surprising moments of {name} that make someone want the full story"))
-    return job["job_id"]
+    job_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id, "source_url": f"Cliffhanger Shorts from {project.get('title') or 'the episode'}",
+            "created_at": time.time(), "state": "running", "message": "Cutting 2 cliffhanger Shorts from the episode...",
+            "progress": 0.1, "estimate_minutes": 2, "clips": [], "error": None, "saved": False,
+            "request": JobRequest(source=str(path), num_clips=PROMO_SHORTS, focus=f"cliffhangers from the story of {name}"),
+            "channel_profile": DEFAULT_CHANNEL_PROFILE, "promo_episode": project["id"],
+        }
+    _persist(job_id)
+    threading.Thread(target=_longform_build_promo, args=(job_id, project, path), daemon=True).start()
+    return job_id
+
+
+def _longform_build_promo(job_id: str, project: dict, path: Path) -> None:
+    out_dir = BASE_DIR / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cuts = longform_promo.plan(project, _longform_store.path(project["id"]))
+        if not cuts:
+            raise RuntimeError("the story has no setup-then-clip moments to cut a cliffhanger from")
+        clips = []
+        for k, cut in enumerate(cuts[:PROMO_SHORTS], start=1):
+            name = f"cliffhanger_{k}.mp4"
+            dur = longform_promo.render_short(path, cut, _longform_brand(), out_dir / name)
+            clips.append({
+                "file": name, "start": cut["start"], "end": cut["end"], "duration": dur,
+                "title": cut["title"], "upload_title": cut["title"], "description": cut["description"],
+                "hook_caption": cut["hook"], "hook_text": cut["hook"], "reason": f"Cliffhanger ({cut['kind']}) from the episode",
+                # Made from Dean's own documentary, not picked by the clip
+                # pipeline: kept out of the clip registry so they don't skew
+                # what the Shorts learn from YouTube stats.
+                "promo": True,
+            })
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is not None:
+                job.update(state="done", message="Done", progress=1.0, clips=clips)
+    except Exception as e:
+        print(f"[longform] cliffhanger Shorts for {project.get('id')} failed: {e}", flush=True)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is not None:
+                job.update(state="error", message="Failed", error=f"Couldn't cut the cliffhanger Shorts: {e}")
+    _persist(job_id)
 
 
 def _attach_promo(job_id: str, url: str, title: str) -> None:
@@ -5675,7 +5723,7 @@ async function poll(jobId) {
       thumbBtn.addEventListener('click', () => openThumbnailModal(jobId, c));
       secondaryRow.appendChild(thumbBtn);
 
-      if (!c.is_recap) {
+      if (!c.is_recap && !c.promo) {
         // Always offered, even with neither field set -- a clip old
         // enough to predate source_video tracking entirely still has a
         // chance: ensure-source-frame can infer the source from the job's
@@ -7389,10 +7437,10 @@ LONGFORM_HTML = """<!doctype html>
             <option value="unlisted">Unlisted</option>
             <option value="public">Public now</option>
           </select>
-          <div class="hint">Uploading also cuts 2 promo Shorts from the episode (on the Home page), with the link to it in their descriptions.</div>
+          <div class="hint">Uploading also cuts 2 cliffhanger Shorts from the episode (on the Home page): each stops right before a payoff, with the link to the full video in its description.</div>
           <div class="actions">
             <button id="upload-btn" type="button">⬆ Upload to Caught On Stream</button>
-            <button id="promo-btn" type="button" class="secondary">✂️ Make 2 promo Shorts</button>
+            <button id="promo-btn" type="button" class="secondary">✂️ Make 2 cliffhanger Shorts</button>
           </div>
           <div class="hint" id="post-status"></div>
         </div>
@@ -8107,8 +8155,8 @@ function renderRender() {
   if (p.promo_job_id) {
     if (ps.childNodes.length) ps.appendChild(el('br'));
     ps.appendChild(document.createTextNode(p.youtube_url
-      ? '✂️ 2 promo Shorts are being made from it: find them on the Home page. Their descriptions already link to this video; after posting one, a link takes you straight to where YouTube Studio lets you set it as the Short’s “Related video”.'
-      : '✂️ 2 promo Shorts are being made: find them on the Home page. Once you upload this video, they’ll carry the link to it.'));
+      ? '✂️ 2 cliffhanger Shorts are being cut from it: find them on the Home page. Their descriptions already link to this video; after posting one, a link takes you straight to where YouTube Studio lets you set it as the Short’s “Related video”.'
+      : '✂️ 2 cliffhanger Shorts are being cut: find them on the Home page. Once you upload this video, they’ll carry the link to it.'));
   }
 }
 $('desc-text').addEventListener('input', () => { $('desc-text').dataset.edited = '1'; });
