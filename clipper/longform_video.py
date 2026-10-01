@@ -269,6 +269,10 @@ def scene_duration(scene: dict, take_duration: Optional[float], last: bool) -> f
 
 def _scene_key(scene: dict, duration: float, brand: str, clip_file: Optional[str], extra=None) -> str:
     keep = {k: scene.get(k) for k in ("kind", "narration", "clip", "start", "end", "caption", "title", "cues")}
+    if scene.get("visuals"):
+        # explainer diagrams (Caught On Code); added only when present, so a
+        # documentary scene's key -- and its finished file -- stay the same
+        keep["visuals"] = scene["visuals"]
     keep["take"] = (scene.get("take") or {}).get("file")
     blob = json.dumps({"s": keep, "d": round(duration, 3), "b": brand, "c": clip_file, "x": extra, "v": 3}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
@@ -330,6 +334,11 @@ def render_scene(project_dir: Path, scene: dict, index: int, duration: float, li
                 work.append(sp)
                 subs.append((a, b, sp))
             _encode_moment(clip_path, float(scene["start"]), float(scene["end"]), ov, subs, tmp)
+        elif scene.get("visuals"):
+            from .explainer_visuals import render_explain
+
+            take = project_dir / "takes" / scene["take"]["file"]
+            render_explain(_ffmpeg(), scene, duration, take, beats.take_words(take), tmp, brand)
         else:
             take = project_dir / "takes" / scene["take"]["file"]
             ctx = beats_context(project_dir, library, brand)
@@ -350,7 +359,11 @@ def preview_still(project_dir: Path, scene: dict, library: dict, brand: str, out
 
     out.parent.mkdir(parents=True, exist_ok=True)
     clip = library.get(scene.get("clip") or "")
-    if scene.get("kind") == "title":
+    if scene.get("visuals"):
+        from .explainer_visuals import still
+
+        img = still(scene, which=0).convert("RGBA")
+    elif scene.get("kind") == "title":
         from .longform_beats import title_frame, _Blank
 
         img = title_frame(_Blank(True).next(), 2.0, scene.get("title") or brand, "", brand).convert("RGBA")
@@ -410,7 +423,7 @@ def changed_scenes(project_dir: Path, scenes: List[dict], library: dict, take_du
 def render_documentary(
     project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]], brand: str,
     music: Optional[Path], on_progress: Callable[[float, str], None] = lambda p, m: None,
-    music_level: str = "normal", music_only: bool = False,
+    music_level: str = "normal", music_only: bool = False, end_line: Optional[str] = None,
 ) -> Tuple[Path, List[float], float]:
     """Render every scene, add the end card, join, and lay optional music
     under it. Returns (final video, each scene's start time, total length).
@@ -432,10 +445,11 @@ def render_documentary(
         starts.append(round(t, 2))
         t += real
     on_progress(0.9, "Adding the end card...")
-    end = rdir / f"endcard_{hashlib.sha1(brand.encode()).hexdigest()[:8]}.mp4"
+    end_key = brand if end_line is None else f"{brand}|{end_line}"
+    end = rdir / f"endcard_{hashlib.sha1(end_key.encode()).hexdigest()[:8]}.mp4"
     if not end.exists():
         img = rdir / ".endcard.png"
-        end_card_image(brand).save(img)
+        (end_card_image(brand) if end_line is None else end_card_image(brand, end_line)).save(img)
         _encode_still(img, None, END_CARD_SECONDS, end)
         img.unlink(missing_ok=True)
     parts.append(end)
