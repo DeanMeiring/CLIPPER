@@ -132,6 +132,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   (≤0.8 s before the first word, ≤1.5 s after the last, cold open ≤ ~10 s)
   when a story is written -- never Dean's own edits. Dean rated that
   first rendered episode "really good".
+- **Thumbnails (Sept 2026):** `clipper/longform_thumbnail.py` makes 3
+  options on the Render & post step: `face` (close-up), `full` (full
+  frame, red circle on the face) and `split` (then vs now, two years).
+  Frames are real frames from the streamer's clips, scored by OpenCV Haar
+  face + sharpness + brightness. Claude writes 2-4 word hooks. A number
+  in a hook must appear in the research or the story, or the hook is
+  dropped. Dean can edit the text and redraw, pick one, or download it.
+  The chosen one is set with `thumbnails.set` right after the upload
+  (`youtube_upload.set_thumbnail`). A failure never fails the upload: it
+  lands in `project["thumbnail_status"]`, and "Set on YouTube" retries.
+  Custom thumbnails need a phone-verified channel; YouTube answers 403
+  without it.
 - Rendering is Pillow frames piped into ffmpeg, about 2x real time on
   CPU (a 12-minute episode renders in ~25 min). Scenes are cached by a
   hash of their inputs, so a change to the final mix only (music, music

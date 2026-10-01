@@ -38,6 +38,7 @@ from clipper import voice_clone
 from clipper import visual_sources
 from clipper import longform_lessons
 from clipper import longform_promo
+from clipper import longform_thumbnail
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -3769,6 +3770,8 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
     url = f"https://youtu.be/{video_id}"
     project = _longform_store.update(pid, lambda pr: pr.update(youtube_video_id=video_id, youtube_url=url,
                                                                uploaded_privacy=req.privacy_status))
+    if (project.get("thumbnails") or {}).get("items"):
+        project = _longform_apply_thumbnail(pid, project, access_token)
     # Straight away, cut 2 promo Shorts from the episode (unless they're
     # already being made) and tie them to it, so each Short's upload carries
     # the link to the full video.
@@ -3781,6 +3784,98 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
     except Exception as e:  # the episode is up either way
         print(f"[longform] promo Shorts for {pid} didn't start: {e}", flush=True)
     return project
+
+
+def _longform_chosen_thumb(pid: str, project: dict) -> Path:
+    rec = project.get("thumbnails") or {}
+    items = rec.get("items") or []
+    if not items:
+        raise HTTPException(409, "make the thumbnails first")
+    item = items[min(int(rec.get("chosen") or 0), len(items) - 1)]
+    return _longform_store.path(pid) / "thumbs" / item["file"]
+
+
+def _longform_apply_thumbnail(pid: str, project: dict, access_token: str) -> dict:
+    """Set the chosen thumbnail on the uploaded video; the outcome is kept
+    on the project (the upload itself never fails because of it)."""
+    try:
+        youtube_upload.set_thumbnail(access_token, project["youtube_video_id"], _longform_chosen_thumb(pid, project))
+        status = {"ok": True, "message": "Thumbnail set on YouTube.", "at": time.time()}
+    except (youtube_upload.UploadError, HTTPException, OSError) as e:
+        status = {"ok": False, "message": getattr(e, "detail", None) or str(e), "at": time.time()}
+    return _longform_store.update(pid, lambda pr: pr.update(thumbnail_status=status))
+
+
+@protected.post("/api/longform/projects/{pid}/thumbnails")
+async def longform_make_thumbnails(pid: str) -> dict:
+    """Three thumbnail options (longform_thumbnail.py): real frames from the
+    streamer's clips, faces first, with a short hook line."""
+    project = _longform_project(pid)
+    if project.get("status") != "script_ready" or not project.get("library"):
+        raise HTTPException(409, "write the story first")
+    d = _longform_store.path(pid)
+    try:
+        dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        dossier = {"profile": project.get("streamer") or {}}
+    try:
+        rec = await run_in_threadpool(longform_thumbnail.make_thumbnails, d, project, dossier, project["library"])
+    except Exception as e:
+        raise HTTPException(500, f"Couldn't make thumbnails: {e}")
+    return _longform_store.update(pid, lambda pr: pr.update(thumbnails=rec, thumbnail_status=None))
+
+
+class LongformThumbTextRequest(BaseModel):
+    hook: str
+
+
+@protected.put("/api/longform/projects/{pid}/thumbnails/{index}")
+async def longform_redraw_thumbnail(pid: str, index: int, req: LongformThumbTextRequest) -> dict:
+    project = _longform_project(pid)
+    rec = project.get("thumbnails") or {}
+    if not 0 <= index < len(rec.get("items") or []):
+        raise HTTPException(404, "no such thumbnail")
+    hook = " ".join(req.hook.split())[:40]
+    if not hook:
+        raise HTTPException(400, "type the text first")
+    try:
+        rec = await run_in_threadpool(longform_thumbnail.redraw, _longform_store.path(pid), rec, index, hook)
+    except Exception as e:
+        raise HTTPException(500, f"Couldn't redraw it: {e}")
+    return _longform_store.update(pid, lambda pr: pr.update(thumbnails=rec))
+
+
+@protected.post("/api/longform/projects/{pid}/thumbnails/{index}/choose")
+def longform_choose_thumbnail(pid: str, index: int) -> dict:
+    project = _longform_project(pid)
+    if not 0 <= index < len((project.get("thumbnails") or {}).get("items") or []):
+        raise HTTPException(404, "no such thumbnail")
+    return _longform_store.update(pid, lambda pr: pr["thumbnails"].update(chosen=index))
+
+
+@protected.get("/api/longform/projects/{pid}/thumbnails/{index}")
+def longform_thumbnail_file(pid: str, index: int, download: bool = False) -> FileResponse:
+    project = _longform_project(pid)
+    items = (project.get("thumbnails") or {}).get("items") or []
+    path = _longform_store.path(pid) / "thumbs" / items[index]["file"] if 0 <= index < len(items) else None
+    if path is None or not path.is_file():
+        raise HTTPException(404, "not found")
+    if download:
+        return FileResponse(path, media_type="image/jpeg", filename=f"thumbnail_{index + 1}.jpg")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+@protected.post("/api/longform/projects/{pid}/thumbnails/apply")
+def longform_apply_thumbnail(pid: str) -> dict:
+    """Set (or change) the thumbnail on the already-uploaded video."""
+    project = _longform_project(pid)
+    if not project.get("youtube_video_id"):
+        raise HTTPException(409, "upload the video first -- the chosen thumbnail is set then")
+    _longform_chosen_thumb(pid, project)
+    access_token = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE].get_valid_access_token()
+    if not access_token:
+        raise HTTPException(409, "Connect the Caught On Stream YouTube account first (on the Home page).")
+    return _longform_apply_thumbnail(pid, project, access_token)
 
 
 PROMO_SHORTS = 2
@@ -7240,6 +7335,12 @@ LONGFORM_HTML = """<!doctype html>
   a.dl-link { display: inline-flex; margin-top: 12px; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
     color: var(--text); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
   .clip-player { width: 100%; border-radius: 8px; margin-top: 6px; background: #000; }
+  .thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+  .thumbs figure { margin: 0; cursor: pointer; border-radius: 10px; padding: 3px; border: 3px solid transparent; }
+  .thumbs figure.on { border-color: var(--accent); }
+  .thumbs img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 7px; display: block; background: #0b0c10; }
+  .thumbs figcaption { font-size: 0.74rem; color: var(--muted); margin-top: 4px; text-align: center; }
+  @media (max-width: 600px) { .thumbs { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 600px) {
     .card { padding: 20px 16px 24px; }
     .prompter { font-size: 1.2rem; padding: 18px; }
@@ -7424,6 +7525,19 @@ LONGFORM_HTML = """<!doctype html>
           <button id="publish-btn" type="button" class="secondary">✍️ Write title &amp; description</button>
         </div>
         <div class="hint" id="render-info"></div>
+        <label>Thumbnail</label>
+        <div class="hint">Three options from real frames of the clips, faces first, with a short line on top. The one you pick is set on YouTube when you upload.</div>
+        <button id="thumb-make" type="button" class="secondary">🖼 Make thumbnails</button>
+        <div class="thumbs" id="thumbs"></div>
+        <div id="thumb-edit" style="display:none">
+          <div class="music-row">
+            <input id="thumb-hook" maxlength="40" placeholder="Text on the thumbnail">
+            <button id="thumb-redraw" type="button" class="secondary">Redraw</button>
+            <a id="thumb-dl" class="dl-link" href="#" style="margin-top:6px">⬇ Download</a>
+            <button id="thumb-apply" type="button" class="secondary" style="display:none">Set on YouTube</button>
+          </div>
+        </div>
+        <div class="hint" id="thumb-status"></div>
         <div id="publish-out" style="display:none">
           <label>Title options (tap one to use it)</label>
           <div id="title-list"></div>
@@ -8110,6 +8224,50 @@ $('voice-delete').addEventListener('click', async () => {
   try { voice = await api('/api/longform/voice/sample', { method: 'DELETE' }); $('voice-result').style.display = 'none'; renderVoice(); } catch (e) { alert(e.message); }
 });
 
+// ---------- thumbnails ----------
+const THUMB_LABEL = { face: 'Face close-up', full: 'Full frame', split: 'Then vs now' };
+function renderThumbs() {
+  const p = project, rec = p.thumbnails || {}, items = rec.items || [];
+  const box = $('thumbs'); box.innerHTML = '';
+  items.forEach((it, i) => {
+    const f = el('figure', i === (rec.chosen || 0) ? 'on' : '');
+    const im = el('img'); im.alt = it.hook; im.src = `/api/longform/projects/${p.id}/thumbnails/${i}?f=${encodeURIComponent(it.file)}`;
+    f.appendChild(im);
+    f.appendChild(el('figcaption', '', (i === (rec.chosen || 0) ? '✓ ' : '') + (THUMB_LABEL[it.layout] || it.layout)));
+    f.addEventListener('click', async () => {
+      try { project = await api(`/api/longform/projects/${p.id}/thumbnails/${i}/choose`, { method: 'POST' }); renderThumbs(); } catch (e) { alert(e.message); }
+    });
+    box.appendChild(f);
+  });
+  $('thumb-make').textContent = items.length ? '🖼 Make new ones' : '🖼 Make thumbnails';
+  $('thumb-edit').style.display = items.length ? 'block' : 'none';
+  if (items.length) {
+    const i = Math.min(rec.chosen || 0, items.length - 1);
+    if (document.activeElement !== $('thumb-hook')) $('thumb-hook').value = items[i].hook;
+    $('thumb-dl').href = `/api/longform/projects/${p.id}/thumbnails/${i}?download=1`;
+    $('thumb-apply').style.display = p.youtube_video_id ? 'inline-block' : 'none';
+  }
+  const st = p.thumbnail_status;
+  $('thumb-status').textContent = st ? (st.ok ? '✅ ' : '⚠️ ') + st.message : '';
+}
+$('thumb-make').addEventListener('click', async () => {
+  const b = $('thumb-make'); b.disabled = true; b.textContent = 'Making thumbnails… (about 30 seconds)';
+  try { project = await api(`/api/longform/projects/${project.id}/thumbnails`, { method: 'POST' }); }
+  catch (e) { alert(e.message); }
+  finally { b.disabled = false; renderThumbs(); }
+});
+$('thumb-redraw').addEventListener('click', async () => {
+  const rec = project.thumbnails || {}; const i = rec.chosen || 0;
+  const b = $('thumb-redraw'); b.disabled = true;
+  try { project = await api(`/api/longform/projects/${project.id}/thumbnails/${i}`, jsonOpts('PUT', { hook: $('thumb-hook').value })); $('thumb-hook').blur(); renderThumbs(); }
+  catch (e) { alert(e.message); } finally { b.disabled = false; }
+});
+$('thumb-apply').addEventListener('click', async () => {
+  const b = $('thumb-apply'); b.disabled = true;
+  try { project = await api(`/api/longform/projects/${project.id}/thumbnails/apply`, { method: 'POST' }); renderThumbs(); }
+  catch (e) { alert(e.message); } finally { b.disabled = false; }
+});
+
 // ---------- render & post ----------
 function renderRender() {
   const p = project, r = p.render || {};
@@ -8150,6 +8308,7 @@ function renderRender() {
     if (!$('post-title').value) $('post-title').value = (pub.titles || [])[0] || p.title;
     if (document.activeElement !== $('desc-text') && !$('desc-text').dataset.edited) $('desc-text').value = pub.description || '';
   }
+  renderThumbs();
   const ps = $('post-status'); ps.innerHTML = '';
   if (p.youtube_url) { ps.appendChild(document.createTextNode(`✅ Uploaded (${p.uploaded_privacy}): `)); const a = el('a', '', p.youtube_url); a.href = p.youtube_url; a.target = '_blank'; ps.appendChild(a); }
   if (p.promo_job_id) {
