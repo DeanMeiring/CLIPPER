@@ -350,8 +350,8 @@ def draw_race(c: Canvas, spec: dict, t: float, tm: dict):
             c.block(x, y - 78, label, "Inter-Bold", 27, mix(BG, WHITE, k), 280, max_lines=2)
         prev = (x, y, lane)
     if spec.get("example"):
-        c.rrect(1560, 64, 1810, 108, 10, fill=PANEL)
-        c.text(1685, 72, "EXAMPLE TIMINGS", "Inter-Black", 22, MUTED, "ma")
+        c.rrect(1560, 120, 1810, 164, 10, fill=PANEL)
+        c.text(1685, 128, "EXAMPLE TIMINGS", "Inter-Black", 22, MUTED, "ma")
 
 
 def _fmt_value(v: float) -> str:
@@ -384,11 +384,12 @@ def draw_bignum(c: Canvas, spec: dict, t: float, tm: dict):
     k = ease_out(prog(t, tm["t0"] + 0.1, 0.9))
     value = str(spec.get("value") or "")
     shown = value
-    try:
-        num = float(value.replace(",", ""))
-        shown = _fmt_value(num * k) if "," not in value else f"{int(num * k):,}"
-    except ValueError:
-        pass
+    if k < 0.999:  # counting up; the finished number shows exactly as written
+        try:
+            num = float(value.replace(",", ""))
+            shown = _fmt_value(num * k) if "," not in value else f"{int(num * k):,}"
+        except ValueError:
+            pass
     size = 230 if len(value) <= 7 else 170
     c.text(W / 2, 430, shown, "Anton", size * (0.9 + 0.1 * back(min(1, k * 1.3))), YEL, "mm")
     c.block(W / 2, 600, str(spec.get("label") or ""), "Inter-Bold", 50, mix(BG, WHITE, k), 1400, max_lines=2)
