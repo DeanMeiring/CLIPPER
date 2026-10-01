@@ -3895,6 +3895,7 @@ def _longform_start_promo(project: dict, path: Path) -> str:
             "request": JobRequest(source=str(path), num_clips=PROMO_SHORTS, focus=f"cliffhangers from the story of {name}"),
             "channel_profile": DEFAULT_CHANNEL_PROFILE, "promo_episode": project["id"],
         }
+        cancel_events[job_id] = threading.Event()
     _persist(job_id)
     threading.Thread(target=_longform_build_promo, args=(job_id, project, path), daemon=True).start()
     return job_id
@@ -3908,7 +3909,10 @@ def _longform_build_promo(job_id: str, project: dict, path: Path) -> None:
         if not cuts:
             raise RuntimeError("the story has no setup-then-clip moments to cut a cliffhanger from")
         clips = []
+        stop = cancel_events.get(job_id)
         for k, cut in enumerate(cuts[:PROMO_SHORTS], start=1):
+            if stop is not None and stop.is_set():
+                break
             name = f"cliffhanger_{k}.mp4"
             dur = longform_promo.render_short(path, cut, _longform_brand(), out_dir / name)
             clips.append({
@@ -3923,7 +3927,10 @@ def _longform_build_promo(job_id: str, project: dict, path: Path) -> None:
         with jobs_lock:
             job = jobs.get(job_id)
             if job is not None:
-                job.update(state="done", message="Done", progress=1.0, clips=clips)
+                if stop is not None and stop.is_set():
+                    job.update(state="cancelled", message="Stopped", clips=clips if job.get("saved") else [])
+                else:
+                    job.update(state="done", message="Done", progress=1.0, clips=clips)
     except Exception as e:
         print(f"[longform] cliffhanger Shorts for {project.get('id')} failed: {e}", flush=True)
         with jobs_lock:
@@ -3954,6 +3961,11 @@ def longform_promo_shorts(pid: str) -> dict:
     path = _longform_store.path(pid) / "final.mp4"
     if (project.get("render") or {}).get("status") != "done" or not path.is_file():
         raise HTTPException(409, "render the video first")
+    with jobs_lock:
+        running = (jobs.get(project.get("promo_job_id") or "") or {}).get("state") not in (None, *TERMINAL_STATES)
+    if running:
+        # Already being cut (e.g. the button pressed twice): one set at a time.
+        return project
     job_id = _longform_start_promo(project, path)
     if project.get("youtube_url"):
         _attach_promo(job_id, project["youtube_url"], project.get("title") or "")
@@ -8358,7 +8370,9 @@ $('upload-btn').addEventListener('click', async () => {
   catch (e) { alert(e.message); } finally { b.disabled = false; b.textContent = '⬆ Upload to Caught On Stream'; }
 });
 $('promo-btn').addEventListener('click', async () => {
+  const b = $('promo-btn'); b.disabled = true;
   try { project = await api(`/api/longform/projects/${project.id}/promo-shorts`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
+  finally { b.disabled = false; }
 });
 
 $('delete-project').addEventListener('click', async () => {
