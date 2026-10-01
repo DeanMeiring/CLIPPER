@@ -7526,7 +7526,7 @@ LONGFORM_HTML = """<!doctype html>
         </div>
         <div class="hint" id="render-info"></div>
         <label>Thumbnail</label>
-        <div class="hint">Three options from real frames of the clips, faces first, with a short line on top. The one you pick is set on YouTube when you upload.</div>
+        <div class="hint">Three options made from real frames of the clips: the streamer&rsquo;s face big and cut out from a darkened background, with a short line. The one you pick is set on YouTube when you upload.</div>
         <button id="thumb-make" type="button" class="secondary">🖼 Make thumbnails</button>
         <div class="thumbs" id="thumbs"></div>
         <div id="thumb-edit" style="display:none">
@@ -8225,7 +8225,7 @@ $('voice-delete').addEventListener('click', async () => {
 });
 
 // ---------- thumbnails ----------
-const THUMB_LABEL = { face: 'Face close-up', full: 'Full frame', split: 'Then vs now' };
+const THUMB_LABEL = { face: 'Face + text', full: 'Big face', split: 'Then vs now' };
 function renderThumbs() {
   const p = project, rec = p.thumbnails || {}, items = rec.items || [];
   const box = $('thumbs'); box.innerHTML = '';
@@ -8251,7 +8251,7 @@ function renderThumbs() {
   $('thumb-status').textContent = st ? (st.ok ? '✅ ' : '⚠️ ') + st.message : '';
 }
 $('thumb-make').addEventListener('click', async () => {
-  const b = $('thumb-make'); b.disabled = true; b.textContent = 'Making thumbnails… (about 30 seconds)';
+  const b = $('thumb-make'); b.disabled = true; b.textContent = 'Making thumbnails… (about a minute)';
   try { project = await api(`/api/longform/projects/${project.id}/thumbnails`, { method: 'POST' }); }
   catch (e) { alert(e.message); }
   finally { b.disabled = false; renderThumbs(); }
