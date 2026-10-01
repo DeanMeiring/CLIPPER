@@ -236,6 +236,11 @@ merge it yourself; merging stays Dean's call per the rule above.
 
 ## Railway deploys
 
+- Uvicorn runs with `--log-config webapp/log_config.json`: its INFO lines go
+  to stdout, warnings/tracebacks to stderr. Railway shows every stderr line
+  as a red "error", so with uvicorn's default config a healthy startup
+  looked like errors to Dean. A red line in the logs should now mean a real
+  problem.
 - Project `12720d82-23db-498d-b4f6-2a69cf5fff42`, service
   `978f7dca-a5bf-4663-8446-ed3a6625841f`, environment
   `a30ad832-9974-4645-bed0-37002a3af844` (production).
