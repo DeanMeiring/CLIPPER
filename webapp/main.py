@@ -37,6 +37,7 @@ from clipper import longform_video
 from clipper import voice_clone
 from clipper import visual_sources
 from clipper import longform_lessons
+from clipper import longform_analytics
 from clipper import longform_promo
 from clipper import longform_thumbnail
 from clipper.highlights import fetch_vod_clips
@@ -2830,6 +2831,72 @@ def clip_performance_report(refresh: bool = False) -> dict:
         return {"available": False, "reason": f"Could not load clip performance: {e}"}
 
 
+_longform_analytics_cache: dict = {}
+
+
+def _longform_episode_analytics(access_token: str, channel_id: str, project: dict) -> dict:
+    when = project.get("uploaded_at") or project.get("created_at") or time.time()
+    start = (datetime.date.fromtimestamp(when) - datetime.timedelta(days=1)).isoformat()
+    vid = project["youtube_video_id"]
+    stats = youtube_analytics.get_video_stats(access_token, channel_id, vid, start)
+    extras = {}
+    for name, fn in (("curve", youtube_analytics.get_retention_curve), ("daily", youtube_analytics.get_video_daily),
+                     ("traffic", youtube_analytics.get_video_traffic)):
+        try:
+            extras[name] = fn(access_token, channel_id, vid, start)
+        except Exception as e:  # noqa: BLE001 - one missing part shouldn't hide the rest
+            print(f"[longform-analytics] {name} for {vid} unavailable: {e}", flush=True)
+            extras[name] = []
+    shorts = []
+    with jobs_lock:
+        job = jobs.get(project.get("promo_job_id") or "") or {}
+        posted = [dict(c) for c in job.get("clips") or [] if c.get("youtube_video_id")]
+    for c in posted:
+        row = {"title": c.get("upload_title") or c.get("title") or "", "video_id": c["youtube_video_id"],
+               "url": f"https://youtube.com/shorts/{c['youtube_video_id']}"}
+        try:
+            row.update(youtube_analytics.get_video_stats(access_token, channel_id, c["youtube_video_id"], start))
+        except Exception as e:  # noqa: BLE001
+            print(f"[longform-analytics] Short {c['youtube_video_id']} unavailable: {e}", flush=True)
+        shorts.append(row)
+    return longform_analytics.build_episode(project, stats, extras["curve"], extras["daily"], extras["traffic"], shorts)
+
+
+@protected.get("/api/longform-analytics")
+def longform_analytics_report(refresh: bool = False) -> dict:
+    """How each posted "Story Of" episode is doing: views, watch time,
+    retention laid over its scenes and chapters, traffic sources, and its
+    cliffhanger Shorts. Backs the long-form panel on the Analytics page."""
+    cached = _longform_analytics_cache.get("data")
+    if not refresh and cached and time.time() - _longform_analytics_cache.get("at", 0) < _CLIP_PERFORMANCE_TTL_SECONDS:
+        return cached
+    posted = [p for p in _longform_store.list() if p.get("youtube_video_id")]
+    if not posted:
+        return {"available": False, "reason": "No long-form episode is on YouTube yet. Once you upload one from the long-form page, its numbers show up here."}
+    if not youtube_oauth.is_configured():
+        return {"available": False, "reason": "YouTube OAuth isn't configured on this deployment."}
+    access_token = _youtube_token_store.get_valid_access_token()
+    if not access_token:
+        return {"available": False, "reason": "Connect your YouTube account (Channel insights, above) to see how your episodes are doing."}
+    try:
+        own = youtube_analytics.get_own_channel(access_token)
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "reason": f"Couldn't reach YouTube Analytics: {e}"}
+    if not own:
+        return {"available": False, "reason": "The connected Google account has no YouTube channel."}
+    episodes = []
+    for p in posted:
+        try:
+            episodes.append(_longform_episode_analytics(access_token, own["id"], p))
+        except Exception as e:  # noqa: BLE001 - show the reason next to that episode instead of failing the panel
+            traceback.print_exc()
+            episodes.append({"id": p["id"], "title": p.get("title") or "Untitled", "url": p.get("youtube_url"),
+                             "error": f"Couldn't load its numbers: {e}"})
+    data = {"available": True, "episodes": episodes, "generated_at": time.time()}
+    _longform_analytics_cache.update(at=time.time(), data=data)
+    return data
+
+
 @protected.delete("/api/channel-insights/overview")
 def channel_insights_clear_overview() -> dict:
     """Wipe the saved AI-overview history, so a stale or noisy analysis
@@ -3769,7 +3836,7 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
         raise HTTPException(502, str(e)) from e
     url = f"https://youtu.be/{video_id}"
     project = _longform_store.update(pid, lambda pr: pr.update(youtube_video_id=video_id, youtube_url=url,
-                                                               uploaded_privacy=req.privacy_status))
+                                                               uploaded_privacy=req.privacy_status, uploaded_at=time.time()))
     if (project.get("thumbnails") or {}).get("items"):
         project = _longform_apply_thumbnail(pid, project, access_token)
     # Straight away, cut 2 promo Shorts from the episode (unless they're
@@ -6139,6 +6206,16 @@ ANALYTICS_HTML = """<!doctype html>
   details.perf-videos { margin-top: 16px; }
   .bar-row.latest .bar-title { font-weight: 700; }
   details.perf-videos summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+  .lf-episode { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-top: 12px; }
+  .lf-episode h3 { margin: 0; font-size: 1rem; }
+  .lf-episode h3 a { color: var(--text); }
+  .lf-chart { position: relative; margin-top: 8px; }
+  .lf-chart svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
+  .lf-tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 8px; font-size: 0.75rem; box-shadow: 0 4px 14px rgba(0,0,0,0.12); white-space: nowrap; display: none; }
+  .lf-chapters { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.74rem; color: var(--muted); margin-top: 4px; }
+  .lf-drop { font-size: 0.82rem; margin-top: 6px; }
+  .lf-drop b { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -6171,6 +6248,14 @@ ANALYTICS_HTML = """<!doctype html>
     traits compare. Clips made here are matched to the video you posted, by the upload button or by title.</p>
   <div id="clip-perf-body"><div class="hint">Loading...</div></div>
   <button id="clip-perf-refresh-btn" type="button">↻ Refresh from YouTube</button>
+</div>
+
+<div class="section">
+  <label style="margin-top:0">🎬 Long-form episodes</label>
+  <p class="hint">How each &ldquo;Story Of&rdquo; episode is doing on YouTube. The retention line is laid over the
+    episode&rsquo;s chapters, so a drop shows which part people left in. YouTube&rsquo;s numbers run about two days behind.</p>
+  <div id="longform-body"><div class="hint">Loading...</div></div>
+  <button id="longform-refresh-btn" type="button">↻ Refresh from YouTube</button>
 </div>
 
 <div class="section">
@@ -6633,6 +6718,224 @@ async function loadClipPerformance(refresh) {
 }
 loadClipPerformance(false);
 document.getElementById('clip-perf-refresh-btn').addEventListener('click', () => loadClipPerformance(true));
+
+// ---------- long-form episodes ----------
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const n = document.createElementNS(SVG_NS, tag);
+  Object.entries(attrs || {}).forEach(([k, v]) => n.setAttribute(k, v));
+  return n;
+}
+function fmtHours(minutes) {
+  if (minutes == null) return '–';
+  return minutes >= 600 ? `${Math.round(minutes / 60)} h` : minutes >= 60 ? `${(minutes / 60).toFixed(1)} h` : `${Math.round(minutes)} min`;
+}
+
+// One series (share of viewers still watching), so one hue and no legend;
+// chapters are numbered dashed markers listed under the chart; hovering
+// (or dragging a finger) shows the exact point and the chapter it's in.
+function buildRetentionChart(ep, W) {
+  const wrap = el('div', { className: 'lf-chart' });
+  const H = W < 500 ? 200 : 220, L = 38, R = 10, T = 18, B = 26;
+  const iw = W - L - R, ih = H - T - B;
+  const maxY = Math.max(1, ...ep.curve.map(p => p[1]));
+  const x = f => L + f * iw, y = v => T + ih - (v / maxY) * ih;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+    'aria-label': `Share of viewers still watching across ${ep.title}` });
+  [0, 0.25, 0.5, 0.75, 1].forEach(v => {
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: 'var(--border)', 'stroke-width': 1 }));
+    const t = svgEl('text', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'var(--muted)' });
+    t.textContent = `${Math.round(v * 100)}%`;
+    svg.appendChild(t);
+  });
+  (W < 500 ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]).forEach(f => {
+    const t = svgEl('text', { x: x(f), y: H - 6, 'text-anchor': f === 0 ? 'start' : f === 1 ? 'end' : 'middle', 'font-size': 11, fill: 'var(--muted)' });
+    t.textContent = formatSeconds(f * ep.duration);
+    svg.appendChild(t);
+  });
+  const chapters = (ep.chapters || []).filter(c => ep.duration && c.t / ep.duration < 0.99);
+  chapters.forEach((c, i) => {
+    const cx = x(c.t / ep.duration);
+    svg.appendChild(svgEl('line', { x1: cx, x2: cx, y1: T, y2: T + ih, stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.6 }));
+    const n = svgEl('text', { x: cx + 3, y: T - 5, 'font-size': 11, fill: 'var(--muted)' });
+    n.textContent = String(i + 1);
+    svg.appendChild(n);
+  });
+  const d = ep.curve.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  svg.appendChild(svgEl('path', { d, fill: 'none', stroke: 'var(--chart-you)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+  const guide = svgEl('line', { y1: T, y2: T + ih, stroke: 'var(--text)', 'stroke-width': 1, opacity: 0 });
+  const dot = svgEl('circle', { r: 5, fill: 'var(--chart-you)', stroke: 'var(--card)', 'stroke-width': 2, opacity: 0 });
+  svg.appendChild(guide); svg.appendChild(dot);
+  const hit = svgEl('rect', { x: L, y: 0, width: iw, height: H, fill: 'transparent' });
+  svg.appendChild(hit);
+  const tip = el('div', { className: 'lf-tip' });
+  function show(evt) {
+    const box = svg.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, ((evt.clientX - box.left) / box.width * W - L) / iw));
+    const p = ep.curve.reduce((a, b) => Math.abs(b[0] - f) < Math.abs(a[0] - f) ? b : a);
+    const sec = p[0] * ep.duration;
+    let ch = null;
+    chapters.forEach((c, i) => { if (c.t <= sec) ch = `${i + 1}. ${c.title}`; });
+    guide.setAttribute('x1', x(p[0])); guide.setAttribute('x2', x(p[0])); guide.setAttribute('opacity', 0.35);
+    dot.setAttribute('cx', x(p[0])); dot.setAttribute('cy', y(p[1])); dot.setAttribute('opacity', 1);
+    tip.textContent = `${formatSeconds(sec)} · ${Math.round(p[1] * 100)}% still watching` + (ch ? ` · ${ch}` : '');
+    tip.style.display = 'block';
+    const px = (x(p[0]) / W) * box.width;
+    tip.style.left = Math.min(box.width - tip.offsetWidth, Math.max(0, px - tip.offsetWidth / 2)) + 'px';
+    tip.style.top = Math.max(0, (y(p[1]) / H) * box.height - 44) + 'px';
+  }
+  function hide() { tip.style.display = 'none'; guide.setAttribute('opacity', 0); dot.setAttribute('opacity', 0); }
+  hit.addEventListener('pointermove', show);
+  hit.addEventListener('pointerdown', show);
+  hit.addEventListener('pointerleave', hide);
+  wrap.appendChild(svg);
+  wrap.appendChild(tip);
+  if (chapters.length) {
+    const list = el('div', { className: 'lf-chapters' });
+    chapters.forEach((c, i) => list.appendChild(el('span', { text: `${i + 1}. ${c.title} (${formatSeconds(c.t)})` })));
+    wrap.appendChild(list);
+  }
+  return wrap;
+}
+
+// Views per day since upload: one series, bars with the value on hover.
+function buildDailyChart(daily, W) {
+  const wrap = el('div', { className: 'lf-chart' });
+  const H = 120, L = 6, R = 6, T = 8, B = 20;
+  const iw = W - L - R, ih = H - T - B, n = daily.length;
+  const maxV = Math.max(1, ...daily.map(d => d.views));
+  const bw = Math.max(2, iw / n - 2);
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Views per day since upload' });
+  svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: T + ih, y2: T + ih, stroke: 'var(--border)', 'stroke-width': 1 }));
+  daily.forEach((d, i) => {
+    const h = Math.max(d.views ? 2 : 0, (d.views / maxV) * ih);
+    const bx = L + i * (iw / n) + 1;
+    const r = svgEl('rect', { x: bx, y: T + ih - h, width: bw, height: h, rx: Math.min(4, bw / 2), fill: 'var(--chart-you)' });
+    const ttl = svgEl('title'); ttl.textContent = `${d.date}: ${Number(d.views).toLocaleString()} views`;
+    r.appendChild(ttl);
+    svg.appendChild(r);
+    const hitR = svgEl('rect', { x: bx - 1, y: T, width: iw / n, height: ih, fill: 'transparent' });
+    hitR.appendChild(ttl.cloneNode(true));
+    svg.appendChild(hitR);
+  });
+  [[0, 'start'], [n - 1, 'end']].forEach(([i, anchor]) => {
+    if (i < 0 || (i === n - 1 && n < 2)) return;
+    const t = svgEl('text', { x: i === 0 ? L : W - R, y: H - 5, 'text-anchor': anchor, 'font-size': 11, fill: 'var(--muted)' });
+    t.textContent = daily[i].date.slice(5);
+    svg.appendChild(t);
+  });
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+function buildEpisode(ep, W) {
+  const box = el('div', { className: 'lf-episode' });
+  const h = el('h3');
+  const a = el('a', { text: ep.title, href: ep.url || '#' }); a.target = '_blank';
+  h.appendChild(a);
+  box.appendChild(h);
+  if (ep.error) { box.appendChild(el('div', { className: 'hint', text: ep.error })); return box; }
+  const st = ep.stats || {};
+  box.appendChild(el('div', { className: 'hint', text: `${formatSeconds(ep.duration)} long` + (ep.privacy ? ` · uploaded ${ep.privacy}` : '') }));
+  const tiles = el('div', { className: 'stat-row' });
+  tiles.appendChild(statTile('Views', fmtCount(st.views)));
+  tiles.appendChild(statTile('Watch time', fmtHours(st.estimatedMinutesWatched)));
+  tiles.appendChild(statTile('Average view', st.averageViewDuration != null ? formatSeconds(st.averageViewDuration) : '–',
+    st.averageViewPercentage != null ? `${fmtPercent(st.averageViewPercentage)} of the video` : null));
+  if (ep.watch_30s != null) tiles.appendChild(statTile('Still watching at 0:30', fmtFraction(ep.watch_30s), 'the opening'));
+  tiles.appendChild(statTile('Subscribers gained', fmtCount(st.subscribersGained)));
+  if (st.click_rate != null) tiles.appendChild(statTile('Thumbnail click rate', `${(st.click_rate * (st.click_rate <= 1 ? 100 : 1)).toFixed(1)}%`, `${fmtCount(st.impressions)} impressions`));
+  if (ep.vs_similar != null) tiles.appendChild(statTile('Retention vs similar videos', ep.vs_similar.toFixed(2), '0.5 = typical for the length'));
+  box.appendChild(tiles);
+  if (!st.views) {
+    box.appendChild(el('div', { className: 'hint', text: ep.privacy === 'private'
+      ? 'No views yet -- it is still private. Numbers appear here once it is public (and about two days behind).'
+      : 'No views counted yet -- YouTube runs about two days behind.' }));
+  }
+  if (ep.curve && ep.curve.length) {
+    const t = el('div', { className: 'chart-title' }); t.style.flexWrap = 'wrap';
+    t.appendChild(el('span', { text: 'Who is still watching' }));
+    t.appendChild(el('span', { className: 'hint', text: 'share of viewers at each point; numbered lines are chapters' }));
+    t.style.marginTop = '14px';
+    box.appendChild(t);
+    box.appendChild(buildRetentionChart(ep, W));
+    (ep.drops || []).forEach(dp => {
+      const row = el('div', { className: 'lf-drop' });
+      row.appendChild(el('b', { text: `${formatSeconds(dp.t)} ` }));
+      row.appendChild(document.createTextNode(`lost ${Math.round(dp.fall * 100)}% of viewers, during scene ${dp.scene}: ${dp.what}`));
+      box.appendChild(row);
+    });
+  } else if (st.views) {
+    box.appendChild(el('div', { className: 'hint', text: 'YouTube shows the retention curve once the video has enough views.' }));
+  }
+  if (ep.daily && ep.daily.length > 1) {
+    const t = el('div', { className: 'chart-title' }); t.style.marginTop = '14px';
+    t.appendChild(el('span', { text: 'Views per day' }));
+    box.appendChild(t);
+    box.appendChild(buildDailyChart(ep.daily, W));
+  }
+  if (ep.traffic && ep.traffic.length) {
+    const block = el('div', { className: 'chart-block' });
+    const t = el('div', { className: 'chart-title' });
+    t.appendChild(el('span', { text: 'Where the views came from' }));
+    block.appendChild(t);
+    ep.traffic.forEach(s => {
+      const row = el('div', { className: 'bar-row' });
+      row.title = `${fmtCount(s.views)} views from ${s.source}`;
+      const lc = el('div', { className: 'bar-label' }); lc.appendChild(el('div', { className: 'bar-title', text: s.source }));
+      row.appendChild(lc);
+      const track = el('div', { className: 'bar-track' }); const fill = el('div', { className: 'bar-fill' });
+      fill.style.width = Math.max(2, Math.round(s.share * 100)) + '%'; fill.style.background = 'var(--chart-you)';
+      track.appendChild(fill); row.appendChild(track);
+      row.appendChild(el('div', { className: 'bar-value', text: fmtFraction(s.share) }));
+      block.appendChild(row);
+    });
+    box.appendChild(block);
+  }
+  if (ep.shorts && ep.shorts.length) {
+    const t = el('div', { className: 'chart-title' }); t.style.marginTop = '14px';
+    t.appendChild(el('span', { text: 'Its cliffhanger Shorts' }));
+    box.appendChild(t);
+    const tbl = el('table', { className: 'perf-table' });
+    const head = el('tr');
+    ['Short', 'Views', 'Watched', 'Subs'].forEach(x => head.appendChild(el('th', { text: x })));
+    const thead = el('thead'); thead.appendChild(head); tbl.appendChild(thead);
+    const tb = el('tbody');
+    ep.shorts.forEach(s => {
+      const tr = el('tr');
+      const td = el('td'); const sa = el('a', { text: s.title || s.video_id, href: s.url }); sa.target = '_blank'; td.appendChild(sa);
+      tr.appendChild(td);
+      tr.appendChild(el('td', { text: fmtCount(s.views) }));
+      tr.appendChild(el('td', { text: fmtPercent(s.averageViewPercentage) }));
+      tr.appendChild(el('td', { text: fmtCount(s.subscribersGained) }));
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    box.appendChild(tbl);
+  }
+  return box;
+}
+
+async function loadLongform(refresh) {
+  const body = document.getElementById('longform-body');
+  const btn = document.getElementById('longform-refresh-btn');
+  btn.disabled = true; body.style.opacity = '0.5';
+  let data;
+  try {
+    data = await (await fetch('/api/longform-analytics' + (refresh ? '?refresh=true' : ''))).json();
+  } catch (e) {
+    data = { available: false, reason: 'Could not load the long-form numbers.' };
+  }
+  body.style.opacity = ''; btn.disabled = false;
+  body.innerHTML = '';
+  if (!data.available) { body.appendChild(el('div', { className: 'hint', text: data.reason || 'Not available.' })); return; }
+  // Charts are drawn at the width they're shown at, so their labels stay
+  // readable on a phone instead of a desktop drawing scaled down.
+  const W = Math.max(280, Math.min(900, body.clientWidth - 30));
+  data.episodes.forEach(ep => body.appendChild(buildEpisode(ep, W)));
+}
+loadLongform(false);
+document.getElementById('longform-refresh-btn').addEventListener('click', () => loadLongform(true));
 
 const aiOverviewBtn = document.getElementById('ai-overview-btn');
 const aiOverviewBody = document.getElementById('ai-overview-body');

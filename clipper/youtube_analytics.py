@@ -181,3 +181,48 @@ def get_insights(access_token: str, channel_id: str, lookback_days: int = 90) ->
         "subscribers_lost": totals_row[5],
         "traffic_sources": traffic_sources,
     }
+
+
+def get_video_stats(access_token: str, channel_id: str, video_id: str, start_date: str) -> dict:
+    """One video's totals since start_date: views, watch time, average view
+    duration / percentage, subscribers, likes, comments, shares -- plus
+    thumbnail impressions and click-through rate when YouTube reports
+    them for the video (they're None otherwise)."""
+    import requests
+
+    base = {"ids": f"channel=={channel_id}", "startDate": start_date,
+            "endDate": datetime.date.today().isoformat(), "filters": f"video=={video_id}"}
+    names = ["views", "estimatedMinutesWatched", "averageViewDuration", "averageViewPercentage",
+             "subscribersGained", "likes", "comments", "shares"]
+    data = _get(ANALYTICS_URL, access_token, {**base, "metrics": ",".join(names)})
+    row = (data.get("rows") or [[0] * len(names)])[0]
+    out = dict(zip(names, row))
+    out["impressions"] = out["click_rate"] = None
+    try:
+        imp = _get(ANALYTICS_URL, access_token, {**base, "metrics": "videoThumbnailImpressions,videoThumbnailImpressionsClickRate"})
+        r = (imp.get("rows") or [None])[0]
+        if r:
+            out["impressions"], out["click_rate"] = r[0], r[1]
+    except requests.HTTPError:
+        pass  # not reported for this video or this account; the rest stands
+    return out
+
+
+def get_video_daily(access_token: str, channel_id: str, video_id: str, start_date: str) -> list:
+    """One video's views per day since start_date, oldest first:
+    [{"date", "views"}]. YouTube's numbers run about two days behind."""
+    data = _get(ANALYTICS_URL, access_token, {
+        "ids": f"channel=={channel_id}", "startDate": start_date, "endDate": datetime.date.today().isoformat(),
+        "metrics": "views", "dimensions": "day", "sort": "day", "filters": f"video=={video_id}",
+    })
+    return [{"date": r[0], "views": r[1]} for r in data.get("rows") or []]
+
+
+def get_video_traffic(access_token: str, channel_id: str, video_id: str, start_date: str) -> list:
+    """Where one video's views came from: [{"source", "views"}], biggest
+    first (YouTube's insightTrafficSourceType names)."""
+    data = _get(ANALYTICS_URL, access_token, {
+        "ids": f"channel=={channel_id}", "startDate": start_date, "endDate": datetime.date.today().isoformat(),
+        "metrics": "views", "dimensions": "insightTrafficSourceType", "sort": "-views", "filters": f"video=={video_id}",
+    })
+    return [{"source": r[0], "views": r[1]} for r in data.get("rows") or []]

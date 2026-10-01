@@ -157,6 +157,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   fails the upload: it lands in `project["thumbnail_status"]`, and "Set on
   YouTube" retries. Custom thumbnails need a phone-verified channel;
   YouTube answers 403 without it.
+- **Analytics (Oct 2026):** the Analytics page has a "Long-form episodes"
+  panel (`GET /api/longform-analytics`, cached 10 min like the Shorts
+  panel; `clipper/longform_analytics.py` builds it from
+  `youtube_analytics.get_video_stats / get_retention_curve /
+  get_video_daily / get_video_traffic`). For each uploaded episode it
+  shows views, watch time, average view, the share still watching at
+  0:30, subscribers, the thumbnail click rate (when YouTube reports it),
+  and retention vs similar videos. The retention line carries numbered
+  chapter markers taken from `render.starts`, and the biggest drops after
+  0:30 are named with the scene playing then. It also shows views per
+  day, traffic sources and how the episode's cliffhanger Shorts did. The
+  upload now stores `uploaded_at`, which sets the start of the reporting
+  window. Charts are hand-made SVG (no chart library), drawn at their real
+  width so the labels stay readable on a phone.
 - Rendering is Pillow frames piped into ffmpeg, about 2x real time on
   CPU (a 12-minute episode renders in ~25 min). Scenes are cached by a
   hash of their inputs, so a change to the final mix only (music, music
