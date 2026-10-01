@@ -223,6 +223,58 @@ merge it yourself; merging stays Dean's call per the rule above.
   render tests: `pip install imageio-ffmpeg` and point `CLIPPER_FFMPEG` at
   `imageio_ffmpeg.get_ffmpeg_exe()`.
 
+## Caught On Code: tech explainers (Oct 2026)
+
+- A second long-form series and YouTube channel: the tech behind gaming,
+  streaming and the internet (netcode, anti-cheat, matchmaking, stream
+  latency, AI voice cloning...). Dean narrates, no face. The niche came
+  from research: 3Blue1Brown, Kurzgesagt, Branch Education, Real
+  Engineering and The B1M already own the big science topics, but
+  gaming-tech questions players search for have no channel that owns them.
+  It's the same audience as Caught On Stream.
+- Page `/caught-on-code` (linked from Home). The page is the same
+  template as `/long-form` (`_LONGFORM_TEMPLATE`, built per series by
+  `_longform_page`). JS branches on `SERIES` / `EXP`, and elements marked
+  `doc-only` / `exp-only` are hidden by CSS. Projects are in the same
+  long-form store with `kind: "explainer"`
+  (`/api/longform/projects?series=`). Recording, the misread check,
+  render, music, thumbnails, upload and analytics routes are shared; they
+  branch with `_is_explainer`.
+- `clipper/explainer.py`:
+  - Research: Wikipedia top articles, pasted links, notes.
+  - The script prompt: narrate scenes, each with 1-3 `visuals`, plus 2-3
+    "pause and guess" quiz scenes.
+  - `normalize_scenes` / `normalize_visual`: a number on screen must be in
+    the research, or be simple maths (`"math": "1000 / 128"`) on numbers
+    that are, plus unit constants (60, 1000...). Unsourced race timings
+    get an "EXAMPLE TIMINGS" tag. Thumbnail hooks get the same number
+    check.
+  - `quiz_suggestions`: YouTube Studio in-video quizzes are added by
+    hand; there's no API.
+  - Publish text and diagram-based thumbnails (layouts left / center /
+    bottom).
+- `clipper/explainer_visuals.py`:
+  - Templates: flow, network, race, bars, bignum, grid, layers, neural,
+    compare, quiz, words.
+  - Pillow drawn at 2x and reduced, about 1.8x real time on CPU.
+  - Each element appears on its `at` phrase, matched against the take's
+    word timings (`longform_beats.script_timings`). Captions and
+    watermark are the documentaries'.
+  - `longform_video.render_scene` dispatches on `scene["visuals"]`.
+    `_scene_key` only adds `visuals` when present, so documentary
+    scene caches are unchanged (checked).
+- Its own YouTube account, `EXTRA_YOUTUBE_ACCOUNTS["code"]` (token file
+  `_youtube_oauth_token_code.json`). It's deliberately not in
+  `CHANNEL_PROFILES`, which would add it to Home's channel switcher and
+  the Shorts pipeline. Connect with `/auth/youtube/login?profile=code`;
+  the callback returns to `/caught-on-code`. Upload, thumbnail and
+  analytics pick the account per episode (`_longform_account`). There
+  are no cliffhanger Shorts for explainers (no clip moments); the route
+  returns 409.
+- Manim was used for the first pilot clip (sandbox only: needs Pango dev
+  libs and a venv). The app uses the Pillow templates instead, so there's
+  no new dependency or Docker change.
+
 ## Clip layout
 
 - Clips render in the IRL layout by default (`reframe.LetterboxLayout`,

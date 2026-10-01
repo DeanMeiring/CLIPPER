@@ -38,6 +38,7 @@ from clipper import voice_clone
 from clipper import visual_sources
 from clipper import longform_lessons
 from clipper import longform_analytics
+from clipper import explainer
 from clipper import longform_promo
 from clipper import longform_thumbnail
 from clipper.highlights import fetch_vod_clips
@@ -128,6 +129,22 @@ _youtube_token_stores: dict = {
     for profile, cfg in CHANNEL_PROFILES.items()
 }
 _youtube_token_store = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE]  # back-compat alias for the main profile
+# YouTube accounts that aren't Shorts channel profiles: Caught On Code (the
+# long-form explainers, see clipper/explainer.py) has no clip pipeline or
+# Twitch watchlist, so it isn't in CHANNEL_PROFILES (that would add it to
+# Home's channel switcher) -- it only needs its own connected account.
+EXTRA_YOUTUBE_ACCOUNTS: dict = {
+    explainer.PROFILE: {"label": explainer.CHANNEL, "token_file": "_youtube_oauth_token_code.json",
+                        "page_path": "/caught-on-code"},
+}
+for _acct, _cfg in EXTRA_YOUTUBE_ACCOUNTS.items():
+    _youtube_token_stores[_acct] = youtube_oauth.TokenStore(BASE_DIR / _cfg["token_file"])
+
+
+def _oauth_account(profile: Optional[str]) -> str:
+    """A channel profile or an extra YouTube account; anything else means
+    the main channel."""
+    return profile if profile in EXTRA_YOUTUBE_ACCOUNTS else _profile_or_default(profile)
 _channel_strategy_path = BASE_DIR / "_channel_strategy_history.json"
 _competitor_channels_path = BASE_DIR / "_competitor_channels.json"
 _reminder_scheduler_state_path = BASE_DIR / "_reminder_scheduler_state.json"
@@ -2589,7 +2606,7 @@ def youtube_login(profile: str = DEFAULT_CHANNEL_PROFILE) -> RedirectResponse:
     is carried through the round trip in _youtube_oauth_states, keyed by
     the CSRF state, since Google's redirect back doesn't let us pass our
     own query params through untouched."""
-    profile = _profile_or_default(profile)
+    profile = _oauth_account(profile)
     if not youtube_oauth.is_configured():
         raise HTTPException(
             400,
@@ -2616,9 +2633,11 @@ def youtube_callback(code: str = "", state: str = "", error: str = "") -> Redire
     issued = _youtube_oauth_states.pop(state, None)
     if issued is None or time.time() - issued[0] > 600:
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
-    profile = _profile_or_default(issued[1])
+    profile = _oauth_account(issued[1])
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
     _youtube_token_stores[profile].save(token)
+    if profile in EXTRA_YOUTUBE_ACCOUNTS:
+        return RedirectResponse(f"{EXTRA_YOUTUBE_ACCOUNTS[profile]['page_path']}?youtube_connected=1")
     # The main channel's connect flow also lives on the analytics page (it
     # reads real Analytics data there); every profile's own channel page
     # (see CHANNEL_PROFILES' page_path) shows connect status too, and is
@@ -2630,7 +2649,7 @@ def youtube_callback(code: str = "", state: str = "", error: str = "") -> Redire
 
 @protected.post("/api/youtube/disconnect")
 def youtube_disconnect(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
-    _youtube_token_stores[_profile_or_default(profile)].clear()
+    _youtube_token_stores[_oauth_account(profile)].clear()
     return {"ok": True}
 
 
@@ -2875,19 +2894,35 @@ def longform_analytics_report(refresh: bool = False) -> dict:
         return {"available": False, "reason": "No long-form episode is on YouTube yet. Once you upload one from the long-form page, its numbers show up here."}
     if not youtube_oauth.is_configured():
         return {"available": False, "reason": "YouTube OAuth isn't configured on this deployment."}
-    access_token = _youtube_token_store.get_valid_access_token()
-    if not access_token:
-        return {"available": False, "reason": "Connect your YouTube account (Channel insights, above) to see how your episodes are doing."}
-    try:
-        own = youtube_analytics.get_own_channel(access_token)
-    except Exception as e:  # noqa: BLE001
-        return {"available": False, "reason": f"Couldn't reach YouTube Analytics: {e}"}
-    if not own:
-        return {"available": False, "reason": "The connected Google account has no YouTube channel."}
+    accounts: dict = {}  # account -> (token, channel) or an error string
+
+    def account(p: dict):
+        key = _longform_account(p)
+        if key not in accounts:
+            token = _youtube_token_stores[key].get_valid_access_token()
+            if not token:
+                accounts[key] = (f"Connect the {_longform_brand(p)} YouTube account to see this episode's numbers."
+                                 if key != DEFAULT_CHANNEL_PROFILE else
+                                 "Connect your YouTube account (Channel insights, above) to see how your episodes are doing.")
+            else:
+                try:
+                    own = youtube_analytics.get_own_channel(token)
+                    accounts[key] = (token, own) if own else "The connected Google account has no YouTube channel."
+                except Exception as e:  # noqa: BLE001
+                    accounts[key] = f"Couldn't reach YouTube Analytics: {e}"
+        return accounts[key]
+
+    if all(isinstance(account(p), str) for p in posted):
+        return {"available": False, "reason": account(posted[0])}
     episodes = []
     for p in posted:
+        acct = account(p)
+        if isinstance(acct, str):
+            episodes.append({"id": p["id"], "title": p.get("title") or "Untitled", "url": p.get("youtube_url"), "error": acct,
+                             "channel": _longform_brand(p)})
+            continue
         try:
-            episodes.append(_longform_episode_analytics(access_token, own["id"], p))
+            episodes.append({**_longform_episode_analytics(acct[0], acct[1]["id"], p), "channel": _longform_brand(p)})
         except Exception as e:  # noqa: BLE001 - show the reason next to that episode instead of failing the panel
             traceback.print_exc()
             episodes.append({"id": p["id"], "title": p.get("title") or "Untitled", "url": p.get("youtube_url"),
@@ -3019,6 +3054,11 @@ def long_form_page() -> str:
     return LONGFORM_HTML
 
 
+@protected.get("/caught-on-code", response_class=HTMLResponse)
+def caught_on_code_page() -> str:
+    return EXPLAINER_HTML
+
+
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
 # A bi-weekly series on the main (Caught On Stream) channel, a different
 # streamer each episode. Research -> story -> record -> render -> post.
@@ -3048,8 +3088,28 @@ def _longform_is_busy(pid: str, kind: str) -> bool:
         return (pid, kind) in _longform_busy
 
 
-def _longform_brand() -> str:
+def _longform_brand(project: Optional[dict] = None) -> str:
+    if project and project.get("kind") == explainer.KIND:
+        return explainer.CHANNEL
     return CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]["brand_name"]
+
+
+def _is_explainer(project: dict) -> bool:
+    return project.get("kind") == explainer.KIND
+
+
+def _longform_account(project: dict) -> str:
+    """Which YouTube account an episode goes to: Caught On Code for the
+    explainers, Caught On Stream for the documentaries."""
+    return explainer.PROFILE if _is_explainer(project) else DEFAULT_CHANNEL_PROFILE
+
+
+def _longform_access_token(project: dict) -> str:
+    token = _youtube_token_stores[_longform_account(project)].get_valid_access_token()
+    if not token:
+        where = "on the Caught On Code page" if _is_explainer(project) else "on the Home page"
+        raise HTTPException(409, f"Connect the {_longform_brand(project)} YouTube account first ({where}).")
+    return token
 
 
 def _longform_project(pid: str) -> dict:
@@ -3082,6 +3142,13 @@ def _longform_research(pid: str) -> None:
         project = _longform_store.load(pid)
         d = _longform_store.path(pid)
         say = lambda m: _longform_store.update(pid, lambda pr: pr.update(message=m))  # noqa: E731
+        if _is_explainer(project):
+            dossier = explainer.build_dossier(project["topic"], project.get("notes") or "", project.get("links") or [], on_progress=say)
+            (d / "dossier.json").write_text(json.dumps(dossier), encoding="utf-8")
+            _longform_store.update(pid, lambda pr: pr.update(
+                status="research_ready", error=None, message=None,
+                sources={"pages": explainer.sources(dossier), "failed_links": dossier.get("failed_links") or []}))
+            return
         dossier = documentary.build_dossier(project["login"], project.get("notes") or "", project.get("links") or [], on_progress=say)
         (d / "dossier.json").write_text(json.dumps(dossier), encoding="utf-8")
         profile = dossier["profile"]
@@ -3113,7 +3180,10 @@ def _longform_write(pid: str) -> None:
         project = _longform_store.load(pid)
         d = _longform_store.path(pid)
         dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
-        scenes = documentary.write_script(dossier, project["library"], d, _longform_brand(), _longform_lessons.texts())
+        if _is_explainer(project):
+            scenes = explainer.write_script(dossier)
+        else:
+            scenes = documentary.write_script(dossier, project["library"], d, _longform_brand(), _longform_lessons.texts())
         _longform_store.update(pid, lambda pr: pr.update(status="script_ready", error=None, message=None, scenes=scenes,
                                                          render=None, publish=None, visuals=None))
     except Exception as e:
@@ -3126,9 +3196,11 @@ def _longform_write(pid: str) -> None:
     finally:
         _longform_release(pid, "write")
     # The story is in: plan its keyword visuals straight away (in the
-    # background -- the story can be read and recorded meanwhile).
+    # background -- the story can be read and recorded meanwhile). An
+    # explainer's diagrams come with its script.
     try:
-        if _longform_store.load(pid).get("status") == "script_ready":
+        done = _longform_store.load(pid)
+        if done.get("status") == "script_ready" and not _is_explainer(done):
             _longform_claim(pid, "visuals")
             _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "planning", "message": "Planning the visuals..."}))
             threading.Thread(target=_longform_visuals, args=(pid, True), daemon=True).start()
@@ -3293,8 +3365,15 @@ def longform_lessons_remove(index: int) -> dict:
 
 
 @protected.get("/api/longform/projects")
-def longform_projects() -> dict:
-    return {"projects": [longform.summary(p) for p in _longform_store.list()]}
+def longform_projects(series: str = "") -> dict:
+    """series=documentary: the Story Of episodes (and old tests);
+    series=explainer: Caught On Code; empty: everything."""
+    projects = _longform_store.list()
+    if series == explainer.KIND:
+        projects = [p for p in projects if _is_explainer(p)]
+    elif series:
+        projects = [p for p in projects if not _is_explainer(p)]
+    return {"projects": [longform.summary(p) for p in projects]}
 
 
 @protected.post("/api/longform/projects")
@@ -3307,6 +3386,32 @@ def longform_create(req: LongformCreateRequest) -> dict:
         series = _load_series()
         series["plan"][req.slot] = {"login": login, "project_id": project["id"]}
         _save_series(series)
+    _longform_start(project["id"], "research", _longform_research, "researching", "Starting research...")
+    return {"id": project["id"]}
+
+
+class ExplainerCreateRequest(BaseModel):
+    topic: str
+    notes: str = ""
+    links: List[str] = []
+
+
+@protected.get("/api/explainers")
+def explainers_meta() -> dict:
+    """What the Caught On Code page needs besides its episodes: topic ideas
+    (from the niche research) and whether its YouTube account is connected."""
+    return {"channel": explainer.CHANNEL, "topics": explainer.TOPIC_IDEAS,
+            "oauth_configured": youtube_oauth.is_configured(),
+            "youtube_connected": _youtube_token_stores[explainer.PROFILE].is_connected()}
+
+
+@protected.post("/api/explainers")
+def explainer_create(req: ExplainerCreateRequest) -> dict:
+    topic = " ".join(req.topic.split())[:160]
+    if len(topic) < 4:
+        raise HTTPException(400, "type the topic first, e.g. how kernel anti-cheat works")
+    project = _longform_store.create({"kind": explainer.KIND, "topic": topic, "title": topic,
+                                      "notes": req.notes.strip()[:6000], "links": _clean_links(req.links)})
     _longform_start(project["id"], "research", _longform_research, "researching", "Starting research...")
     return {"id": project["id"]}
 
@@ -3326,7 +3431,7 @@ def longform_delete(pid: str) -> dict:
 @protected.post("/api/longform/projects/{pid}/research")
 def longform_rerun_research(pid: str, req: LongformResearchRequest) -> dict:
     project = _longform_project(pid)
-    if project.get("kind") != "documentary":
+    if project.get("kind") not in ("documentary", explainer.KIND):
         raise HTTPException(409, "this is an old aviation test video -- delete it and start a new episode")
     updates = {}
     if req.notes is not None:
@@ -3343,7 +3448,7 @@ def longform_rerun_research(pid: str, req: LongformResearchRequest) -> dict:
 @protected.post("/api/longform/projects/{pid}/write")
 def longform_write_story(pid: str) -> dict:
     project = _longform_project(pid)
-    if not project.get("library") or project.get("status") not in ("research_ready", "script_ready"):
+    if (not project.get("library") and not _is_explainer(project)) or project.get("status") not in ("research_ready", "script_ready"):
         raise HTTPException(409, "run the research first")
     _longform_start(pid, "write", _longform_write, "writing", "Claude is writing the story (1-2 minutes)...")
     return {"ok": True}
@@ -3356,7 +3461,14 @@ def longform_save_scenes(pid: str, req: LongformScenesRequest) -> dict:
     project = _longform_project(pid)
     if project.get("status") != "script_ready":
         raise HTTPException(409, "write the story first")
-    new = documentary.normalize_scenes(req.scenes, project.get("library") or [])
+    if _is_explainer(project):
+        try:
+            dossier = json.loads((_longform_store.path(pid) / "dossier.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            dossier = {"topic": project.get("topic") or ""}
+        new = explainer.normalize_scenes(req.scenes, dossier)
+    else:
+        new = documentary.normalize_scenes(req.scenes, project.get("library") or [])
     if not any(s["kind"] == "narrate" for s in new):
         raise HTTPException(400, "the story needs at least one narrated scene")
 
@@ -3670,6 +3782,8 @@ def longform_plan_visuals(pid: str) -> dict:
     project = _longform_project(pid)
     if project.get("status") != "script_ready":
         raise HTTPException(409, "write the story first")
+    if _is_explainer(project):
+        raise HTTPException(409, "an explainer's diagrams come with its script")
     _longform_claim(pid, "visuals")
     _longform_store.update(pid, lambda pr: pr.update(visuals={"status": "planning", "message": "Starting..."}))
     threading.Thread(target=_longform_visuals, args=(pid, True), daemon=True).start()
@@ -3726,8 +3840,9 @@ def _longform_render(pid: str, music_only: bool = False) -> None:
         music = (project.get("music") or {}).get("file")
         final, starts, total = longform_video.render_documentary(
             d, scenes, _longform_library(project),
-            _longform_takes(scenes), _longform_brand(), d / music if music else None, on_progress=progress,
+            _longform_takes(scenes), _longform_brand(project), d / music if music else None, on_progress=progress,
             music_level=project.get("music_level") or "normal", music_only=music_only,
+            end_line=explainer.END_LINE if _is_explainer(project) else None,
         )
         _longform_store.update(pid, lambda pr: pr.update(render={
             "status": "done", "progress": 1.0, "message": None, "error": None, "built_at": time.time(),
@@ -3762,7 +3877,7 @@ def longform_start_render(pid: str, music_only: bool = False) -> dict:
         if (project.get("render") or {}).get("status") != "done":
             raise HTTPException(409, "render the video once first")
         changed = longform_video.changed_scenes(_longform_store.path(pid), scenes, _longform_library(project),
-                                                _longform_takes(scenes), _longform_brand())
+                                                _longform_takes(scenes), _longform_brand(project))
         if changed:
             raise HTTPException(409, "Scenes " + ", ".join(map(str, changed)) + " changed since the last render, so this "
                                      "needs a full “Render again” (only those scenes are redone).")
@@ -3799,6 +3914,16 @@ async def longform_publish_text(pid: str) -> dict:
     render = project.get("render") or {}
     if render.get("status") != "done":
         raise HTTPException(409, "render the video first")
+    if _is_explainer(project):
+        try:
+            dossier = json.loads((_longform_store.path(pid) / "dossier.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            dossier = {"topic": project.get("topic") or ""}
+        try:
+            text = await run_in_threadpool(explainer.write_publish_text, project, dossier, project["scenes"], render.get("starts") or [])
+        except Exception as e:
+            raise HTTPException(500, f"Couldn't write the title and description: {e}")
+        return _longform_store.update(pid, lambda pr: pr.update(publish=text))
     try:
         text = await run_in_threadpool(longform_video.write_publish_text, project.get("streamer") or {"login": project.get("login")},
                                        _longform_brand(), project["scenes"], render.get("starts") or [],
@@ -3826,9 +3951,7 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
     title = " ".join(req.title.split())
     if not title:
         raise HTTPException(400, "Title cannot be empty.")
-    access_token = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE].get_valid_access_token()
-    if not access_token:
-        raise HTTPException(409, "Connect the Caught On Stream YouTube account first (on the Home page).")
+    access_token = _longform_access_token(project)
     try:
         video_id = youtube_upload.upload_video(access_token, path, title=title, description=req.description,
                                                privacy_status=req.privacy_status, is_short=False)
@@ -3839,6 +3962,8 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
                                                                uploaded_privacy=req.privacy_status, uploaded_at=time.time()))
     if (project.get("thumbnails") or {}).get("items"):
         project = _longform_apply_thumbnail(pid, project, access_token)
+    if _is_explainer(project):
+        return project  # no clip moments to cut cliffhanger Shorts from
     # Straight away, cut 2 promo Shorts from the episode (unless they're
     # already being made) and tie them to it, so each Short's upload carries
     # the link to the full video.
@@ -3878,6 +4003,16 @@ async def longform_make_thumbnails(pid: str) -> dict:
     """Three thumbnail options (longform_thumbnail.py): real frames from the
     streamer's clips, faces first, with a short hook line."""
     project = _longform_project(pid)
+    if _is_explainer(project) and project.get("status") == "script_ready":
+        try:
+            try:
+                dossier = json.loads((_longform_store.path(pid) / "dossier.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                dossier = None
+            rec = await run_in_threadpool(explainer.make_thumbnails, _longform_store.path(pid), project, dossier)
+        except Exception as e:
+            raise HTTPException(500, f"Couldn't make thumbnails: {e}")
+        return _longform_store.update(pid, lambda pr: pr.update(thumbnails=rec, thumbnail_status=None))
     if project.get("status") != "script_ready" or not project.get("library"):
         raise HTTPException(409, "write the story first")
     d = _longform_store.path(pid)
@@ -3906,7 +4041,8 @@ async def longform_redraw_thumbnail(pid: str, index: int, req: LongformThumbText
     if not hook:
         raise HTTPException(400, "type the text first")
     try:
-        rec = await run_in_threadpool(longform_thumbnail.redraw, _longform_store.path(pid), rec, index, hook)
+        redraw = explainer.redraw if _is_explainer(project) else longform_thumbnail.redraw
+        rec = await run_in_threadpool(redraw, _longform_store.path(pid), rec, index, hook)
     except Exception as e:
         raise HTTPException(500, f"Couldn't redraw it: {e}")
     return _longform_store.update(pid, lambda pr: pr.update(thumbnails=rec))
@@ -3939,10 +4075,7 @@ def longform_apply_thumbnail(pid: str) -> dict:
     if not project.get("youtube_video_id"):
         raise HTTPException(409, "upload the video first -- the chosen thumbnail is set then")
     _longform_chosen_thumb(pid, project)
-    access_token = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE].get_valid_access_token()
-    if not access_token:
-        raise HTTPException(409, "Connect the Caught On Stream YouTube account first (on the Home page).")
-    return _longform_apply_thumbnail(pid, project, access_token)
+    return _longform_apply_thumbnail(pid, project, _longform_access_token(project))
 
 
 PROMO_SHORTS = 2
@@ -4025,6 +4158,8 @@ def longform_promo_shorts(pid: str) -> dict:
     """Send the finished episode through the normal clip pipeline to cut
     promo Shorts from it; they show up in Home's jobs list as usual."""
     project = _longform_project(pid)
+    if _is_explainer(project):
+        raise HTTPException(409, "cliffhanger Shorts are cut from documentary clip moments; explainers don't have any")
     path = _longform_store.path(pid) / "final.mp4"
     if (project.get("render") or {}).get("status") != "done" or not path.is_file():
         raise HTTPException(409, "render the video first")
@@ -4284,6 +4419,7 @@ __NAV_LINKS__
 <div class="brand"><span class="logo">🎬</span><h1>clipper — __PROFILE_LABEL__</h1></div>
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
 <a class="longform-link" href="/long-form"><span>🎬 Go to long-form videos</span><span>→</span></a>
+<a class="longform-link" href="/caught-on-code"><span>💻 Go to Caught On Code</span><span>→</span></a>
 
 <div id="profile-row">
   <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
@@ -7454,12 +7590,12 @@ loadClips();
 
 # The /long-form page -- "The Story Of" streamer documentaries; see clipper/documentary.py
 # and the /api/longform routes.
-LONGFORM_HTML = """<!doctype html>
+_LONGFORM_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>clipper — The Story Of</title>
+<title>clipper — __PAGE_TITLE__</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -7666,17 +7802,35 @@ LONGFORM_HTML = """<!doctype html>
     .slot { grid-template-columns: 90px 1fr; }
     .slot > :last-child { grid-column: 2; justify-self: start; }
   }
+  body[data-series="explainer"] .doc-only { display: none !important; }
+  body:not([data-series="explainer"]) .exp-only { display: none !important; }
+  .topics { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .topics button { font-size: 0.85rem; padding: 8px 12px; text-align: left; }
+  .diagrams { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .diagram { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; font-size: 0.82rem; }
+  .diagram .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .diagram .at { color: var(--muted); white-space: nowrap; }
+  .diagram button { margin: 0; padding: 2px 8px; }
+  .quiz-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 8px; font-size: 0.88rem; }
+  .quiz-item b { color: var(--accent); }
 </style>
 </head>
-<body>
+<body data-series="__SERIES_KIND__">
 <div class="page">
 <a class="back" href="/">← Back to clips</a>
 <div class="card">
-  <div class="brand"><span class="logo">🎬</span><h1>The Story Of</h1></div>
-  <p class="subtitle">A bi-weekly documentary series for Caught On Stream: a different streamer each episode. The app researches them and pulls their best clips, Claude drafts the story, you narrate it, and the app edits it together.</p>
+  <div class="brand"><span class="logo">__LOGO__</span><h1>__H1__</h1></div>
+  <p class="subtitle">__SUBTITLE__</p>
 
   <div id="list-view">
-    <div class="section" style="margin-top:0;padding-top:0;border-top:none">
+    <div class="section exp-only" style="margin-top:0;padding-top:0;border-top:none">
+      <h3>📺 The channel</h3>
+      <div id="exp-channel"></div>
+      <h3 style="margin-top:18px">💡 Topic ideas</h3>
+      <div class="hint">From the niche research: tech questions gamers search for that no big channel owns yet. Tap one to fill it in below.</div>
+      <div class="topics" id="exp-topics"></div>
+    </div>
+    <div class="section doc-only" style="margin-top:0;padding-top:0;border-top:none">
       <h3>📅 Bi-weekly schedule</h3>
       <div class="hint">One episode every two weeks. Put a streamer on each date, then start the episode when you're ready to make it. Mix big names (search traffic) with the streamers your Shorts already cover (your audience).</div>
       <div class="sched-head">
@@ -7695,9 +7849,11 @@ LONGFORM_HTML = """<!doctype html>
 
     <div class="section">
       <h3>Start an episode now</h3>
-      <label>Streamer's Twitch login</label>
-      <input id="new-login" placeholder="e.g. stableronaldo" list="streamer-suggestions">
-      <label>What you know about them (optional)</label>
+      <label class="doc-only">Streamer's Twitch login</label>
+      <input id="new-login" class="doc-only" placeholder="e.g. stableronaldo" list="streamer-suggestions">
+      <label class="exp-only">Topic</label>
+      <input id="new-topic" class="exp-only" maxlength="160" placeholder="e.g. How kernel anti-cheat works">
+      <label>Your notes (optional)</label>
       <textarea id="new-notes" rows="3" placeholder="Big moments, rivalries, how they blew up, running jokes... Claude uses this alongside the research."></textarea>
       <label>Article links (optional, one per line)</label>
       <textarea id="new-links" rows="2" placeholder="News articles, interviews, a fan wiki page..."></textarea>
@@ -7705,7 +7861,7 @@ LONGFORM_HTML = """<!doctype html>
       <div class="hint" id="new-status"></div>
     </div>
 
-    <div class="section" id="lessons-section">
+    <div class="section doc-only" id="lessons-section">
       <h3>🧠 What the series has learned</h3>
       <div class="hint">Claude follows these every time it writes a story, picks the clip moments and plans the visuals. Remove any that don’t fit (✕).</div>
       <ul class="lessons" id="lessons"></ul>
@@ -7753,7 +7909,7 @@ LONGFORM_HTML = """<!doctype html>
       <div id="research-summary"></div>
       <details id="research-edit">
         <summary>Add notes or links and research again</summary>
-        <label>What you know about them</label>
+        <label>Your notes</label>
         <textarea id="p-notes" rows="3"></textarea>
         <label>Article links (one per line)</label>
         <textarea id="p-links" rows="2"></textarea>
@@ -7763,21 +7919,22 @@ LONGFORM_HTML = """<!doctype html>
     </div>
 
     <div class="section" id="story-section" style="display:none">
-      <h3><span class="n">2</span>Story</h3>
-      <div class="hint">🎙 Narrated scenes are what you read. 🎬 Moments are clips that play with their own sound. 📖 Chapter cards become YouTube chapters. Edit anything, then save.</div>
+      <h3><span class="n">2</span><span class="doc-only">Story</span><span class="exp-only">Script</span></h3>
+      <div class="hint doc-only">🎙 Narrated scenes are what you read. 🎬 Moments are clips that play with their own sound. 📖 Chapter cards become YouTube chapters. Edit anything, then save.</div>
+      <div class="hint exp-only">🎙 Narrated scenes are what you read; under each are the animated diagrams that play while you say it (each appears on the words in quotes). ❓ Quiz diagrams are the “pause and guess” moments. 📖 Chapter cards become YouTube chapters. Edit the words or remove a diagram, then save.</div>
       <div class="meta" id="story-meta"></div>
-      <div class="visuals-bar">
+      <div class="visuals-bar doc-only">
         <span id="visuals-status"></span>
         <button id="plan-visuals" type="button" class="secondary">🎨 Plan visuals again</button>
       </div>
-      <div class="hint" id="visuals-hint">The picture changes on key words: big text, 3D emoji, stat cards, posts and headlines you pasted, timelines, and free stock footage. Remove any you don’t want (✕) and save.</div>
-      <div class="hint" id="stock-hint"></div>
+      <div class="hint doc-only" id="visuals-hint">The picture changes on key words: big text, 3D emoji, stat cards, posts and headlines you pasted, timelines, and free stock footage. Remove any you don’t want (✕) and save.</div>
+      <div class="hint doc-only" id="stock-hint"></div>
       <details id="story-details">
-        <summary id="story-summary">Show and edit the story</summary>
+        <summary id="story-summary"><span class="doc-only">Show and edit the story</span><span class="exp-only">Show and edit the script</span></summary>
         <div id="scenes"></div>
         <div class="actions">
           <button type="button" class="secondary add-scene" data-kind="narrate">+ Narration</button>
-          <button type="button" class="secondary add-scene" data-kind="moment">+ Moment</button>
+          <button type="button" class="secondary add-scene doc-only" data-kind="moment">+ Moment</button>
           <button type="button" class="secondary add-scene" data-kind="title">+ Chapter</button>
         </div>
         <div class="actions">
@@ -7841,7 +7998,8 @@ LONGFORM_HTML = """<!doctype html>
         </div>
         <div class="hint" id="render-info"></div>
         <label>Thumbnail</label>
-        <div class="hint">Three options made from real frames of the clips: the streamer&rsquo;s face big and cut out from a darkened background, with a short line. The one you pick is set on YouTube when you upload.</div>
+        <div class="hint doc-only">Three options made from real frames of the clips: the streamer&rsquo;s face big and cut out from a darkened background, with a short line. The one you pick is set on YouTube when you upload.</div>
+        <div class="hint exp-only">Three options made from the episode&rsquo;s own diagrams, with a short line. The one you pick is set on YouTube when you upload.</div>
         <button id="thumb-make" type="button" class="secondary">🖼 Make thumbnails</button>
         <div class="thumbs" id="thumbs"></div>
         <div id="thumb-edit" style="display:none">
@@ -7866,10 +8024,15 @@ LONGFORM_HTML = """<!doctype html>
             <option value="unlisted">Unlisted</option>
             <option value="public">Public now</option>
           </select>
-          <div class="hint">Uploading also cuts 2 cliffhanger Shorts from the episode (on the Home page): each stops right before a payoff, with the link to the full video in its description.</div>
+          <div class="hint doc-only">Uploading also cuts 2 cliffhanger Shorts from the episode (on the Home page): each stops right before a payoff, with the link to the full video in its description.</div>
+          <div class="exp-only" id="quiz-wrap">
+            <label>Quizzes to add in YouTube Studio</label>
+            <div class="hint">After uploading: YouTube Studio &gt; this video &gt; Video elements &gt; <i>Add a quiz</i>. Paste each question at its time (YouTube has no way to add them automatically). A saved quiz can’t be edited, only deleted and redone.</div>
+            <div id="quiz-list"></div>
+          </div>
           <div class="actions">
             <button id="upload-btn" type="button">⬆ Upload to Caught On Stream</button>
-            <button id="promo-btn" type="button" class="secondary">✂️ Make 2 cliffhanger Shorts</button>
+            <button id="promo-btn" type="button" class="secondary doc-only">✂️ Make 2 cliffhanger Shorts</button>
           </div>
           <div class="hint" id="post-status"></div>
         </div>
@@ -7887,6 +8050,8 @@ LONGFORM_HTML = """<!doctype html>
 const $ = (id) => document.getElementById(id);
 const NL = String.fromCharCode(10);
 const KIND_LABEL = { narrate: '🎙 Narration', moment: '🎬 Moment', title: '📖 Chapter' };
+const SERIES = __SERIES_JSON__;
+const EXP = SERIES.kind === 'explainer';
 let project = null;
 let pollTimer = null;
 let storyDirty = false;
@@ -7918,21 +8083,21 @@ let series = null;
 async function showList() {
   stopPolling();
   project = null;
-  history.replaceState(null, '', '/long-form');
+  history.replaceState(null, '', SERIES.path);
   $('project-view').style.display = 'none';
   $('list-view').style.display = 'block';
-  const [{ projects }, s] = await Promise.all([api('/api/longform/projects'), api('/api/longform/series')]);
-  series = s;
-  renderSeries();
+  const [{ projects }, s] = await Promise.all([api('/api/longform/projects?series=' + SERIES.kind),
+                                              api(EXP ? '/api/explainers' : '/api/longform/series')]);
+  if (EXP) renderExplainerHome(s);
+  else { series = s; renderSeries(); loadLessons(); }
   loadVoice();
-  loadLessons();
   $('projects-wrap').style.display = projects.length ? 'block' : 'none';
   const pl = $('projects');
   pl.innerHTML = '';
   projects.forEach(p => {
     const b = el('button', 'project'); b.type = 'button';
     const info = el('div');
-    info.appendChild(el('div', 't', p.kind === 'documentary' ? p.title : `${p.title} (old aviation test)`));
+    info.appendChild(el('div', 't', ['documentary', 'explainer'].includes(p.kind) ? p.title : `${p.title} (old aviation test)`));
     const state = p.youtube_video_id ? '✅ Posted' : p.rendered ? '🎬 Rendered'
       : p.status === 'researching' ? '🔎 Researching…' : p.status === 'writing' ? '✍️ Writing…'
       : p.status === 'script_ready' ? `🎙 ${p.recorded}/${p.scenes} scenes recorded`
@@ -7986,14 +8151,49 @@ $('save-series').addEventListener('click', async () => {
   catch (e) { alert(e.message); }
 });
 
+// Caught On Code: the channel's YouTube account and the topic ideas
+function renderExplainerHome(meta) {
+  const box = $('exp-channel');
+  box.innerHTML = '';
+  const line = el('div', 'hint');
+  if (!meta.oauth_configured) line.textContent = 'YouTube uploads need the Google OAuth keys set on Railway (the same ones the main channel uses).';
+  else if (meta.youtube_connected) line.textContent = '✅ ' + meta.channel + '’s YouTube account is connected: finished episodes upload there.';
+  else line.textContent = 'Connect the ' + meta.channel + ' YouTube account once, so finished episodes upload there (not to Caught On Stream).';
+  box.appendChild(line);
+  if (meta.oauth_configured) {
+    if (meta.youtube_connected) {
+      const b = el('button', 'secondary', 'Disconnect'); b.type = 'button';
+      b.addEventListener('click', async () => {
+        if (!confirm('Disconnect the ' + meta.channel + ' YouTube account?')) return;
+        await api('/api/youtube/disconnect?profile=code', { method: 'POST' }); showList();
+      });
+      box.appendChild(b);
+    } else {
+      const a = el('a', 'dl-link', '🔗 Connect ' + meta.channel + ' on YouTube'); a.href = '/auth/youtube/login?profile=code';
+      box.appendChild(a);
+    }
+  }
+  const tw = $('exp-topics');
+  tw.innerHTML = '';
+  (meta.topics || []).forEach(topic => {
+    const b = el('button', 'secondary', topic); b.type = 'button';
+    b.addEventListener('click', () => { $('new-topic').value = topic; $('new-topic').focus(); });
+    tw.appendChild(b);
+  });
+  $('new-notes').placeholder = 'What you already know, angles you want, games to use as examples... Claude uses this alongside the research.';
+  $('new-links').placeholder = 'Articles, docs, dev blogs, a Wikipedia page...';
+}
+
 $('start-new').addEventListener('click', async () => {
   const login = $('new-login').value.trim();
-  if (!login) { $('new-status').textContent = 'Enter the streamer’s Twitch login first.'; return; }
+  const topic = $('new-topic').value.trim();
+  if (EXP ? !topic : !login) { $('new-status').textContent = EXP ? 'Type the topic first.' : 'Enter the streamer’s Twitch login first.'; return; }
   $('start-new').disabled = true;
   try {
-    const { id } = await api('/api/longform/projects', jsonOpts('POST', {
-      login, notes: $('new-notes').value, links: $('new-links').value.split(NL).map(s => s.trim()).filter(Boolean),
-    }));
+    const links = $('new-links').value.split(NL).map(s => s.trim()).filter(Boolean);
+    const { id } = EXP
+      ? await api('/api/explainers', jsonOpts('POST', { topic, notes: $('new-notes').value, links }))
+      : await api('/api/longform/projects', jsonOpts('POST', { login, notes: $('new-notes').value, links }));
     $('new-status').textContent = '';
     openProject(id);
   } catch (e) { $('new-status').textContent = e.message; }
@@ -8004,7 +8204,7 @@ $('start-new').addEventListener('click', async () => {
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
 async function openProject(id) {
-  history.replaceState(null, '', `/long-form?v=${encodeURIComponent(id)}`);
+  history.replaceState(null, '', `${SERIES.path}?v=${encodeURIComponent(id)}`);
   $('list-view').style.display = 'none';
   $('project-view').style.display = 'block';
   storyDirty = false;
@@ -8031,7 +8231,7 @@ async function loadProject(id, resetIndex) {
 
 function render() {
   const p = project;
-  const legacy = p.kind !== 'documentary';
+  const legacy = !['documentary', 'explainer'].includes(p.kind);
   $('legacy').style.display = legacy ? 'block' : 'none';
   ['research-section', 'story-section', 'record-section', 'render-section'].forEach(s => { if (legacy) $(s).style.display = 'none'; });
   renderStreamer();
@@ -8041,9 +8241,10 @@ function render() {
   const narr = scenes.filter(needsTake);
   const allRec = hasStory && narr.every(sceneReady);
   const r = p.render || {};
+  const researched = EXP ? ['research_ready', 'writing', 'script_ready'].includes(p.status) : !!p.library;
   const steps = [
-    ['1 Research', p.library ? 'done' : 'on'],
-    ['2 Story', hasStory ? 'done' : (p.library ? 'on' : '')],
+    ['1 Research', researched ? 'done' : 'on'],
+    [EXP ? '2 Script' : '2 Story', hasStory ? 'done' : (researched ? 'on' : '')],
     ['3 Record', allRec ? 'done' : (hasStory ? 'on' : '')],
     ['4 Render & post', p.youtube_video_id ? 'done' : (allRec ? 'on' : '')],
   ];
@@ -8069,6 +8270,13 @@ function renderStreamer() {
   const p = project, s = p.streamer || {};
   const c = $('streamer-card');
   c.innerHTML = '';
+  if (EXP) {
+    const info = el('div');
+    info.appendChild(el('div', 't', p.title || p.topic || 'Untitled'));
+    info.appendChild(el('div', 'm', SERIES.channel + ' explainer' + (p.topic && p.topic !== p.title ? ' · ' + p.topic : '')));
+    c.appendChild(info);
+    return;
+  }
   if (s.profile_image_url) { const img = el('img'); img.src = s.profile_image_url; img.alt = ''; c.appendChild(img); }
   const info = el('div');
   info.appendChild(el('div', 't', p.title || 'Untitled'));
@@ -8086,8 +8294,18 @@ function renderResearch() {
   box.innerHTML = '';
   const lib = p.library || [];
   const src = p.sources || {};
-  if (p.status === 'researching' && !lib.length) { box.appendChild(el('div', 'hint', 'Gathering their Twitch history, top clips, Wikipedia and your links. Downloading and transcribing the clips takes a few minutes.')); }
-  if (lib.length || src.wikipedia !== undefined) {
+  if (EXP) {
+    if (p.status === 'researching') box.appendChild(el('div', 'hint', 'Reading Wikipedia and your links (a minute or so).'));
+    const pages = src.pages || [];
+    if (pages.length || (src.failed_links || []).length) {
+      const facts = el('div', 'facts');
+      pages.forEach(pg => { const f = el('div', 'fact'); f.appendChild(el('b', '', 'Source')); const a = el('a', '', pg.title); a.href = pg.url; a.target = '_blank'; a.rel = 'noopener'; f.appendChild(a); facts.appendChild(f); });
+      if ((src.failed_links || []).length) { const f = el('div', 'fact'); f.appendChild(el('b', '', 'Couldn’t open')); f.appendChild(document.createTextNode(src.failed_links.join(', '))); facts.appendChild(f); }
+      box.appendChild(facts);
+    }
+  }
+  if (!EXP && p.status === 'researching' && !lib.length) { box.appendChild(el('div', 'hint', 'Gathering their Twitch history, top clips, Wikipedia and your links. Downloading and transcribing the clips takes a few minutes.')); }
+  if (!EXP && (lib.length || src.wikipedia !== undefined)) {
     const facts = el('div', 'facts');
     const add = (label, text, href) => { const f = el('div', 'fact'); f.appendChild(el('b', '', label)); if (href) { const a = el('a', '', text); a.href = href; a.target = '_blank'; a.rel = 'noopener'; f.appendChild(a); } else f.appendChild(document.createTextNode(text)); facts.appendChild(f); };
     if (lib.length) {
@@ -8105,7 +8323,8 @@ function renderResearch() {
   const busy = ['researching', 'writing'].includes(p.status);
   $('rerun-research').disabled = busy;
   const wb = $('write-story');
-  wb.style.display = p.library && p.status !== 'script_ready' ? 'inline-block' : 'none';
+  wb.style.display = (EXP ? p.status === 'research_ready' : p.library && p.status !== 'script_ready') ? 'inline-block' : 'none';
+  wb.textContent = EXP ? '✍️ Write the script' : '✍️ Write the story';
   wb.disabled = busy;
 }
 
@@ -8138,8 +8357,11 @@ function renderStory() {
   const momentSecs = scenes.filter(s => s.kind === 'moment').reduce((n, s) => n + (s.end - s.start), 0);
   const chapters = scenes.filter(s => s.kind === 'title').length;
   $('story-meta').innerHTML = '';
+  const quizzes = scenes.reduce((n, s) => n + (s.visuals || []).filter(v => v.type === 'quiz').length, 0);
+  const diagrams = scenes.reduce((n, s) => n + (s.visuals || []).length, 0);
   [[`~${Math.round(words / 150 + momentSecs / 60 + chapters * 3 / 60)} min`, ' long'], [String(words), ' words to read'],
-   [String(scenes.filter(s => s.kind === 'moment').length), ' clip moments'], [String(chapters), ' chapters']].forEach(([b, t]) => {
+   EXP ? [String(diagrams), ' diagrams'] : [String(scenes.filter(s => s.kind === 'moment').length), ' clip moments'],
+   EXP ? [String(quizzes), quizzes === 1 ? ' quiz' : ' quizzes'] : [String(chapters), ' chapters']].forEach(([b, t]) => {
     const s = el('span'); s.appendChild(el('b', '', b)); s.appendChild(document.createTextNode(t)); $('story-meta').appendChild(s);
   });
   const wrap = $('scenes');
@@ -8151,6 +8373,7 @@ function renderStory() {
 
 let stockKeys = null;
 function renderVisualsBar() {
+  if (EXP) return;
   if (stockKeys === null) { stockKeys = {}; api('/api/longform/visual-sources').then(r => { stockKeys = r; renderVisualsBar(); }).catch(() => {}); }
   const sh = $('stock-hint');
   sh.innerHTML = '';
@@ -8193,7 +8416,7 @@ function sceneRow(s, i) {
   const row = el('div', 'scene ' + s.kind);
   row.dataset.kind = s.kind;
   const img = el('img'); img.loading = 'lazy'; img.alt = '';
-  img.src = `/api/longform/projects/${project.id}/scenes/${i}/preview?k=${encodeURIComponent([s.clip, s.start, s.end, s.caption, s.title].join('|'))}`;
+  img.src = `/api/longform/projects/${project.id}/scenes/${i}/preview?k=${encodeURIComponent([s.clip, s.start, s.end, s.caption, s.title].join('|') + (s.visuals ? keyOf(JSON.stringify(s.visuals)) : ''))}`;
   row.appendChild(img);
   const body = el('div');
   const kind = el('div', 'kind');
@@ -8210,6 +8433,13 @@ function sceneRow(s, i) {
   } else {
     if (s.kind === 'narrate') {
       const ta = el('textarea'); ta.value = s.narration; ta.dataset.f = 'narration'; ta.addEventListener('input', markDirty); body.appendChild(ta);
+      if (EXP) {
+        const dw = el('div', 'diagrams'); dw.dataset.visuals = JSON.stringify(s.visuals || []);
+        renderDiagrams(dw);
+        body.appendChild(dw);
+        row.appendChild(body);
+        return row;
+      }
       const cw = el('div', 'cues'); cw.dataset.cues = JSON.stringify(s.cues || []);
       renderCues(cw);
       body.appendChild(cw);
@@ -8275,12 +8505,48 @@ function renderCues(cw) {
   if (!cues.length) cw.appendChild(el('span', 'hint', 'No key-word visuals yet: clips with slow zooms and captions play under this one.'));
 }
 
+// ---------- explainer diagrams (Caught On Code) ----------
+const DIAGRAM_ICON = { flow: '➡️', network: '🌐', race: '⏱', bars: '📊', bignum: '🔢', grid: '▦', layers: '🧱', neural: '🧠', compare: '⚖️', quiz: '❓', words: '🔠' };
+function keyOf(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return String(h); }
+function diagramWhat(v) {
+  const t = v.title ? v.title + ': ' : '';
+  if (v.type === 'flow') return t + (v.nodes || []).map(n => n.label).join(' → ');
+  if (v.type === 'network') return t + ((v.center || {}).label || 'server') + ' with ' + (v.clients || []).map(n => n.label).join(', ') + (v.tick_rate ? ` · ${v.tick_rate} ticks/s` : '');
+  if (v.type === 'race') return t + (v.events || []).map(e => `${e.label} (${e.ms} ${v.unit || 'ms'})`).join(' → ') + (v.example ? ' · example timings' : '');
+  if (v.type === 'bars') return t + (v.items || []).map(i => `${i.label} ${i.value}${v.unit ? ' ' + v.unit : ''}`).join(', ');
+  if (v.type === 'bignum') return `${v.value} ${v.label}`;
+  if (v.type === 'grid') return `${v.count} dots` + (v.highlight ? `, ${v.highlight} lit` : '') + (v.label ? `: ${v.label}` : '');
+  if (v.type === 'layers') return t + (v.items || []).map(i => i.label).join(' / ');
+  if (v.type === 'neural') return 'neural network' + (v.label ? ': ' + v.label : '');
+  if (v.type === 'compare') return `${(v.left || {}).title} vs ${(v.right || {}).title}`;
+  if (v.type === 'quiz') return `${v.question} (answer: ${(v.options || [])[v.answer] || ''})`;
+  if (v.type === 'words') return `“${v.text}”`;
+  return v.type;
+}
+function renderDiagrams(dw) {
+  const vis = JSON.parse(dw.dataset.visuals || '[]');
+  dw.innerHTML = '';
+  vis.forEach((v, k) => {
+    const chip = el('div', 'diagram');
+    chip.appendChild(el('span', '', DIAGRAM_ICON[v.type] || '•'));
+    chip.appendChild(el('span', 'what', diagramWhat(v)));
+    chip.appendChild(el('span', 'at', k === 0 ? 'from the start' : `on “${v.at || ''}”`));
+    const x = el('button', 'secondary', '✕'); x.type = 'button'; x.title = 'Remove this diagram';
+    x.addEventListener('click', () => { vis.splice(k, 1); dw.dataset.visuals = JSON.stringify(vis); renderDiagrams(dw); markDirty(); });
+    chip.appendChild(x);
+    dw.appendChild(chip);
+  });
+  if (!vis.length) dw.appendChild(el('span', 'hint', 'No diagram: the key words show in big type.'));
+}
+
 function collectScenes() {
   return [...$('scenes').querySelectorAll('.scene')].map(row => {
     const out = { kind: row.dataset.kind };
     row.querySelectorAll('[data-f]').forEach(f => { out[f.dataset.f] = f.value; });
     const cw = row.querySelector('.cues');
     if (cw) out.cues = JSON.parse(cw.dataset.cues || '[]');
+    const dw = row.querySelector('.diagrams');
+    if (dw) out.visuals = JSON.parse(dw.dataset.visuals || '[]');
     if (out.start !== undefined) out.start = parseFloat(out.start);
     if (out.end !== undefined) out.end = parseFloat(out.end);
     return out;
@@ -8306,6 +8572,7 @@ document.querySelectorAll('.add-scene').forEach(b => b.addEventListener('click',
   const k = b.dataset.kind;
   list.push(k === 'title' ? { kind: 'title', title: 'New chapter' }
     : k === 'moment' ? { kind: 'moment', clip: first.id, start: 0, end: Math.min(10, first.duration || 10), caption: '' }
+    : EXP ? { kind: 'narrate', narration: 'Write what you want to say here.', visuals: [] }
     : { kind: 'narrate', narration: 'Write what you want to say here.', clip: first.id, caption: '' });
   applyLocal(list);
 }));
@@ -8540,7 +8807,7 @@ $('voice-delete').addEventListener('click', async () => {
 });
 
 // ---------- thumbnails ----------
-const THUMB_LABEL = { face: 'Face + text', full: 'Big face', split: 'Then vs now' };
+const THUMB_LABEL = { face: 'Face + text', full: 'Big face', split: 'Then vs now', left: 'Diagram + text', center: 'Big text', bottom: 'Text below' };
 function renderThumbs() {
   const p = project, rec = p.thumbnails || {}, items = rec.items || [];
   const box = $('thumbs'); box.innerHTML = '';
@@ -8617,6 +8884,21 @@ function renderRender() {
   $('render-info').textContent = `${fmtTime(r.duration)} long · rendered in ${Math.max(1, Math.round((r.took_seconds || 0) / 60))} min.`;
   const pub = p.publish;
   $('publish-out').style.display = pub ? 'block' : 'none';
+  if (!$('upload-btn').disabled) $('upload-btn').textContent = '⬆ Upload to ' + SERIES.channel;
+  if (EXP) {
+    const ql = $('quiz-list'); ql.innerHTML = '';
+    const quiz = (pub && pub.quiz) || [];
+    $('quiz-wrap').style.display = quiz.length ? 'block' : 'none';
+    quiz.forEach(q => {
+      const d = el('div', 'quiz-item');
+      d.appendChild(el('b', '', q.time + '  '));
+      d.appendChild(document.createTextNode(q.question));
+      const ul = el('div', 'hint');
+      ul.textContent = q.options.map((o, i) => `${'ABCD'[i]}. ${o}${i === q.answer ? ' ✓' : ''}`).join('   ');
+      d.appendChild(ul);
+      ql.appendChild(d);
+    });
+  }
   if (pub) {
     const tl = $('title-list'); tl.innerHTML = '';
     (pub.titles || []).forEach(t => { const o = el('div', 'title-opt', t); o.addEventListener('click', () => { $('post-title').value = t; }); tl.appendChild(o); });
@@ -8670,7 +8952,7 @@ $('upload-btn').addEventListener('click', async () => {
   if (privacy === 'public' && !confirm('Post it publicly right now?')) return;
   const b = $('upload-btn'); b.disabled = true; b.textContent = 'Uploading… (a few minutes)';
   try { project = await api(`/api/longform/projects/${project.id}/upload`, jsonOpts('POST', { title: $('post-title').value, description: $('desc-text').value, privacy_status: privacy })); render(); }
-  catch (e) { alert(e.message); } finally { b.disabled = false; b.textContent = '⬆ Upload to Caught On Stream'; }
+  catch (e) { alert(e.message); } finally { b.disabled = false; b.textContent = '⬆ Upload to ' + SERIES.channel; }
 });
 $('promo-btn').addEventListener('click', async () => {
   const b = $('promo-btn'); b.disabled = true;
@@ -8690,3 +8972,32 @@ if (startId) openProject(startId); else showList();
 </body>
 </html>
 """
+
+
+_LONGFORM_SERIES = {
+    "documentary": {
+        "path": "/long-form", "channel": "Caught On Stream", "title": "The Story Of", "logo": "🎬",
+        "subtitle": "A bi-weekly documentary series for Caught On Stream: a different streamer each episode. The app researches them and pulls their best clips, Claude drafts the story, you narrate it, and the app edits it together.",
+    },
+    "explainer": {
+        "path": "/caught-on-code", "channel": "Caught On Code", "title": "Caught On Code", "logo": "💻",
+        "subtitle": "The tech behind gaming, streaming and the internet, explained: netcode, anti-cheat, matchmaking, how a stream reaches you. The app researches the topic, Claude writes the script with animated diagrams and pause-and-guess quizzes, you narrate it, and the app draws and edits it together.",
+    },
+}
+
+
+def _longform_page(kind: str) -> str:
+    """The long-form page for one series: the documentaries (/long-form) or
+    the Caught On Code explainers (/caught-on-code). Same template; the
+    series decides the header, the list view and a few steps."""
+    cfg = _LONGFORM_SERIES[kind]
+    return (_LONGFORM_TEMPLATE
+            .replace("__SERIES_KIND__", kind)
+            .replace("__SERIES_JSON__", json.dumps({"kind": kind, "path": cfg["path"], "channel": cfg["channel"]}))
+            .replace("__PAGE_TITLE__", cfg["title"]).replace("__LOGO__", cfg["logo"]).replace("__H1__", cfg["title"])
+            .replace("__SUBTITLE__", cfg["subtitle"]))
+
+
+LONGFORM_HTML = _longform_page("documentary")
+EXPLAINER_HTML = _longform_page("explainer")
+
