@@ -133,17 +133,30 @@ merge it yourself; merging stays Dean's call per the rule above.
   when a story is written -- never Dean's own edits. Dean rated that
   first rendered episode "really good".
 - **Thumbnails (Sept 2026):** `clipper/longform_thumbnail.py` makes 3
-  options on the Render & post step: `face` (close-up), `full` (full
-  frame, red circle on the face) and `split` (then vs now, two years).
-  Frames are real frames from the streamer's clips, scored by OpenCV Haar
-  face + sharpness + brightness. Claude writes 2-4 word hooks. A number
-  in a hook must appear in the research or the story, or the hook is
-  dropped. Dean can edit the text and redraw, pick one, or download it.
-  The chosen one is set with `thumbnails.set` right after the upload
-  (`youtube_upload.set_thumbnail`). A failure never fails the upload: it
-  lands in `project["thumbnail_status"]`, and "Set on YouTube" retries.
-  Custom thumbnails need a phone-verified channel; YouTube answers 403
-  without it.
+  options on the Render & post step: `face` (face big on the right, hook
+  left), `full` (face big in the middle, hook along the bottom) and `split`
+  (then vs now: oldest vs newest face frame, two years). Dean found the
+  first version "not that good": it shrank frames to 720p before looking
+  for faces, so it picked small faces with the chat overlay and a
+  gameplay HUD with no face at all. Now frames are grabbed at the clip's
+  own resolution (max 1920 wide), and only frames with a real face are
+  used (OpenCV Haar, then checked by MediaPipe BlazeFace: score >= 1.4,
+  which rejects game characters and emotes). The crop is tight on the
+  face (zoom capped at 2.5x), which also cuts out the chat and timers.
+  The person is cut out with MediaPipe selfie segmentation over a blurred,
+  darkened background, with a white outline. Both models are tiny
+  `.tflite` files (Apache 2.0) bundled in `clipper/assets/models`, copied
+  from the mediapipe wheel and run with `cv2.dnn.readNetFromTFLite`, so
+  there are no new packages. GitHub's copies are Git LFS, which the
+  sandbox can't fetch. Test faces: `skimage/data/astronaut.png` from the
+  scikit-image wheel. Claude writes 1-3 word hooks (max 22 characters, no
+  in-jokes or clip quotes). A number in a hook must appear in the research
+  or the story, or the hook is dropped. Dean can edit the text and redraw,
+  pick one, or download it. The chosen one is set with `thumbnails.set`
+  right after the upload (`youtube_upload.set_thumbnail`). A failure never
+  fails the upload: it lands in `project["thumbnail_status"]`, and "Set on
+  YouTube" retries. Custom thumbnails need a phone-verified channel;
+  YouTube answers 403 without it.
 - Rendering is Pillow frames piped into ffmpeg, about 2x real time on
   CPU (a 12-minute episode renders in ~25 min). Scenes are cached by a
   hash of their inputs, so a change to the final mix only (music, music
