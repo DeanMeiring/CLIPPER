@@ -202,7 +202,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   the page nudges him when over a third of the scenes use it. One sample
   (him reading `SAMPLE_TEXT`) lives in `BASE_DIR/_longform/_voice/`; the
   "🤖 Use my AI voice" button on a narrated scene makes a take with
-  `"voice": "ai"`, checked by the same misread check. The cloning weights
+  `"voice": "ai"`, checked by the same misread check. Oct 2026: Dean asked
+  for "🤖 Let my AI voice read everything" (Record step, both series):
+  `POST/DELETE .../clone-all` runs every narrated scene without a usable
+  take through `_clone_take` in a background thread (one at a time under
+  `_voice_busy`), keeps scenes he recorded, retries a flagged take once,
+  and reports progress/flagged/failed in `project["ai_all"]` (scene
+  numbers; the page shows them as narration numbers). Stop finishes the
+  current scene. The cloning weights
   are gated on Hugging Face (free, auto-approved), so Railway needs
   `HF_TOKEN` from an account that accepted the terms at
   huggingface.co/kyutai/pocket-tts. Chatterbox was rejected: ~7.5 GB RAM
