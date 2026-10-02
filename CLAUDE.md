@@ -276,7 +276,18 @@ merge it yourself; merging stays Dean's call per the rule above.
     bottom).
 - `clipper/explainer_visuals.py`:
   - Templates: flow, network, race, bars, bignum, grid, layers, neural,
-    compare, quiz, words.
+    compare, quiz, words, arena.
+  - `arena` (Oct 2026, Dean wanted more than diagrams and liked a sample):
+    a top-down game simulation, slowed down (`_nice_slow`) and always
+    tagged "SIMPLIFIED · SLOWED DOWN N×". Modes: `peek` (peeker's
+    advantage; `delay_ms` head start, timeline), `ticks` (server
+    snapshots every 1000/rate ms; 1-2 `tick_rates`), `rewind` (lag
+    compensation: you shoot his lagging image, he's behind a wall on his
+    screen, server rewinds `delay_ms`, hit). `normalize_visual` checks
+    `delay_ms` / `tick_rates` against the research (unsourced: "EXAMPLE
+    NUMBERS" tag) and drops a `note` with an unsourced number. Line of
+    sight is computed (`_blocked`), so the moment he becomes visible or
+    hidden is real geometry, not hand-timed.
   - Pillow drawn at 2x and reduced, about 1.8x real time on CPU.
   - Each element appears on its `at` phrase, matched against the take's
     word timings (`longform_beats.script_timings`). Captions and

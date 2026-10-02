@@ -155,6 +155,20 @@ DIAGRAMS = """DIAGRAM TYPES (every field optional unless marked *):
 - {"type": "compare", "left"*: {"title"*, "items"*: ["...", ...]}, "right"*: {"title"*, "items"*: [...]}}
 - {"type": "quiz", "question"*, "options"* (2-4 short answers), "answer"* (0-based index), "reveal_at"}
 - {"type": "words", "text"*, "highlight"}   one short line in big type. Use rarely.
+- {"type": "arena", "mode"* ("peek" | "ticks" | "rewind"), "title", "delay_ms", "tick_rates", "note", "go_at", "result_at"}
+    a small top-down game, slowed down and tagged SIMPLIFIED -- the picture
+    that makes netcode click. "peek": an enemy peeks past a corner; his
+    screen shows you at once, yours shows him "delay_ms" later (peeker's
+    advantage). "ticks": an enemy runs while the server only takes a
+    snapshot every 1000/rate ms; "tick_rates" is 1 or 2 rates side by
+    side. "rewind": you shoot where your screen shows him, but on his
+    screen he's already behind a wall; the server rewinds "delay_ms" (your
+    ping) and counts the hit (lag compensation, dying behind walls).
+    "note": a short footnote giving the numbers' context from the research
+    ("128-tick server, 35 ms ping, 60 FPS"). "go_at": phrase when the action
+    starts. It needs about 6 seconds, so give it a narrate scene of 25+
+    words and make it that scene's only visual. Use it only for topics about
+    players moving and shooting online, at most 3 to 5 per episode.
 "at" (on a visual or an element) is a short phrase, copied EXACTLY from that
 scene's narration, at which it appears. The first visual of a scene starts
 with the scene; every visual after it needs "at". "title" is a 1-4 word label
@@ -427,6 +441,32 @@ def normalize_visual(v, narration: str, blob: str, nums: set) -> Optional[dict]:
         out.update(question=q, options=opts, answer=int(ans))
         if _phrase(v.get("reveal_at"), toks):
             out["reveal_at"] = _phrase(v.get("reveal_at"), toks)
+    elif kind == "arena":
+        mode = str(v.get("mode") or "peek").lower()
+        if mode not in ("peek", "ticks", "rewind"):
+            return None
+        example = bool(v.get("example"))
+        if mode == "ticks":
+            rates = [r for r in (_num(x) for x in (v.get("tick_rates") or [])[:2]) if r and 1 <= r <= 1000]
+            if not rates:
+                return None
+            out["tick_rates"] = rates
+            example = example or not all(_supported(_fmt(r), blob, nums) for r in rates)
+        else:
+            d = _num(v.get("delay_ms"))
+            if d is None or not 1 <= d <= 2000:
+                return None
+            out["delay_ms"] = d
+            example = example or not _supported(_fmt(d), blob, nums, str(v.get("math") or ""))
+        note = _clean(v.get("note"), 70)
+        if note and all(_supported(n, blob, nums) for n in re.findall(r"\d[\d,.]*", note)):
+            out["note"] = note
+        for name in ("go_at", "result_at"):
+            if _phrase(v.get(name), toks):
+                out[name] = _phrase(v.get(name), toks)
+        out["mode"] = mode
+        if example:
+            out["example"] = True
     elif kind == "words":
         text = _clean(v.get("text"), 60)
         if not text:
@@ -586,7 +626,7 @@ Respond with ONLY a JSON array of 3 strings.
 
 
 THUMB_LAYOUTS = ("left", "center", "bottom")
-_VISUAL_RANK = {"race": 0, "network": 1, "flow": 2, "layers": 3, "bars": 4, "grid": 5, "neural": 6, "compare": 7,
+_VISUAL_RANK = {"arena": -1, "race": 0, "network": 1, "flow": 2, "layers": 3, "bars": 4, "grid": 5, "neural": 6, "compare": 7,
                 "bignum": 8, "quiz": 9, "words": 10}
 
 
