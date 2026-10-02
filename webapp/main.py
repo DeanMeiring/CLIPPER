@@ -3127,6 +3127,10 @@ def _longform_project(pid: str) -> dict:
     if (project.get("visuals") or {}).get("status") == "planning" and not _longform_is_busy(pid, "visuals"):
         project = _longform_store.update(pid, lambda pr: pr.update(
             visuals={"status": "error", "error": "Interrupted by a restart -- click Plan visuals again."}))
+    if (project.get("ai_all") or {}).get("status") == "running" and not _longform_is_busy(pid, "ai_all"):
+        project = _longform_store.update(pid, lambda pr: pr.update(ai_all={
+            **pr["ai_all"], "status": "error", "current": None,
+            "error": "Interrupted by a restart -- press it again; the scenes it already read are kept."}))
     if (project.get("render") or {}).get("status") == "rendering" and not _longform_is_busy(pid, "render"):
         project = _longform_store.update(pid, lambda pr: pr.update(
             render={"status": "error", "error": "Interrupted by a restart -- click Render again.", "progress": 0}))
@@ -3683,6 +3687,41 @@ def longform_voice_sample_delete() -> dict:
     return voice_clone.status(_voice_dir)
 
 
+def _voice_check() -> None:
+    st = voice_clone.status(_voice_dir)
+    if not st["installed"] or not st["configured"]:
+        raise HTTPException(409, voice_clone.SETUP_HINT)
+    if not st["sample"]:
+        raise HTTPException(409, "Record your voice sample first (the “Your AI voice” box at the top).")
+
+
+def _clone_take(pid: str, index: int, script: str) -> dict:
+    """Read one narrated scene in Dean's AI voice, check it like a recorded
+    take and make it the scene's take. The caller holds _voice_busy."""
+    takes_dir = _longform_store.path(pid) / "takes"
+    takes_dir.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    raw = takes_dir / f"scene{index:02d}_{stamp}_ai24k.wav"
+    wav = takes_dir / f"scene{index:02d}_{stamp}_ai.wav"
+    started = time.time()
+    try:
+        try:
+            voice_clone.synthesize(_voice_dir, script, raw)
+            longform.to_wav(raw, wav)
+        finally:
+            raw.unlink(missing_ok=True)
+        duration = longform.audio_duration(wav)
+        heard = longform.transcribe_take(wav)
+    except Exception:
+        wav.unlink(missing_ok=True)
+        raise
+    result = {"duration": round(duration, 2), "heard": " ".join(heard).strip(),
+              "took_seconds": round(time.time() - started, 1), **longform.check_take(script, heard)}
+    take = {"file": wav.name, "recorded_at": time.time(), "kept": False, "voice": "ai", **result}
+    _longform_set_take(pid, index, script, take, wav)
+    return take
+
+
 @protected.post("/api/longform/projects/{pid}/scenes/{index}/clone")
 async def longform_clone_take(pid: str, index: int) -> dict:
     """Voice one narrated scene with Dean's AI voice instead of recording it.
@@ -3692,43 +3731,102 @@ async def longform_clone_take(pid: str, index: int) -> dict:
     scenes = project.get("scenes") or []
     if not 0 <= index < len(scenes) or not longform.needs_take(scenes[index]):
         raise HTTPException(404, "that scene isn't narrated")
-    st = voice_clone.status(_voice_dir)
-    if not st["installed"] or not st["configured"]:
-        raise HTTPException(409, voice_clone.SETUP_HINT)
-    if not st["sample"]:
-        raise HTTPException(409, "Record your voice sample first (the “Your AI voice” box at the top).")
+    _voice_check()
     if not _voice_busy.acquire(blocking=False):
         raise HTTPException(409, "Your AI voice is already reading another scene -- give it a few seconds.")
     script = scenes[index]["narration"]
-    takes_dir = _longform_store.path(pid) / "takes"
-    takes_dir.mkdir(parents=True, exist_ok=True)
-    stamp = uuid.uuid4().hex[:8]
-    raw = takes_dir / f"scene{index:02d}_{stamp}_ai24k.wav"
-    wav = takes_dir / f"scene{index:02d}_{stamp}_ai.wav"
-
-    def work() -> dict:
-        started = time.time()
-        try:
-            voice_clone.synthesize(_voice_dir, script, raw)
-            longform.to_wav(raw, wav)
-        finally:
-            raw.unlink(missing_ok=True)
-        duration = longform.audio_duration(wav)
-        heard = longform.transcribe_take(wav)
-        return {"duration": round(duration, 2), "heard": " ".join(heard).strip(),
-                "took_seconds": round(time.time() - started, 1), **longform.check_take(script, heard)}
-
     try:
-        result = await run_in_threadpool(work)
+        take = await run_in_threadpool(_clone_take, pid, index, script)
+    except HTTPException:
+        raise
     except Exception as e:
-        wav.unlink(missing_ok=True)
         print(f"[longform] AI voice failed for {pid} scene {index}: {e}", flush=True)
         raise HTTPException(500, f"Your AI voice couldn't read this scene: {e}")
     finally:
         _voice_busy.release()
-    take = {"file": wav.name, "recorded_at": time.time(), "kept": False, "voice": "ai", **result}
-    _longform_set_take(pid, index, script, take, wav)
     return {"take": take}
+
+
+# ---- "Let my AI voice read everything": every narrated scene without a
+# usable take, one after another in the background. Scenes Dean already
+# recorded (or that pass the check) are left alone. A take the misread check
+# flags is tried once more; one still flagged stays for him to play and keep
+# or redo. Progress lives in project["ai_all"].
+
+def _ai_all_set(pid: str, **changes) -> dict:
+    return _longform_store.update(pid, lambda pr: pr.update(ai_all={**(pr.get("ai_all") or {}), **changes}))
+
+
+def _longform_ai_all(pid: str, todo: List[int]) -> None:
+    done, flagged, failed = 0, [], []
+    try:
+        for index in todo:
+            project = _longform_store.load(pid)
+            if (project.get("ai_all") or {}).get("stop"):
+                _ai_all_set(pid, status="stopped", current=None)
+                return
+            scenes = project.get("scenes") or []
+            if index >= len(scenes) or not longform.needs_take(scenes[index]) or longform.scene_ready(scenes[index]):
+                done += 1
+                continue
+            _ai_all_set(pid, current=index)
+            script = scenes[index]["narration"]
+            if not _voice_busy.acquire(timeout=300):
+                failed.append(index + 1)
+                continue
+            try:
+                take = None
+                for _attempt in range(2):
+                    take = _clone_take(pid, index, script)
+                    if take.get("ok"):
+                        break
+                if take and not take.get("ok"):
+                    flagged.append(index + 1)
+            except HTTPException:  # the script changed meanwhile
+                failed.append(index + 1)
+            except Exception as e:
+                print(f"[longform] AI voice failed for {pid} scene {index}: {e}", flush=True)
+                failed.append(index + 1)
+            finally:
+                _voice_busy.release()
+            done += 1
+            _ai_all_set(pid, done=done, flagged=flagged, failed=failed)
+        _ai_all_set(pid, status="done", current=None, done=done, flagged=flagged, failed=failed, finished_at=time.time())
+    except Exception as e:
+        print(f"[longform] AI voice (all scenes) for {pid} stopped: {e}", flush=True)
+        try:
+            _ai_all_set(pid, status="error", current=None, error=str(e))
+        except Exception:
+            pass
+    finally:
+        _longform_release(pid, "ai_all")
+
+
+@protected.post("/api/longform/projects/{pid}/clone-all")
+def longform_clone_all(pid: str) -> dict:
+    project = _longform_project(pid)
+    scenes = project.get("scenes") or []
+    if project.get("status") != "script_ready" or not scenes:
+        raise HTTPException(409, "write the script first")
+    _voice_check()
+    todo = [i for i, sc in enumerate(scenes) if longform.needs_take(sc) and not longform.scene_ready(sc)]
+    if not todo:
+        raise HTTPException(409, "Every narrated scene already has a take.")
+    _longform_claim(pid, "ai_all")
+    _longform_store.update(pid, lambda pr: pr.update(ai_all={
+        "status": "running", "total": len(todo), "done": 0, "current": None, "flagged": [], "failed": [],
+        "started_at": time.time()}))
+    threading.Thread(target=_longform_ai_all, args=(pid, todo), daemon=True).start()
+    return _longform_store.load(pid)
+
+
+@protected.delete("/api/longform/projects/{pid}/clone-all")
+def longform_stop_clone_all(pid: str) -> dict:
+    """Stop after the scene being read now; what's read so far is kept."""
+    _longform_project(pid)
+    if not _longform_is_busy(pid, "ai_all"):
+        raise HTTPException(409, "your AI voice isn't reading anything")
+    return _ai_all_set(pid, stop=True)
 
 
 _MUSIC_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mp4": ".m4a",
@@ -7793,6 +7891,10 @@ _LONGFORM_TEMPLATE = """<!doctype html>
   .take-result.ok { background: color-mix(in srgb, #059669 14%, var(--bg)); color: #047857; }
   .take-result.bad { background: color-mix(in srgb, #f59e0b 16%, var(--bg)); color: #92400e; }
   .take-result.wait { background: var(--bg); color: var(--muted); }
+  .ai-all { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .ai-all button { margin-top: 0; }
+  #ai-all-progress .bar { margin-top: 10px; }
+  #ai-all-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.4s; }
   .take-result .heard { display: block; font-weight: 400; font-size: 0.8rem; margin-top: 6px; color: var(--muted); }
   .music-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .music-row input { flex: 1; min-width: 200px; }
@@ -7987,6 +8089,11 @@ _LONGFORM_TEMPLATE = """<!doctype html>
         <button id="next-scene" type="button" class="secondary">Next →</button>
       </div>
       <div class="hint" id="ai-hint"></div>
+      <div class="ai-all" id="ai-all" style="display:none">
+        <button id="ai-all-btn" type="button" class="secondary">🤖 Let my AI voice read everything</button>
+        <div id="ai-all-progress" style="display:none"><div class="bar"><div id="ai-all-bar"></div></div></div>
+        <div class="hint" id="ai-all-msg"></div>
+      </div>
       <audio id="take-audio" style="display:none"></audio>
     </div>
 
@@ -8250,7 +8357,7 @@ async function loadProject(id, resetIndex) {
   render();
   stopPolling();
   const busy = ['researching', 'writing'].includes(project.status) || (project.render || {}).status === 'rendering'
-    || (project.visuals || {}).status === 'planning';
+    || (project.visuals || {}).status === 'planning' || (project.ai_all || {}).status === 'running';
   if (busy) pollTimer = setInterval(() => loadProject(project.id, project.status !== 'script_ready'), 3000);
 }
 
@@ -8656,7 +8763,10 @@ function renderRecorder() {
   $('play-take').textContent = take.voice === 'ai' ? '▶ Play AI take' : '▶ Play my take';
   const ab = $('ai-btn');
   const vReady = !!(voice && voice.ready);
-  ab.disabled = !!recorder || aiBusy || !vReady;
+  const aa = project.ai_all || {}, aiAll = aa.status === 'running';
+  ab.disabled = !!recorder || aiBusy || !vReady || aiAll;
+  if (!recorder) $('rec-btn').disabled = aiBusy || aiAll;
+  renderAiAll(vReady, aa, idx.filter(i => !sceneReady(scenes[i])).length);
   ab.textContent = aiBusy ? '🤖 Reading…' : take.voice === 'ai' ? '🤖 AI voice again' : '🤖 Use my AI voice';
   const narr = idx.map(i => scenes[i]);
   const aiCount = narr.filter(x => (x.take || {}).voice === 'ai').length;
@@ -8741,6 +8851,39 @@ $('ai-btn').addEventListener('click', async () => {
     aiBusy = false; $('rec-btn').disabled = false; lastResult = null; renderRecorder();
     res.style.display = 'block'; res.className = 'take-result bad'; res.textContent = '⚠️ ' + e.message;
   }
+});
+function renderAiAll(vReady, aa, left) {
+  const running = aa.status === 'running';
+  $('ai-all').style.display = vReady && (left || aa.status) ? 'block' : 'none';
+  const b = $('ai-all-btn');
+  b.textContent = running ? (aa.stop ? '⏳ Stopping after this scene…' : '⏹ Stop') : '🤖 Let my AI voice read everything';
+  b.disabled = (running && !!aa.stop) || (!running && (!left || !!recorder || aiBusy));
+  $('ai-all-progress').style.display = running ? 'block' : 'none';
+  const total = aa.total || 0, done = aa.done || 0;
+  if (running) $('ai-all-bar').style.width = Math.round(100 * done / Math.max(total, 1)) + '%';
+  // The job counts scenes (chapter cards included); the chips count narrations.
+  const no = n => narrIndices().indexOf(n - 1) + 1;
+  const flagged = (aa.flagged || []).map(no).filter(Boolean), failed = (aa.failed || []).map(no).filter(Boolean);
+  const extra = (flagged.length ? ` Narration${flagged.length > 1 ? 's' : ''} ${flagged.join(', ')} came out garbled twice: play ${flagged.length > 1 ? 'them' : 'it'}, then “Keep anyway”, try the AI voice again or record ${flagged.length > 1 ? 'them' : 'it'} yourself.` : '')
+    + (failed.length ? ` Couldn’t read narration${failed.length > 1 ? 's' : ''} ${failed.join(', ')}; try ${failed.length > 1 ? 'them' : 'it'} one by one.` : '');
+  $('ai-all-msg').textContent = running
+    ? `🤖 Reading narration ${aa.current != null ? no(aa.current + 1) : '…'} · ${done} of ${total} done. Each one takes 10–30 seconds and is checked like a recording. You can leave this page.`
+    : aa.status === 'done' ? `✅ Your AI voice read ${done} scene${done === 1 ? '' : 's'}.` + extra
+    : aa.status === 'stopped' ? `Stopped after ${done} of ${total}. What it read is kept.` + extra
+    : aa.status === 'error' ? '⚠️ ' + (aa.error || 'It stopped.') + extra
+    : `Reads the ${left} narrated scene${left === 1 ? '' : 's'} that ${left === 1 ? 'has' : 'have'} no take yet, one after another (about ${Math.max(1, Math.round(left * 25 / 60))} min). Scenes you recorded yourself are kept.`;
+}
+$('ai-all-btn').addEventListener('click', async () => {
+  const running = (project.ai_all || {}).status === 'running';
+  try {
+    if (running) project = await api(`/api/longform/projects/${project.id}/clone-all`, { method: 'DELETE' });
+    else {
+      const left = (project.scenes || []).filter(s => needsTake(s) && !sceneReady(s)).length;
+      if (!confirm(`Your AI voice will read the ${left} narrated scene${left === 1 ? '' : 's'} without a take. Scenes you recorded yourself stay as they are. Start?`)) return;
+      project = await api(`/api/longform/projects/${project.id}/clone-all`, { method: 'POST' });
+    }
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
 });
 $('prev-scene').addEventListener('click', () => { const idx = narrIndices(); const p = idx.indexOf(recIndex); if (p > 0) { recIndex = idx[p - 1]; lastResult = null; renderRecorder(); } });
 $('next-scene').addEventListener('click', () => { const idx = narrIndices(); const p = idx.indexOf(recIndex); if (p < idx.length - 1) { recIndex = idx[p + 1]; lastResult = null; renderRecorder(); } });
