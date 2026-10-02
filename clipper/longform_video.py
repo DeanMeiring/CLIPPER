@@ -457,12 +457,15 @@ def _scene_plan(scenes: List[dict], library: dict, take_durations: List[Optional
     """(duration, chapter number, chapter-card background) for each scene."""
     n = len(scenes)
     out, titles_seen = [], 0
+    # An explainer's chapter cards stay plain even when it has streamer
+    # clips: those are a few moments, not the footage of its chapters.
+    explainer = any(s.get("visuals") for s in scenes)
     for i, sc in enumerate(scenes):
         chapter, bg = 0, None
         if sc.get("kind") == "title":
             titles_seen += 1
             chapter = titles_seen - 1  # the first card is the episode title, then Chapter 1, 2, ...
-            nxt = next((s for s in scenes[i + 1:] if s.get("clip") in library), None)
+            nxt = None if explainer else next((s for s in scenes[i + 1:] if s.get("clip") in library), None)
             bg = (nxt["clip"], float(nxt.get("start") or 0)) if nxt else None
         out.append((scene_duration(sc, take_durations[i], last=(i == n - 1)), chapter, bg))
     return out
