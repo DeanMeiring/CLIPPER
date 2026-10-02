@@ -3422,12 +3422,25 @@ def _longform_clip_search(pid: str, links: List[str]) -> None:
         d = _longform_store.path(pid)
         lib = project.get("library") or []
         have = {c.get("twitch_id") for c in lib}
+        # YouTube search uses the episode's channel connection (read-only
+        # scope is enough); without one only Twitch is searched.
+        yt_token = None
+        for account in dict.fromkeys([_longform_account(project), DEFAULT_CHANNEL_PROFILE]):
+            try:
+                yt_token = _youtube_token_stores[account].get_valid_access_token()
+            except Exception:
+                yt_token = None
+            if yt_token:
+                break
         pasted = []
+        unresolved = 0
         if links:
             say("Looking up your links...")
-            pasted = [dict(c, pasted=True) for c in clip_search.resolve_links(links) if c["twitch_id"] not in have]
+            got_links = clip_search.resolve_links(links, yt_token or "")
+            unresolved = max(0, len(links) - len(got_links))
+            pasted = [dict(c, pasted=True) for c in got_links if c["twitch_id"] not in have]
             have |= {c["twitch_id"] for c in pasted}
-        res = clip_search.find(project.get("topic") or project.get("title") or "", on_progress=say)
+        res = clip_search.find(project.get("topic") or project.get("title") or "", on_progress=say, yt_token=yt_token or "")
         new = pasted + [c for c in res["picked"] if c["twitch_id"] not in have]
         n0 = max([int(c["id"][1:]) for c in lib if str(c.get("id", ""))[1:].isdigit()] + [0])
         for i, c in enumerate(new, start=n0 + 1):
@@ -3446,6 +3459,7 @@ def _longform_clip_search(pid: str, links: List[str]) -> None:
         _longform_store.update(pid, lambda pr: pr.update(
             library=(pr.get("library") or []) + got,
             clip_search={"status": "done", "message": None, "error": None, "games": res["games"], "keywords": res["keywords"],
+                         "youtube": bool(yt_token and res.get("youtube")), "unresolved": unresolved,
                          "scanned": res["scanned"], "added": len(got), "finished_at": time.time()}))
     except Exception as e:
         print(f"[longform] clip search for {pid} failed: {e}", flush=True)
@@ -3481,6 +3495,26 @@ def longform_clip_search(pid: str, req: ClipSearchRequest) -> dict:
 
 class ClipUseRequest(BaseModel):
     use: bool
+
+
+@protected.delete("/api/longform/projects/{pid}/library/{clip_id}")
+def longform_clip_remove(pid: str, clip_id: str) -> dict:
+    """Throw away a streamer clip that's no good (not one the script uses)."""
+    project = _longform_project(pid)
+    if not _is_explainer(project):
+        raise HTTPException(409, "a documentary's clips come with its research")
+    if any(s.get("clip") == clip_id for s in project.get("scenes") or []):
+        raise HTTPException(409, "the script uses this clip -- remove its moment from the script first")
+
+    def apply(pr: dict) -> None:
+        lib = pr.get("library") or []
+        if not any(c.get("id") == clip_id for c in lib):
+            raise HTTPException(404, "no such clip")
+        pr["library"] = [c for c in lib if c.get("id") != clip_id]
+    out = _longform_store.update(pid, apply)
+    if re.fullmatch(r"C\d{1,3}", clip_id):
+        shutil.rmtree(_longform_store.path(pid) / "clips" / clip_id, ignore_errors=True)
+    return out
 
 
 @protected.put("/api/longform/projects/{pid}/library/{clip_id}")
@@ -8159,12 +8193,12 @@ _LONGFORM_TEMPLATE = """<!doctype html>
       </details>
       <div class="exp-only clips-box" id="clips-box">
         <label>🎬 Streamer clips</label>
-        <div class="hint">Real Twitch moments of what this episode explains. Ticked clips go to Claude when it writes the script: it plays 1–4 of them, and the streamer is credited on screen and in the description. Change the ticks, then write the script (again).</div>
+        <div class="hint">Real moments of what this episode explains, from Twitch and YouTube. Only clips that clearly show it get ticked. Ticked clips go to Claude when it writes the script: it plays 1–4 of them, and the streamer or channel is credited on screen and in the description. Change the ticks, then write the script (again).</div>
         <div class="hint" id="clips-status"></div>
         <div id="clips-list"></div>
         <details id="clips-more">
-          <summary>Paste Twitch clip links or search again</summary>
-          <textarea id="clip-links" rows="2" placeholder="https://www.twitch.tv/name/clip/... (one per line)"></textarea>
+          <summary>Paste clip links (Twitch or YouTube) or search again</summary>
+          <textarea id="clip-links" rows="2" placeholder="Twitch clip or YouTube links, one per line"></textarea>
           <button id="clip-search-btn" type="button" class="secondary">🔎 Find clips</button>
         </details>
       </div>
@@ -8591,12 +8625,14 @@ function renderResearch() {
 function renderClips() {
   const p = project, cs = p.clip_search || {}, lib = p.library || [];
   const games = (cs.games || []).join(', ');
+  const where = [games ? `Twitch (${games})` : '', cs.youtube ? 'YouTube' : ''].filter(Boolean).join(' and ');
+  const unres = cs.unresolved ? ` ${cs.unresolved} link${cs.unresolved === 1 ? '' : 's'} couldn’t be used (not a Twitch clip or YouTube video, or over 15 minutes long).` : '';
   $('clips-status').textContent = cs.status === 'searching'
     ? '⏳ ' + (cs.message || 'Searching…') + ' You can write the script now, or wait for the clips (a few minutes).'
     : cs.status === 'error' ? '⚠️ ' + (cs.error || 'The clip search failed.')
-    : cs.status === 'done' ? (cs.added ? `Found ${cs.added} clip${cs.added === 1 ? '' : 's'}` + (games ? ` in ${games} (read ${cs.scanned} clip titles).` : '.')
-      : games ? `No good matches among ${cs.scanned} ${games} clips. Paste a link below if you know one.`
-      : 'This topic doesn’t really happen on stream, so there was nothing to search. Paste a link below if you know a clip.')
+    : cs.status === 'done' ? (cs.added ? `Found ${cs.added} clip${cs.added === 1 ? '' : 's'}` + (where ? ` on ${where} (looked at ${cs.scanned}).` : '.')
+      : where ? `Nothing on ${where} clearly shows it (looked at ${cs.scanned}). Paste a link below if you know one.`
+      : 'This topic doesn’t really happen on stream, so there was nothing to search. Paste a link below if you know a clip.') + unres
     : 'Not searched yet.';
   const list = $('clips-list');
   list.innerHTML = '';
@@ -8605,7 +8641,7 @@ function renderClips() {
     if (c.thumbnail) { const im = el('img'); im.loading = 'lazy'; im.alt = ''; im.src = c.thumbnail; row.appendChild(im); }
     const body = el('div');
     const t = el('a', 'ct', c.title || c.id); t.href = c.url; t.target = '_blank'; t.rel = 'noopener'; body.appendChild(t);
-    body.appendChild(el('div', 'cm', [c.streamer, c.game, (c.views || 0).toLocaleString() + ' views', Math.round(c.duration || 0) + 's'].filter(Boolean).join(' · ')));
+    body.appendChild(el('div', 'cm', [c.source === 'youtube' ? 'YouTube' : 'Twitch', c.streamer, c.game, (c.views || 0).toLocaleString() + ' views', Math.round(c.duration || 0) + 's'].filter(Boolean).join(' · ')));
     if (c.what) body.appendChild(el('div', 'cw', (c.pasted ? '📎 Your link · ' : c.fits === false ? '✗ Claude: doesn’t seem to show it · ' : c.fits ? '✓ Claude: shows it · ' : '') + c.what));
     const use = el('label', 'use');
     const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!c.use;
@@ -8622,6 +8658,13 @@ function renderClips() {
       v.src = `/api/longform/projects/${p.id}/clips/${c.id}`; v.play();
     });
     body.appendChild(play);
+    const rm = el('button', 'secondary', '🗑 Remove'); rm.type = 'button'; rm.style.marginLeft = '6px';
+    rm.addEventListener('click', async () => {
+      if (!confirm('Remove this clip from the episode?')) return;
+      try { project = await api(`/api/longform/projects/${p.id}/library/${c.id}`, { method: 'DELETE' }); renderClips(); }
+      catch (e) { alert(e.message); }
+    });
+    body.appendChild(rm);
     row.appendChild(body);
     list.appendChild(row);
   });

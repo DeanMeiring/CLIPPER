@@ -311,6 +311,17 @@ merge it yourself; merging stays Dean's call per the rule above.
   clips the prompt is byte-identical to before). Explainer chapter cards
   stay plain (`_scene_plan`), and topics that never happen on stream (DLSS)
   just find nothing.
+  - First real run: Dean found the picks "unrelated". Now (a) Claude's
+    title words must be situation-specific, not generic ("server", "lag",
+    "100"), (b) pick and check both drop anything unsure -- an empty list
+    is fine, (c) YouTube is searched too (`youtube_search`: Claude writes
+    3-4 queries, `videoDuration=short`, kept if <= 4 min; other channels'
+    explainers/news/reactions are skipped in the pick prompt) with the
+    episode's channel OAuth token (~400 of the 10,000 daily units), and
+    YouTube links can be pasted (<= 15 min). Credit reads
+    "YouTube · <channel>". YouTube clips carry more Content ID risk than
+    Twitch clips; Dean was told. Clips can be removed (`DELETE
+    .../library/{id}`, refused if the script uses it).
 - Its own YouTube account, `EXTRA_YOUTUBE_ACCOUNTS["code"]` (token file
   `_youtube_oauth_token_code.json`). It's deliberately not in
   `CHANNEL_PROFILES`, which would add it to Home's channel switcher and
