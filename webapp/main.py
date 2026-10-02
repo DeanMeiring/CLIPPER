@@ -8048,7 +8048,7 @@ _LONGFORM_TEMPLATE = """<!doctype html>
     <div class="section" id="story-section" style="display:none">
       <h3><span class="n">2</span><span class="doc-only">Story</span><span class="exp-only">Script</span></h3>
       <div class="hint doc-only">🎙 Narrated scenes are what you read. 🎬 Moments are clips that play with their own sound. 📖 Chapter cards become YouTube chapters. Edit anything, then save.</div>
-      <div class="hint exp-only">🎙 Narrated scenes are what you read; under each are the animated diagrams that play while you say it (each appears on the words in quotes). ❓ Quiz diagrams are the “pause and guess” moments. 📖 Chapter cards become YouTube chapters. Edit the words or remove a diagram, then save.</div>
+      <div class="hint exp-only">🎙 Narrated scenes are what you read; under each are the animated diagrams that play while you say it (each appears on the words in quotes). 🎮 Game simulations show the idea as a slowed-down top-down match. ❓ Quiz diagrams are the “pause and guess” moments. 📖 Chapter cards become YouTube chapters. Edit the words or remove a diagram, then save.</div>
       <div class="meta" id="story-meta"></div>
       <div class="visuals-bar doc-only">
         <span id="visuals-status"></span>
@@ -8638,7 +8638,7 @@ function renderCues(cw) {
 }
 
 // ---------- explainer diagrams (Caught On Code) ----------
-const DIAGRAM_ICON = { flow: '➡️', network: '🌐', race: '⏱', bars: '📊', bignum: '🔢', grid: '▦', layers: '🧱', neural: '🧠', compare: '⚖️', quiz: '❓', words: '🔠' };
+const DIAGRAM_ICON = { arena: '🎮', flow: '➡️', network: '🌐', race: '⏱', bars: '📊', bignum: '🔢', grid: '▦', layers: '🧱', neural: '🧠', compare: '⚖️', quiz: '❓', words: '🔠' };
 function keyOf(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return String(h); }
 function diagramWhat(v) {
   const t = v.title ? v.title + ': ' : '';
@@ -8653,6 +8653,9 @@ function diagramWhat(v) {
   if (v.type === 'compare') return `${(v.left || {}).title} vs ${(v.right || {}).title}`;
   if (v.type === 'quiz') return `${v.question} (answer: ${(v.options || [])[v.answer] || ''})`;
   if (v.type === 'words') return `“${v.text}”`;
+  if (v.type === 'arena') return 'game simulation: ' + (v.mode === 'ticks' ? `what the server knows at ${(v.tick_rates || []).join(' vs ')} tick`
+    : v.mode === 'rewind' ? `server rewinds ${v.delay_ms} ms, hit behind the wall` : `peek, ${v.delay_ms} ms head start`)
+    + (v.example ? ' · example numbers' : '');
   return v.type;
 }
 function renderDiagrams(dw) {

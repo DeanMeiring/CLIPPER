@@ -18,6 +18,10 @@ from a fixed set of templates (see TEMPLATES / explainer.py's prompt):
   compare  two columns, A vs B
   quiz     "pause and guess": a question, options, a countdown, the answer
   words    one short line in big type
+  arena    a little top-down game, slowed down: players, a wall, where the
+           enemy really is vs where your screen shows him. Modes: peek
+           (peeker's advantage), ticks (what the server knows at a tick
+           rate), rewind (lag compensation: shot after he reached cover)
 
 Every element appears when its phrase is spoken (`at`, matched against the
 Whisper word timings of Dean's take, like the documentary's keyword
@@ -48,7 +52,8 @@ GREEN = (74, 222, 128)
 WHITE = (243, 244, 246)
 MUTED = (148, 155, 170)
 
-TEMPLATES = ("flow", "network", "race", "bars", "bignum", "grid", "layers", "neural", "compare", "quiz", "words")
+TEMPLATES = ("flow", "network", "race", "bars", "bignum", "grid", "layers", "neural", "compare", "quiz", "words",
+             "arena")
 FADE = 0.35  # crossfade between two visuals in one scene
 
 
@@ -219,7 +224,10 @@ def _times(spec: dict, timed, t0: float, t1: float) -> dict:
         rows = [{"at": it.get("at")} if isinstance(it, dict) else {} for side in ("left", "right")
                 for it in (spec.get(side) or {}).get("items") or []]
         out["items"] = element_times(rows, timed, t0 + 0.6, t1)
-    for name in ("highlight_at", "reveal_at"):
+    if kind == "arena":
+        go = find_phrase(str(spec.get("go_at") or ""), timed) if spec.get("go_at") else None
+        out["go"] = go if go is not None and t0 <= go < t1 - 1.0 else t0 + 0.8
+    for name in ("highlight_at", "reveal_at", "result_at"):
         if spec.get(name):
             tt = find_phrase(str(spec[name]), timed)
             out[name] = tt if tt is not None and t0 <= tt < t1 else None
@@ -352,6 +360,268 @@ def draw_race(c: Canvas, spec: dict, t: float, tm: dict):
     if spec.get("example"):
         c.rrect(1560, 120, 1810, 164, 10, fill=PANEL)
         c.text(1685, 128, "EXAMPLE TIMINGS", "Inter-Black", 22, MUTED, "ma")
+
+
+# ----------------------------------------------------------------- arena ---
+# A small top-down game, slowed down so milliseconds become visible. All of
+# it is drawn from code; the only numbers on screen are the spec's own
+# (delay_ms / tick_rates, checked against the research in explainer.py) and
+# plain arithmetic on them. Always tagged SIMPLIFIED.
+
+ARENA = (160, 150, 1760, 690)
+_NICE_SLOW = (2, 4, 5, 8, 10, 20, 25, 40, 50, 100)
+
+
+def _nice_slow(want: float) -> int:
+    return min(_NICE_SLOW, key=lambda v: abs(math.log(v / max(1.0, want))))
+
+
+def _ms(v: float) -> str:
+    return f"{v:.1f}".rstrip("0").rstrip(".") if abs(v - round(v)) > 0.05 else f"{round(v)}"
+
+
+def _blocked(a, b, walls) -> bool:
+    for i in range(1, 100):
+        s = i / 100
+        x, y = a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s
+        if any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in walls):
+            return True
+    return False
+
+
+def _arena_tags(c: Canvas, spec: dict, slow: int, k: float):
+    title = (spec.get("title") or "").strip().upper()[:48]
+    x = (136 + c.tw(title, "Inter-Black", 34) + 28) if title else 110
+    for tag in [f"SIMPLIFIED · SLOWED DOWN {slow}×"] + (["EXAMPLE NUMBERS"] if spec.get("example") else []):
+        tw = c.tw(tag, "Inter-Black", 20)
+        c.rrect(x, 70, x + tw + 36, 104, 17, outline=mix(BG, YEL, k), width=2)
+        c.text(x + 18 + tw / 2, 77, tag, "Inter-Black", 20, mix(BG, YEL, k), "ma")
+        x += tw + 50
+
+
+def _arena_floor(c: Canvas, walls, k: float, wall_label: str = "WALL"):
+    x0, y0, x1, y1 = ARENA
+    c.rrect(x0, y0, x1, y1, 22, fill=mix(BG, PANEL, k), outline=mix(BG, EDGE, k), width=2)
+    for gx in range(x0 + 80, x1, 80):
+        c.line([(gx, y0 + 4), (gx, y1 - 4)], mix(PANEL, (38, 45, 62), k), 1)
+    for gy in range(y0 + 80, y1, 80):
+        c.line([(x0 + 4, gy), (x1 - 4, gy)], mix(PANEL, (38, 45, 62), k), 1)
+    for i, r in enumerate(walls):
+        c.rrect(*r, 10, fill=mix(PANEL, (58, 66, 88), k), outline=mix(PANEL, EDGE, k), width=2)
+        if i == 0 and wall_label and r[2] - r[0] > 140:
+            c.text((r[0] + r[2]) / 2, (r[1] + r[3]) / 2 - 12, wall_label, "Inter-Black", 22, mix(PANEL, MUTED, k), "ma")
+
+
+def _arena_note(c: Canvas, spec: dict, k: float):
+    if spec.get("note") and not spec.get("example"):
+        c.text(ARENA[2] - 60, ARENA[3] - 38, str(spec["note"])[:70], "Inter-Bold", 18, mix(PANEL, MUTED, k), "ra")
+
+
+def _player(c: Canvas, p, col, k: float = 1.0, ghost: bool = False, label: Optional[str] = None,
+            label_above: bool = False, label_bg: bool = False):
+    if k <= 0:
+        return
+    x, y = p
+    if ghost:
+        for i in range(0, 18, 2):
+            c.d.arc(((x - 26) * S, (y - 26) * S, (x + 26) * S, (y + 26) * S), i * 20, i * 20 + 20,
+                    fill=mix(PANEL, col, k), width=4 * S)
+    else:
+        c.circle(x, y, 30, fill=mix(PANEL, col, 0.35 * k))
+        c.circle(x, y, 22, fill=mix(PANEL, col, k))
+    if label:
+        ly = y - 72 if label_above else y + 40
+        if label_bg:
+            w = c.tw(label, "Inter-Black", 24)
+            c.rrect(x - w / 2 - 10, ly - 4, x + w / 2 + 10, ly + 32, 8, fill=mix(PANEL, BG, k))
+        c.text(x, ly, label, "Inter-Black", 24, mix(PANEL, col if ghost else WHITE, k), "ma")
+
+
+def _pill(c: Canvas, x, y, text: str, col, k: float = 1.0):
+    w = c.tw(text, "Inter-Black", 24)
+    c.rrect(x, y, x + w + 40, y + 40, 10, fill=mix(PANEL, BG, k))
+    c.text(x + 20 + w / 2, y + 6, text, "Inter-Black", 24, mix(BG, col, k), "ma")
+
+
+def _pill_c(c: Canvas, cx, y, text: str, col, k: float = 1.0):
+    _pill(c, cx - c.tw(text, "Inter-Black", 24) / 2 - 20, y, text, col, k)
+
+
+def _clock(c: Canvas, ms: float):
+    c.text(ARENA[2] - 60, ARENA[1] + 22, f"+{_ms(ms)} ms", "Inter-Black", 44, WHITE, "ra")
+
+
+def _move(a, b, k):
+    return (a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k)
+
+
+def _arena_peek(c: Canvas, spec: dict, t: float, tm: dict):
+    """Peeker's advantage: the enemy steps past a corner; his screen shows
+    you at once, yours shows him delay_ms later."""
+    walls = [(160, 400, 900, 470), (1420, 210, 1510, 290), (330, 540, 420, 620), (1560, 520, 1640, 600)]
+    you, e0, e1 = (1180, 590), (560, 320), (1040, 320)
+    delay = float(spec.get("delay_ms") or 100)
+    slow = _nice_slow(1.1 / (delay / 1000))
+    lag = delay / 1000 * slow
+    go, move = tm["go"], 1.4
+    fade = _a(t, tm["t0"], 0.6)
+    enemy_at = lambda tt: _move(e0, e1, ease_in_out(clamp((tt - go) / move)))  # noqa: E731
+    t_vis = next((go + i / 50 for i in range(int(move * 50) + 1)
+                  if not _blocked(you, enemy_at(go + i / 50), walls)), go + move)
+    t_you = t_vis + lag
+    game = max(0.0, (t - t_vis) / slow * 1000)
+    span = max(50.0, math.ceil(delay * 1.45 / 25) * 25)
+    _arena_tags(c, spec, slow, fade)
+    _arena_floor(c, walls, fade)
+    c.circle(walls[0][2], walls[0][1], 6, fill=mix(PANEL, YEL, 0.6 * fade))
+    e, g = enemy_at(t), enemy_at(t - lag)
+    if t >= t_vis:
+        k = ease_out(clamp((t - t_vis) / 0.35))
+        c.line([e, _move(e, you, k)], RED, 4)
+        if k >= 1:
+            m = _move(e, you, 0.3)
+            _pill(c, m[0] + 20, m[1] - 46, "He can see you", RED)
+    if t >= t_you:
+        k = ease_out(clamp((t - t_you) / 0.35))
+        b = _move(you, g, k)
+        c.dashed(you[0], you[1], b[0], b[1], BLUE, 4, 14)
+        if k >= 1:
+            m = _move(g, you, 0.72)
+            _pill(c, m[0] + 24, m[1] - 4, "You can see him", BLUE)
+    _player(c, you, BLUE, fade, label="YOU")
+    if t >= go and math.hypot(g[0] - e[0], g[1] - e[1]) > 3:
+        near = math.hypot(g[0] - e[0], g[1] - e[1]) < 260
+        _player(c, g, RED, 0.9 * clamp((t - go) / 0.3), ghost=True, label=None if near else "ON YOUR SCREEN", label_bg=True)
+    _player(c, e, RED, fade)
+    c.text(e[0], e[1] - 72, "ENEMY (REAL)" if t >= go + 0.2 else "ENEMY", "Inter-Black", 24, mix(PANEL, WHITE, fade), "ma")
+    # timeline
+    tx0, tx1, ty = 260, 1660, 790
+    c.line([(tx0, ty), (tx1, ty)], mix(BG, EDGE, fade), 3)
+    step = 25 if span <= 200 else 50 if span <= 400 else 100
+    for v in range(0, int(span) + 1, step):
+        x = tx0 + (tx1 - tx0) * v / span
+        c.line([(x, ty - 8), (x, ty + 8)], mix(BG, EDGE, fade), 2)
+        c.text(x, ty + 16, f"{v} ms", "Inter-Bold", 20, mix(BG, MUTED, fade), "ma")
+    if t >= t_vis:
+        gm = min(span, game)
+        px = tx0 + (tx1 - tx0) * gm / span
+        c.line([(tx0, ty), (px, ty)], WHITE, 5)
+        c.circle(px, ty, 9, fill=WHITE)
+        c.circle(tx0, ty, 12, fill=RED)
+        c.text(tx0, ty - 52, "He sees you", "Inter-Black", 24, RED, "ma")
+        _clock(c, gm)
+    xg = tx0 + (tx1 - tx0) * delay / span
+    if t >= t_you:
+        c.circle(xg, ty, 12, fill=BLUE)
+        c.text(xg, ty - 52, "You see him", "Inter-Black", 24, BLUE, "ma")
+        res = tm.get("result_at") if tm.get("result_at") and tm["result_at"] > t_you else t_you + 0.8
+        k = ease_out(clamp((t - res) / 0.6))
+        if k > 0:
+            c.rrect(tx0, ty - 22, tx0 + (xg - tx0) * k, ty - 16, 3, fill=YEL)
+            if k >= 1:
+                c.text((tx0 + xg) / 2, ty - 88, f"~{_ms(delay)} ms head start", "Inter-Black", 30, YEL, "ma")
+    _arena_note(c, spec, fade)
+
+
+def _arena_ticks(c: Canvas, spec: dict, t: float, tm: dict):
+    """What the server knows: the enemy runs smoothly, but the server only
+    takes a snapshot every 1000 / tick_rate ms -- one corridor per rate."""
+    rates = [float(r) for r in (spec.get("tick_rates") or [64])[:2] if float(r) > 0] or [64.0]
+    gap = 1000 / min(rates)
+    slow = _nice_slow(0.45 / (gap / 1000))
+    go, run = tm["go"], 3.6
+    fade = _a(t, tm["t0"], 0.6)
+    lanes = [300, 540] if len(rates) == 2 else [420]
+    _arena_tags(c, spec, slow, fade)
+    _arena_floor(c, [], fade)
+    xa, xb = 470, 1650
+    game = max(0.0, (t - go) / slow * 1000)
+    total = run / slow * 1000
+    for rate, y in zip(rates, lanes):
+        every = 1000 / rate
+        c.rrect(200, y - 70, 1720, y + 70, 16, outline=mix(PANEL, EDGE, fade), width=2)
+        c.text(240, y - 30, f"{_ms(rate)} TICK", "Inter-Black", 30, mix(PANEL, WHITE, fade), "la")
+        c.text(240, y + 8, f"every {_ms(every)} ms", "Inter-Bold", 22, mix(PANEL, MUTED, fade), "la")
+        pos = lambda ms: xa + (xb - xa) * clamp(ms / total)  # noqa: E731
+        if t < go:
+            _player(c, (xa, y), RED, fade)
+            continue
+        snap = math.floor(min(game, total) / every) * every
+        n = int(snap // every)
+        for i in range(n + 1):  # every snapshot the server took, left behind as a dot
+            c.circle(pos(i * every), y, 6, fill=mix(PANEL, YEL, 0.75))
+        _player(c, (pos(min(game, total)), y), RED, 0.9, ghost=True)
+        _player(c, (pos(snap), y), RED)
+        if game >= total:
+            c.text(xb - 30, y - 62, f"{n + 1} snapshots", "Inter-Black", 24, YEL, "ra")
+    lx = 980
+    c.circle(lx, ARENA[3] - 28, 8, fill=YEL)
+    c.text(lx + 16, ARENA[3] - 40, "a snapshot", "Inter-Bold", 20, mix(PANEL, MUTED, fade), "la")
+    c.circle(lx + 210, ARENA[3] - 28, 12, fill=mix(PANEL, RED, fade))
+    c.text(lx + 230, ARENA[3] - 40, "what the server knows", "Inter-Bold", 20, mix(PANEL, MUTED, fade), "la")
+    c.d.arc(((lx + 480 - 12) * S, (ARENA[3] - 40) * S, (lx + 480 + 12) * S, (ARENA[3] - 16) * S), 0, 360, fill=RED, width=3 * S)
+    c.text(lx + 502, ARENA[3] - 40, "where he really is", "Inter-Bold", 20, mix(PANEL, MUTED, fade), "la")
+    if t >= go:
+        _clock(c, min(game, total))
+    _arena_note(c, spec, fade)
+
+
+def _arena_rewind(c: Canvas, spec: dict, t: float, tm: dict):
+    """Lag compensation: you shoot where your screen shows him; he has
+    already reached cover on his. The server rewinds by delay_ms, finds
+    the hit, and he dies behind the wall."""
+    walls = [(1180, 380, 1600, 450), (300, 220, 390, 300), (1580, 560, 1660, 640)]
+    you, e0, e1 = (820, 610), (760, 300), (1460, 300)
+    delay = float(spec.get("delay_ms") or 50)
+    slow = _nice_slow(1.0 / (delay / 1000))
+    lag = delay / 1000 * slow
+    go, move = tm["go"], 3.0
+    fade = _a(t, tm["t0"], 0.6)
+    enemy_at = lambda tt: _move(e0, e1, ease_in_out(clamp((tt - go) / move)))  # noqa: E731
+    t_hide = next((go + i / 50 for i in range(int(move * 50) + 1)
+                   if _blocked(you, enemy_at(go + i / 50), walls)), go + move)
+    t_shot = t_hide + min(0.3, lag * 0.4)
+    t_rew = t_shot + 0.9
+    t_hit = t_rew + 0.9
+    _arena_tags(c, spec, slow, fade)
+    _arena_floor(c, walls, fade)
+    e = enemy_at(t)
+    g = enemy_at(min(t, t_shot) - lag)  # your screen; frozen at the moment you fire
+    shot_at = enemy_at(t_shot - lag)
+    if t >= t_shot:
+        k = ease_out(clamp((t - t_shot) / 0.15))
+        b = _move(you, shot_at, k)
+        c.line([you, b], YEL, 5)
+        if t < t_rew:
+            _pill_c(c, shot_at[0], shot_at[1] + 48, "You shoot here", YEL)
+    _player(c, you, BLUE, fade, label="YOU")
+    if t >= go and (t < t_rew or t >= t_hit):
+        _player(c, g, RED, 0.9 * clamp((t - go) / 0.3), ghost=True,
+                label="ON YOUR SCREEN" if t < t_shot else None, label_bg=True)
+    _player(c, e, RED, fade)
+    c.text(e[0], e[1] - 72, "ENEMY (REAL)" if t >= go + 0.2 else "ENEMY", "Inter-Black", 24, mix(PANEL, WHITE, fade), "ma")
+    if t_shot <= t and _blocked(you, e, walls):
+        _pill_c(c, min(e[0], 1720 - c.tw("Safe behind the wall on his screen", "Inter-Black", 24) / 2 - 20), e[1] + 168,
+                "Safe behind the wall on his screen", MUTED)
+    if t >= t_rew:
+        k = ease_in_out(clamp((t - t_rew) / 0.8))
+        r = _move(e, shot_at, k)  # the server's rewound copy of him
+        if t < t_hit:
+            _player(c, r, YEL, 0.9, ghost=True)
+        _pill_c(c, shot_at[0], shot_at[1] + 48, f"Server rewinds {_ms(delay)} ms", YEL)
+    if t >= t_hit:
+        k = back(clamp((t - t_hit) / 0.4))
+        x, y = shot_at
+        for dx, dy in ((-1, -1), (1, 1), (-1, 1), (1, -1)):
+            c.line([(x + dx * 10, y + dy * 10), (x + dx * 34 * k, y + dy * 34 * k)], YEL, 6)
+        c.text(x, y - 96, "HIT", "Inter-Black", 44, YEL, "ma")
+    if t >= go:
+        c.text(ARENA[2] - 60, ARENA[1] + 22, f"your ping ~{_ms(delay)} ms", "Inter-Black", 30, WHITE, "ra")
+    _arena_note(c, spec, fade)
+
+
+def draw_arena(c: Canvas, spec: dict, t: float, tm: dict):
+    {"ticks": _arena_ticks, "rewind": _arena_rewind}.get(spec.get("mode"), _arena_peek)(c, spec, t, tm)
 
 
 def _fmt_value(v: float) -> str:
@@ -552,7 +822,7 @@ def draw_words(c: Canvas, spec: dict, t: float, tm: dict):
 
 DRAW = {"flow": draw_flow, "network": draw_network, "race": draw_race, "bars": draw_bars, "bignum": draw_bignum,
         "grid": draw_grid, "layers": draw_layers, "neural": draw_neural, "compare": draw_compare, "quiz": draw_quiz,
-        "words": draw_words}
+        "words": draw_words, "arena": draw_arena}
 
 
 def frame(visual: dict, t: float):
