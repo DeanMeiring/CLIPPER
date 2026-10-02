@@ -184,6 +184,17 @@ merge it yourself; merging stays Dean's call per the rule above.
   and refuses with the changed scene numbers (`changed_scenes`) rather
   than turning into a long render. Dean didn't want a music change to
   re-render the whole video.
+- **Sound sliders (Oct 2026):** Dean asked to adjust his voice and the
+  music loudness. Narrated takes used to go in raw (whatever the mic gave),
+  so an AI-voice take and his own could differ a lot. Now the final mix
+  levels each narrated scene's take to `VOICE_TARGET` (-16 LUFS, what the
+  clip moments are loudnormed to) with a plain gain over that scene's time
+  range (measured once with ebur128, cached as `takes/<file>.loudness.json`;
+  capped so peaks stay under -1 dBFS). The page has two sliders: voice
+  `project["voice_db"]` (-8..+8 dB from levelled) and music
+  `project["music_db"]` (-9..+9 dB around the old "normal" -34 LUFS; the old
+  `music_level` maps to -3/0/+3). `PUT .../mix`; "🔊 Update sound only"
+  is the old music-only re-mix, so no scene renders again.
 - **AI voice (Sept 2026):** Dean narrates with his own voice (never his
   face). `clipper/voice_clone.py` clones it with Kyutai Pocket TTS (100M
   params, CPU, ~0.6 GB RAM, CC-BY-4.0 weights) to patch lines he'd rather
@@ -242,8 +253,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   branch with `_is_explainer`.
 - `clipper/explainer.py`:
   - Research: Wikipedia top articles, pasted links, notes.
-  - The script prompt: narrate scenes, each with 1-3 `visuals`, plus 2-3
-    "pause and guess" quiz scenes.
+  - The script prompt: narrate scenes, each with 1-4 `visuals`, plus 2-3
+    "pause and guess" quiz scenes. Dean found the first episodes had too
+    few scenes (one diagram held 20-40 s), so scenes are now 20-60 words
+    and the diagram changes about every 8-10 s (the prompt asks for
+    ~words/40 scenes and ~words/22 diagrams).
   - `normalize_scenes` / `normalize_visual`: a number on screen must be in
     the research, or be simple maths (`"math": "1000 / 128"`) on numbers
     that are, plus unit constants (60, 1000...). Unsourced race timings

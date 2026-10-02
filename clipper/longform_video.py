@@ -394,6 +394,63 @@ def preview_still(project_dir: Path, scene: dict, library: dict, brand: str, out
 # sits around -12 LUFS, so it came out near -28. "normal" is now about 6 dB
 # softer than that.
 MUSIC_LEVELS = {"quiet": -37.0, "normal": -34.0, "loud": -31.0}
+MUSIC_DB_RANGE = (-9.0, 9.0)  # the page's music slider, in dB around "normal"
+
+# Dean's narration is levelled take by take to the loudness the clip moments
+# are levelled to (loudnorm I=-16), so a quiet take, a loud one and an AI
+# voice take all sit at the same volume. voice_db (the page's voice slider)
+# moves all of them up or down from there. It's done in the final mix, so a
+# change re-mixes in about a minute and no scene is rendered again.
+VOICE_TARGET = -16.0
+VOICE_DB_RANGE = (-8.0, 8.0)
+
+
+def music_db(music_level: str = "normal", db: Optional[float] = None) -> float:
+    """The music bed's offset from "normal": the slider's value, or the old
+    Quieter / Normal / Louder buttons'."""
+    if db is not None:
+        return max(MUSIC_DB_RANGE[0], min(MUSIC_DB_RANGE[1], float(db)))
+    return MUSIC_LEVELS.get(music_level, MUSIC_LEVELS["normal"]) - MUSIC_LEVELS["normal"]
+
+
+def take_loudness(path: Path) -> Optional[Tuple[float, float]]:
+    """(integrated loudness in LUFS, peak in dBFS) of a take, measured once
+    and cached next to it."""
+    cache = path.with_name(path.name + ".loudness.json")
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    try:
+        c = json.loads(cache.read_text(encoding="utf-8"))
+        if c.get("size") == st.st_size and c.get("mtime") == st.st_mtime:
+            return (c["i"], c["peak"]) if c.get("i") is not None else None
+    except (OSError, ValueError, KeyError):
+        pass
+    res = subprocess.run([_ffmpeg(), "-hide_banner", "-nostats", "-i", str(path), "-af", "ebur128=peak=sample",
+                          "-f", "null", "-"], capture_output=True, text=True)
+    summary = res.stderr.rsplit("Summary:", 1)[-1]
+    mi = re.search(r"I:\s*(-?[\d.]+|-inf) LUFS", summary)
+    mp = re.search(r"Peak:\s*(-?[\d.]+|-inf) dBFS", summary)
+    val = None
+    if mi and mp and "inf" not in mi.group(1):
+        val = (float(mi.group(1)), float(mp.group(1)) if "inf" not in mp.group(1) else -60.0)
+    try:
+        cache.write_text(json.dumps({"size": st.st_size, "mtime": st.st_mtime,
+                                     "i": val[0] if val else None, "peak": val[1] if val else None}), encoding="utf-8")
+    except OSError:
+        pass
+    return val
+
+
+def voice_gain(loudness: Optional[Tuple[float, float]], voice_db: float = 0.0) -> float:
+    """dB to apply to one take: up or down to VOICE_TARGET plus the slider,
+    never so far up that its peaks clip."""
+    if loudness is None:
+        return 0.0
+    lufs, peak = loudness
+    g = max(-12.0, min(15.0, VOICE_TARGET - lufs)) + max(VOICE_DB_RANGE[0], min(VOICE_DB_RANGE[1], voice_db))
+    return round(min(g, -1.0 - peak), 2)
 
 
 def _scene_plan(scenes: List[dict], library: dict, take_durations: List[Optional[float]]) -> List[Tuple[float, int, Optional[Tuple[str, float]]]]:
@@ -424,6 +481,7 @@ def render_documentary(
     project_dir: Path, scenes: List[dict], library: dict, take_durations: List[Optional[float]], brand: str,
     music: Optional[Path], on_progress: Callable[[float, str], None] = lambda p, m: None,
     music_level: str = "normal", music_only: bool = False, end_line: Optional[str] = None,
+    voice_db: float = 0.0, music_db_value: Optional[float] = None,
 ) -> Tuple[Path, List[float], float]:
     """Render every scene, add the end card, join, and lay optional music
     under it. Returns (final video, each scene's start time, total length).
@@ -463,17 +521,33 @@ def render_documentary(
 
     final = project_dir / "final.mp4"
     tmp = project_dir / ".final.partial.mp4"
+    # The voice: each narrated scene's stretch of the soundtrack gets its
+    # take's gain (clip moments and chapter cards are left as they are).
+    on_progress(0.94, "Levelling your voice...")
+    bounds = starts + [t]
+    voice = []
+    for i, sc in enumerate(scenes):
+        take = (sc.get("take") or {}).get("file") if sc.get("kind", "narrate") == "narrate" else None
+        if take:
+            g = voice_gain(take_loudness(project_dir / "takes" / take), voice_db)
+            if abs(g) >= 0.1:
+                voice.append(f"volume={g:.2f}dB:enable='between(t,{bounds[i]:.3f},{bounds[i + 1]:.3f})'")
+    main = "[0:a]" + (",".join(voice) if voice else "anull")
     if music is not None and music.exists():
         on_progress(0.96, "Mixing in the music...")
-        gain = MUSIC_LEVELS.get(music_level, MUSIC_LEVELS["normal"]) + 20.0
+        gain = MUSIC_LEVELS["normal"] + music_db(music_level, music_db_value) + 20.0
         fc = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},"
               f"loudnorm=I=-20:TP=-2:LRA=11,aresample=48000,volume={gain:.1f}dB,"
               f"afade=t=in:d=2,afade=t=out:st={max(0.0, total - 4):.3f}:d=4[bed];"
-              f"[0:a]asplit=2[main][key];[bed][key]sidechaincompress=threshold=0.02:ratio=10:attack=30:release=500[ducked];"
+              f"{main},asplit=2[main][key];[bed][key]sidechaincompress=threshold=0.02:ratio=10:attack=30:release=500[ducked];"
               f"[main][ducked]amix=inputs=2:duration=first:normalize=0[a]")
         _run([_ffmpeg(), "-y", "-v", "error", "-i", str(joined), "-stream_loop", "-1", "-i", str(music),
               "-filter_complex", fc, "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
               "-ac", "2", "-t", f"{total:.3f}", "-movflags", "+faststart", str(tmp)])
+    elif voice:
+        _run([_ffmpeg(), "-y", "-v", "error", "-i", str(joined), "-filter_complex", f"{main}[a]",
+              "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+              "-movflags", "+faststart", str(tmp)])
     else:
         _run([_ffmpeg(), "-y", "-v", "error", "-i", str(joined), "-c", "copy", "-movflags", "+faststart", str(tmp)])
     tmp.replace(final)

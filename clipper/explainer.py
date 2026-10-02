@@ -16,7 +16,7 @@ This module does the research and the script:
 
   build_dossier     Wikipedia (the topic's top articles), links Dean pastes,
                     and his notes
-  write_script      Claude writes the episode: narrated scenes, each with 1-3
+  write_script      Claude writes the episode: narrated scenes, each with 1-4
                     diagrams from a fixed set of templates, "pause and guess"
                     quiz scenes, and chapter cards
   normalize_scenes  keeps only what's true and drawable: a number on screen
@@ -157,7 +157,7 @@ DIAGRAMS = """DIAGRAM TYPES (every field optional unless marked *):
 - {"type": "words", "text"*, "highlight"}   one short line in big type. Use rarely.
 "at" (on a visual or an element) is a short phrase, copied EXACTLY from that
 scene's narration, at which it appears. The first visual of a scene starts
-with the scene; a second or third needs "at". "title" is a 1-4 word label
+with the scene; every visual after it needs "at". "title" is a 1-4 word label
 for the top corner. Emoji: one plain emoji like 🎮 🖥️ 💻 📺 🔫 👀 🧑 🔒 ⚡ 🧠 🤖 🛡️ 🏆 🎯 🚀."""
 
 
@@ -171,6 +171,7 @@ def _script_prompt(dossier: dict, channel: str, minutes: int = 8) -> str:
         srcs.append(f"THE CREATOR'S OWN NOTES:\n{dossier['notes']}")
     topic = dossier.get("topic") or ""
     words = minutes * 150
+    scenes, diagrams = words // 40, words // 22
     return f"""You are writing an episode of "{channel}", a YouTube channel that explains
 the tech behind gaming, streaming and the internet to gamers. The creator
 narrates in their own voice; the picture is animated diagrams drawn from
@@ -182,8 +183,9 @@ RESEARCH (use ONLY facts found here):
 {chr(10).join(srcs) if srcs else "(none)"}
 
 Write the episode as a list of scenes of two kinds:
-- "narrate": the creator speaks. "narration" (25 to 110 words) and
-  "visuals": 1 to 3 diagrams that show what is being said, at that moment.
+- "narrate": the creator speaks. "narration" (20 to 60 words, about 8 to
+  25 seconds) and "visuals": 1 to 4 diagrams that show what is being said,
+  at that moment -- a new one about every 20 to 25 words.
 - "title": a chapter card, "title" under 32 characters.
 
 {DIAGRAMS}
@@ -199,12 +201,15 @@ Structure (this is what keeps viewers watching):
    narration asks the question and lists the options ("Pause and guess:
    ... A, B or C?"), with a "quiz" visual; the next scene gives the answer.
    Put the first one in the first 2 minutes.
-4. Change the picture often: every narrate scene gets its own diagrams,
-   and the same type should not appear in more than two scenes in a row.
+4. Change the picture often: the diagram on screen should change about
+   every 8 to 10 seconds, so keep scenes short and give the longer ones 2
+   to 4 diagrams. The same type should not appear in more than two scenes
+   in a row.
 5. End with a "narrate" scene that sums it up in one line, asks viewers a
    question to answer in the comments, and says what the next video is.
 
-Total narration: about {words} words. Rules:
+Total narration: about {words} words, in about {scenes} narrate scenes with
+about {diagrams} diagrams in all. Rules:
 - Facts ONLY from the research. Numbers on screen (bars, bignum, grid,
   tick_rate, race ms) must appear in the research, or be simple maths on
   numbers that do (then give "math"). If timings in a "race" are an
@@ -450,7 +455,7 @@ def normalize_scenes(items, dossier: dict) -> List[dict]:
             text = " ".join(str(it.get("narration") or "").split())
             if not text:
                 continue
-            vis = [x for x in (normalize_visual(v, text, blob, nums) for v in (it.get("visuals") or [])[:3]) if x]
+            vis = [x for x in (normalize_visual(v, text, blob, nums) for v in (it.get("visuals") or [])[:4]) if x]
             if not vis:
                 vis = [{"type": "words", "text": " ".join(text.split()[:7])}]
             vis = [vis[0]] + [x for x in vis[1:] if x.get("at")]  # a later visual needs its cue

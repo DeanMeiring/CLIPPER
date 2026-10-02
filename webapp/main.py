@@ -3766,7 +3766,28 @@ def longform_music_level(pid: str, req: LongformMusicLevelRequest) -> dict:
     if req.level not in longform_video.MUSIC_LEVELS:
         raise HTTPException(400, "level must be quiet, normal or loud")
     _longform_project(pid)
-    return _longform_store.update(pid, lambda pr: pr.update(music_level=req.level))
+    return _longform_store.update(pid, lambda pr: pr.update(
+        music_level=req.level, music_db=longform_video.music_db(req.level)))
+
+
+class LongformMixRequest(BaseModel):
+    voice_db: Optional[float] = None
+    music_db: Optional[float] = None
+
+
+@protected.put("/api/longform/projects/{pid}/mix")
+def longform_mix(pid: str, req: LongformMixRequest) -> dict:
+    """The voice and music sliders, in dB. Your voice is first levelled take
+    by take (longform_video.VOICE_TARGET); voice_db moves it from there.
+    Only the final mix changes, so "Update sound only" takes a minute."""
+    _longform_project(pid)
+    changes = {}
+    if req.voice_db is not None:
+        lo, hi = longform_video.VOICE_DB_RANGE
+        changes["voice_db"] = round(max(lo, min(hi, float(req.voice_db))), 1)
+    if req.music_db is not None:
+        changes["music_db"] = round(longform_video.music_db(db=req.music_db), 1)
+    return _longform_store.update(pid, lambda pr: pr.update(changes))
 
 
 @protected.delete("/api/longform/projects/{pid}/music")
@@ -3842,6 +3863,7 @@ def _longform_render(pid: str, music_only: bool = False) -> None:
             d, scenes, _longform_library(project),
             _longform_takes(scenes), _longform_brand(project), d / music if music else None, on_progress=progress,
             music_level=project.get("music_level") or "normal", music_only=music_only,
+            voice_db=float(project.get("voice_db") or 0.0), music_db_value=project.get("music_db"),
             end_line=explainer.END_LINE if _is_explainer(project) else None,
         )
         _longform_store.update(pid, lambda pr: pr.update(render={
@@ -3862,7 +3884,7 @@ def _longform_render(pid: str, music_only: bool = False) -> None:
 @protected.post("/api/longform/projects/{pid}/render")
 def longform_start_render(pid: str, music_only: bool = False) -> dict:
     """Render the episode. music_only: only redo the final mix (after a
-    music or music-volume change) -- about a minute, never the scenes; it
+    music change or a voice / music volume change) -- about a minute, never the scenes; it
     refuses if anything else changed, so it can't turn into a long render."""
     project = _longform_project(pid)
     scenes = project.get("scenes") or []
@@ -3883,7 +3905,7 @@ def longform_start_render(pid: str, music_only: bool = False) -> dict:
                                      "needs a full “Render again” (only those scenes are redone).")
     _longform_claim(pid, "render")
     _longform_store.update(pid, lambda pr: pr.update(render={
-        "status": "rendering", "progress": 0.0, "message": "Updating the music..." if music_only else "Starting..."}))
+        "status": "rendering", "progress": 0.0, "message": "Updating the sound..." if music_only else "Starting..."}))
     threading.Thread(target=_longform_render, args=(pid, music_only), daemon=True).start()
     return {"ok": True}
 
@@ -7775,9 +7797,12 @@ _LONGFORM_TEMPLATE = """<!doctype html>
   .music-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .music-row input { flex: 1; min-width: 200px; }
   .music-row button { margin-top: 6px; }
-  .music-level { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
-  .music-level button { margin-top: 0; padding: 7px 14px; font-size: 0.85rem; }
-  .music-level button.on { outline: 2px solid var(--accent); color: var(--text); }
+  .mix { margin-top: 14px; }
+  .mix-row { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+  .mix-row .mix-label { width: 110px; flex: none; font-size: 0.9rem; white-space: nowrap; }
+  .mix-row input[type=range] { flex: 1; min-width: 0; margin: 0; accent-color: var(--accent); }
+  .mix-row .mix-val { width: 56px; flex: none; text-align: right; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .mix button { margin-top: 10px; padding: 7px 14px; font-size: 0.85rem; }
   .bar { height: 10px; border-radius: 99px; background: var(--track); margin-top: 14px; overflow: hidden; }
   .bar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.4s; }
   #final-video { width: 100%; border-radius: 12px; margin-top: 12px; background: #000; }
@@ -7975,12 +8000,12 @@ _LONGFORM_TEMPLATE = """<!doctype html>
         <button id="music-upload" type="button" class="secondary">Upload music</button>
         <button id="music-remove" type="button" class="secondary" style="display:none">Remove</button>
       </div>
-      <div class="music-level" id="music-level" style="display:none">
-        <span class="hint" style="margin:0">Music volume:</span>
-        <button type="button" class="secondary" data-level="quiet">Quieter</button>
-        <button type="button" class="secondary" data-level="normal">Normal</button>
-        <button type="button" class="secondary" data-level="loud">Louder</button>
-        <button type="button" id="music-only" style="display:none">🎵 Update music only (about a minute)</button>
+      <div class="mix" id="mix">
+        <label style="margin-top:0">Sound</label>
+        <div class="hint">Every take of your voice (the AI voice too) is levelled to the same loudness. Move it up or down from there.</div>
+        <div class="mix-row"><span class="mix-label">🎙 Your voice</span><input type="range" id="voice-db" min="-8" max="8" step="1" value="0"><span class="mix-val" id="voice-db-val">0 dB</span></div>
+        <div class="mix-row" id="music-db-row" style="display:none"><span class="mix-label">🎵 Music</span><input type="range" id="music-db" min="-9" max="9" step="1" value="0"><span class="mix-val" id="music-db-val">0 dB</span></div>
+        <button type="button" id="music-only" style="display:none">🔊 Update sound only (about a minute)</button>
       </div>
       <div class="hint" id="music-level-hint"></div>
       <div class="hint" id="render-hint" style="margin-top:14px"></div>
@@ -8859,10 +8884,11 @@ function renderRender() {
   $('music-current').style.display = p.music ? 'block' : 'none';
   $('music-current').textContent = p.music ? `🎵 ${p.music.name}` : '';
   $('music-remove').style.display = p.music ? 'inline-block' : 'none';
-  $('music-level').style.display = p.music ? 'flex' : 'none';
-  $('music-level').querySelectorAll('button[data-level]').forEach(b => {
-    b.classList.toggle('on', b.dataset.level === (p.music_level || 'normal'));
-    b.disabled = rendering;
+  $('music-db-row').style.display = p.music ? 'flex' : 'none';
+  [['voice-db', p.voice_db || 0], ['music-db', musicDb(p)]].forEach(([id, v]) => {
+    if (document.activeElement !== $(id)) $(id).value = v;
+    $(id + '-val').textContent = fmtDb($(id).value);
+    $(id).disabled = rendering;
   });
   $('music-only').style.display = r.status === 'done' ? 'inline-block' : 'none';
   $('music-only').disabled = rendering;
@@ -8926,14 +8952,21 @@ $('music-upload').addEventListener('click', async () => {
   try { project = await api(`/api/longform/projects/${project.id}/music?name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'Content-Type': f.type || 'audio/mpeg' }, body: f }); $('music-file').value = ''; render(); }
   catch (e) { alert(e.message); } finally { $('music-upload').disabled = false; }
 });
-$('music-level').querySelectorAll('button[data-level]').forEach(b => b.addEventListener('click', async () => {
-  try {
-    project = await api(`/api/longform/projects/${project.id}/music-level`, jsonOpts('PUT', { level: b.dataset.level }));
-    render();
-    $('music-level-hint').textContent = (project.render || {}).status === 'done'
-      ? 'Press “🎵 Update music only” to hear it. Your scenes are kept; only the music is redone.' : '';
-  } catch (e) { alert(e.message); }
-}));
+function musicDb(p) { return p.music_db != null ? p.music_db : ({ quiet: -3, loud: 3 }[p.music_level] || 0); }
+function fmtDb(v) { v = Number(v); return (v > 0 ? '+' : '') + v + ' dB'; }
+['voice-db', 'music-db'].forEach(id => {
+  $(id).addEventListener('input', () => { $(id + '-val').textContent = fmtDb($(id).value); });
+  $(id).addEventListener('change', async () => {
+    const body = id === 'voice-db' ? { voice_db: Number($(id).value) } : { music_db: Number($(id).value) };
+    try {
+      project = await api(`/api/longform/projects/${project.id}/mix`, jsonOpts('PUT', body));
+      $(id).blur();
+      render();
+      $('music-level-hint').textContent = (project.render || {}).status === 'done'
+        ? 'Press “🔊 Update sound only” to hear it. Your scenes are kept; only the sound is mixed again.' : 'Used when you render.';
+    } catch (e) { alert(e.message); }
+  });
+});
 $('music-only').addEventListener('click', async () => {
   try {
     await api(`/api/longform/projects/${project.id}/render?music_only=true`, { method: 'POST' });
