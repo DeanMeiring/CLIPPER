@@ -35,6 +35,7 @@ from clipper import documentary
 from clipper import longform
 from clipper import longform_video
 from clipper import voice_clone
+from clipper import clip_search
 from clipper import visual_sources
 from clipper import longform_lessons
 from clipper import longform_analytics
@@ -3127,6 +3128,10 @@ def _longform_project(pid: str) -> dict:
     if (project.get("visuals") or {}).get("status") == "planning" and not _longform_is_busy(pid, "visuals"):
         project = _longform_store.update(pid, lambda pr: pr.update(
             visuals={"status": "error", "error": "Interrupted by a restart -- click Plan visuals again."}))
+    if (project.get("clip_search") or {}).get("status") == "searching" and not _longform_is_busy(pid, "clips"):
+        project = _longform_store.update(pid, lambda pr: pr.update(clip_search={
+            **pr["clip_search"], "status": "error", "message": None,
+            "error": "Interrupted by a restart -- press Find clips again."}))
     if (project.get("ai_all") or {}).get("status") == "running" and not _longform_is_busy(pid, "ai_all"):
         project = _longform_store.update(pid, lambda pr: pr.update(ai_all={
             **pr["ai_all"], "status": "error", "current": None,
@@ -3152,6 +3157,12 @@ def _longform_research(pid: str) -> None:
             _longform_store.update(pid, lambda pr: pr.update(
                 status="research_ready", error=None, message=None,
                 sources={"pages": explainer.sources(dossier), "failed_links": dossier.get("failed_links") or []}))
+            # Look for streamer clips of it in the background, the first time.
+            if os.environ.get("TWITCH_CLIENT_ID") and not project.get("clip_search"):
+                try:
+                    _longform_start_clip_search(pid, [])
+                except HTTPException:
+                    pass  # one is already running
             return
         dossier = documentary.build_dossier(project["login"], project.get("notes") or "", project.get("links") or [], on_progress=say)
         (d / "dossier.json").write_text(json.dumps(dossier), encoding="utf-8")
@@ -3185,7 +3196,7 @@ def _longform_write(pid: str) -> None:
         d = _longform_store.path(pid)
         dossier = json.loads((d / "dossier.json").read_text(encoding="utf-8"))
         if _is_explainer(project):
-            scenes = explainer.write_script(dossier)
+            scenes = explainer.write_script(dossier, library=project.get("library") or [], project_dir=d)
         else:
             scenes = documentary.write_script(dossier, project["library"], d, _longform_brand(), _longform_lessons.texts())
         _longform_store.update(pid, lambda pr: pr.update(status="script_ready", error=None, message=None, scenes=scenes,
@@ -3394,6 +3405,97 @@ def longform_create(req: LongformCreateRequest) -> dict:
     return {"id": project["id"]}
 
 
+# ---- Streamer clips for Caught On Code (clipper/clip_search.py): real Twitch
+# moments of what an episode explains, played as "moment" scenes. Found by
+# topic in the background (also right after the first research), or pasted
+# as links. They join project["library"] like a documentary's clips, with
+# "use" (Dean's tick; starts as Claude's fits/not-fits check) and "what".
+
+def _clips_set(pid: str, **changes) -> dict:
+    return _longform_store.update(pid, lambda pr: pr.update(clip_search={**(pr.get("clip_search") or {}), **changes}))
+
+
+def _longform_clip_search(pid: str, links: List[str]) -> None:
+    say = lambda m: _clips_set(pid, message=m)  # noqa: E731
+    try:
+        project = _longform_store.load(pid)
+        d = _longform_store.path(pid)
+        lib = project.get("library") or []
+        have = {c.get("twitch_id") for c in lib}
+        pasted = []
+        if links:
+            say("Looking up your links...")
+            pasted = [dict(c, pasted=True) for c in clip_search.resolve_links(links) if c["twitch_id"] not in have]
+            have |= {c["twitch_id"] for c in pasted}
+        res = clip_search.find(project.get("topic") or project.get("title") or "", on_progress=say)
+        new = pasted + [c for c in res["picked"] if c["twitch_id"] not in have]
+        n0 = max([int(c["id"][1:]) for c in lib if str(c.get("id", ""))[1:].isdigit()] + [0])
+        for i, c in enumerate(new, start=n0 + 1):
+            c["id"] = f"C{i:02d}"
+        got = documentary.build_library(
+            new, d / "clips", on_progress=lambda i, n: say(f"Downloading and transcribing clip {min(i + 1, n)} of {n}..."))
+        if got:
+            say("Checking what happens in each clip...")
+        verdict = clip_search.check(project.get("topic") or "", got, d) if got else {}
+        for c in got:
+            v = verdict.get(c["id"], {})
+            c["what"] = v.get("what") or c.get("why") or ""
+            if v:
+                c["fits"] = bool(v.get("fits"))
+            c["use"] = bool(c.get("pasted")) or bool(v.get("fits"))
+        _longform_store.update(pid, lambda pr: pr.update(
+            library=(pr.get("library") or []) + got,
+            clip_search={"status": "done", "message": None, "error": None, "games": res["games"], "keywords": res["keywords"],
+                         "scanned": res["scanned"], "added": len(got), "finished_at": time.time()}))
+    except Exception as e:
+        print(f"[longform] clip search for {pid} failed: {e}", flush=True)
+        err = str(e)
+        try:
+            _clips_set(pid, status="error", message=None, error=err)
+        except Exception:
+            pass
+    finally:
+        _longform_release(pid, "clips")
+
+
+def _longform_start_clip_search(pid: str, links: List[str]) -> None:
+    _longform_claim(pid, "clips")
+    _clips_set(pid, status="searching", message="Starting...", error=None)
+    threading.Thread(target=_longform_clip_search, args=(pid, links), daemon=True).start()
+
+
+class ClipSearchRequest(BaseModel):
+    links: List[str] = []
+
+
+@protected.post("/api/longform/projects/{pid}/clip-search")
+def longform_clip_search(pid: str, req: ClipSearchRequest) -> dict:
+    project = _longform_project(pid)
+    if not _is_explainer(project):
+        raise HTTPException(409, "streamer clip search is for Caught On Code episodes")
+    if not os.environ.get("TWITCH_CLIENT_ID"):
+        raise HTTPException(409, "Twitch isn't connected (TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET aren't set on Railway).")
+    _longform_start_clip_search(pid, [str(x) for x in req.links if str(x).strip()][:20])
+    return _longform_store.load(pid)
+
+
+class ClipUseRequest(BaseModel):
+    use: bool
+
+
+@protected.put("/api/longform/projects/{pid}/library/{clip_id}")
+def longform_clip_use(pid: str, clip_id: str, req: ClipUseRequest) -> dict:
+    """Tick or untick a streamer clip for the script."""
+    def apply(pr: dict) -> None:
+        for c in pr.get("library") or []:
+            if c.get("id") == clip_id:
+                c["use"] = req.use
+                return
+        raise HTTPException(404, "no such clip")
+    _longform_project(pid)
+    return _longform_store.update(pid, apply)
+
+
 class ExplainerCreateRequest(BaseModel):
     topic: str
     notes: str = ""
@@ -3470,7 +3572,7 @@ def longform_save_scenes(pid: str, req: LongformScenesRequest) -> dict:
             dossier = json.loads((_longform_store.path(pid) / "dossier.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             dossier = {"topic": project.get("topic") or ""}
-        new = explainer.normalize_scenes(req.scenes, dossier)
+        new = explainer.normalize_scenes(req.scenes, dossier, project.get("library") or [])
     else:
         new = documentary.normalize_scenes(req.scenes, project.get("library") or [])
     if not any(s["kind"] == "narrate" for s in new):
@@ -7891,6 +7993,19 @@ _LONGFORM_TEMPLATE = """<!doctype html>
   .take-result.ok { background: color-mix(in srgb, #059669 14%, var(--bg)); color: #047857; }
   .take-result.bad { background: color-mix(in srgb, #f59e0b 16%, var(--bg)); color: #92400e; }
   .take-result.wait { background: var(--bg); color: var(--muted); }
+  .clips-box { margin-top: 14px; }
+  .clip-row { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--border); }
+  .clip-row img { width: 128px; height: 72px; object-fit: cover; border-radius: 8px; flex: none; background: var(--bg); }
+  .clip-row .ct { font-weight: 600; font-size: 0.92rem; }
+  .clip-row .cm, .clip-row .cw { font-size: 0.82rem; color: var(--muted); margin-top: 2px; }
+  .clip-row .use { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 0.85rem;
+    text-transform: none; letter-spacing: normal; font-weight: 500; color: var(--text); }
+  .clip-row a.ct { color: var(--text); text-decoration: none; }
+  .clip-row a.ct:hover { text-decoration: underline; }
+  .clip-row .use input { width: auto; margin: 0; }
+  .clip-row button { margin-top: 6px; padding: 5px 12px; font-size: 0.8rem; }
+  .clip-row video { width: 100%; max-width: 420px; margin-top: 8px; border-radius: 8px; }
+  @media (max-width: 520px) { .clip-row img { width: 96px; height: 54px; } }
   .ai-all { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
   .ai-all button { margin-top: 0; }
   #ai-all-progress .bar { margin-top: 10px; }
@@ -8042,6 +8157,17 @@ _LONGFORM_TEMPLATE = """<!doctype html>
         <textarea id="p-links" rows="2"></textarea>
         <button id="rerun-research" type="button" class="secondary">🔎 Run research again</button>
       </details>
+      <div class="exp-only clips-box" id="clips-box">
+        <label>🎬 Streamer clips</label>
+        <div class="hint">Real Twitch moments of what this episode explains. Ticked clips go to Claude when it writes the script: it plays 1–4 of them, and the streamer is credited on screen and in the description. Change the ticks, then write the script (again).</div>
+        <div class="hint" id="clips-status"></div>
+        <div id="clips-list"></div>
+        <details id="clips-more">
+          <summary>Paste Twitch clip links or search again</summary>
+          <textarea id="clip-links" rows="2" placeholder="https://www.twitch.tv/name/clip/... (one per line)"></textarea>
+          <button id="clip-search-btn" type="button" class="secondary">🔎 Find clips</button>
+        </details>
+      </div>
       <button id="write-story" type="button">✍️ Write the story</button>
     </div>
 
@@ -8061,7 +8187,7 @@ _LONGFORM_TEMPLATE = """<!doctype html>
         <div id="scenes"></div>
         <div class="actions">
           <button type="button" class="secondary add-scene" data-kind="narrate">+ Narration</button>
-          <button type="button" class="secondary add-scene doc-only" data-kind="moment">+ Moment</button>
+          <button type="button" class="secondary add-scene" data-kind="moment" id="add-moment">+ Moment</button>
           <button type="button" class="secondary add-scene" data-kind="title">+ Chapter</button>
         </div>
         <div class="actions">
@@ -8357,7 +8483,8 @@ async function loadProject(id, resetIndex) {
   render();
   stopPolling();
   const busy = ['researching', 'writing'].includes(project.status) || (project.render || {}).status === 'rendering'
-    || (project.visuals || {}).status === 'planning' || (project.ai_all || {}).status === 'running';
+    || (project.visuals || {}).status === 'planning' || (project.ai_all || {}).status === 'running'
+    || (project.clip_search || {}).status === 'searching';
   if (busy) pollTimer = setInterval(() => loadProject(project.id, project.status !== 'script_ready'), 3000);
 }
 
@@ -8450,6 +8577,7 @@ function renderResearch() {
     add('Your links', `${(src.articles || []).length} read` + ((src.failed_links || []).length ? `, ${src.failed_links.length} couldn’t be opened` : ''));
     box.appendChild(facts);
   }
+  if (EXP) renderClips();
   $('p-notes').value = p.notes || '';
   $('p-links').value = (p.links || []).join(NL);
   const busy = ['researching', 'writing'].includes(p.status);
@@ -8459,6 +8587,53 @@ function renderResearch() {
   wb.textContent = EXP ? '✍️ Write the script' : '✍️ Write the story';
   wb.disabled = busy;
 }
+
+function renderClips() {
+  const p = project, cs = p.clip_search || {}, lib = p.library || [];
+  const games = (cs.games || []).join(', ');
+  $('clips-status').textContent = cs.status === 'searching'
+    ? '⏳ ' + (cs.message || 'Searching…') + ' You can write the script now, or wait for the clips (a few minutes).'
+    : cs.status === 'error' ? '⚠️ ' + (cs.error || 'The clip search failed.')
+    : cs.status === 'done' ? (cs.added ? `Found ${cs.added} clip${cs.added === 1 ? '' : 's'}` + (games ? ` in ${games} (read ${cs.scanned} clip titles).` : '.')
+      : games ? `No good matches among ${cs.scanned} ${games} clips. Paste a link below if you know one.`
+      : 'This topic doesn’t really happen on stream, so there was nothing to search. Paste a link below if you know a clip.')
+    : 'Not searched yet.';
+  const list = $('clips-list');
+  list.innerHTML = '';
+  lib.forEach(c => {
+    const row = el('div', 'clip-row');
+    if (c.thumbnail) { const im = el('img'); im.loading = 'lazy'; im.alt = ''; im.src = c.thumbnail; row.appendChild(im); }
+    const body = el('div');
+    const t = el('a', 'ct', c.title || c.id); t.href = c.url; t.target = '_blank'; t.rel = 'noopener'; body.appendChild(t);
+    body.appendChild(el('div', 'cm', [c.streamer, c.game, (c.views || 0).toLocaleString() + ' views', Math.round(c.duration || 0) + 's'].filter(Boolean).join(' · ')));
+    if (c.what) body.appendChild(el('div', 'cw', (c.pasted ? '📎 Your link · ' : c.fits === false ? '✗ Claude: doesn’t seem to show it · ' : c.fits ? '✓ Claude: shows it · ' : '') + c.what));
+    const use = el('label', 'use');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!c.use;
+    cb.addEventListener('change', async () => {
+      try { project = await api(`/api/longform/projects/${p.id}/library/${c.id}`, jsonOpts('PUT', { use: cb.checked })); renderClips(); }
+      catch (e) { alert(e.message); cb.checked = !cb.checked; }
+    });
+    use.appendChild(cb); use.appendChild(document.createTextNode('Use in the script'));
+    body.appendChild(use);
+    const play = el('button', 'secondary', '▶ Play'); play.type = 'button';
+    play.addEventListener('click', () => {
+      let v = body.querySelector('video');
+      if (!v) { v = el('video'); v.controls = true; body.appendChild(v); }
+      v.src = `/api/longform/projects/${p.id}/clips/${c.id}`; v.play();
+    });
+    body.appendChild(play);
+    row.appendChild(body);
+    list.appendChild(row);
+  });
+  $('clip-search-btn').disabled = cs.status === 'searching';
+}
+$('clip-search-btn').addEventListener('click', async () => {
+  try {
+    project = await api(`/api/longform/projects/${project.id}/clip-search`, jsonOpts('POST', { links: $('clip-links').value.split(NL).map(s => s.trim()).filter(Boolean) }));
+    $('clip-links').value = '';
+    loadProject(project.id, false);
+  } catch (e) { alert(e.message); }
+});
 
 $('rerun-research').addEventListener('click', async () => {
   if ((project.scenes || []).length && !confirm('Research again? You can then rewrite the story with the new research.')) return;
@@ -8493,9 +8668,11 @@ function renderStory() {
   const diagrams = scenes.reduce((n, s) => n + (s.visuals || []).length, 0);
   [[`~${Math.round(words / 150 + momentSecs / 60 + chapters * 3 / 60)} min`, ' long'], [String(words), ' words to read'],
    EXP ? [String(diagrams), ' diagrams'] : [String(scenes.filter(s => s.kind === 'moment').length), ' clip moments'],
-   EXP ? [String(quizzes), quizzes === 1 ? ' quiz' : ' quizzes'] : [String(chapters), ' chapters']].forEach(([b, t]) => {
+   EXP ? [String(quizzes), quizzes === 1 ? ' quiz' : ' quizzes'] : [String(chapters), ' chapters']]
+   .concat(EXP && momentSecs ? [[String(scenes.filter(s => s.kind === 'moment').length), ' streamer clips']] : []).forEach(([b, t]) => {
     const s = el('span'); s.appendChild(el('b', '', b)); s.appendChild(document.createTextNode(t)); $('story-meta').appendChild(s);
   });
+  $('add-moment').style.display = !EXP || (project.library || []).some(c => c.use) ? '' : 'none';
   const wrap = $('scenes');
   wrap.innerHTML = '';
   scenes.forEach((s, i) => wrap.appendChild(sceneRow(s, i)));
@@ -8595,6 +8772,7 @@ function sceneRow(s, i) {
         v.play();
       });
     }
+    if (EXP) { body.appendChild(el('div', 'hint', 'Credited on screen: ' + (s.caption || 'the streamer'))); row.appendChild(body); return row; }
     const cap = el('input'); cap.placeholder = 'Corner caption, e.g. March 2023 · 1.2M views'; cap.value = s.caption || ''; cap.dataset.f = 'caption';
     cap.addEventListener('input', markDirty); body.appendChild(cap);
   }
@@ -8703,7 +8881,7 @@ function removeScene(i) {
 document.querySelectorAll('.add-scene').forEach(b => b.addEventListener('click', () => {
   const list = collectScenes();
   list.forEach(s => { if (s.kind === 'narrate') s.take = (project.scenes.find(o => o.narration === s.narration) || {}).take; });
-  const first = (project.library || [])[0] || {};
+  const first = (EXP && (project.library || []).find(c => c.use)) || (project.library || [])[0] || {};
   const k = b.dataset.kind;
   list.push(k === 'title' ? { kind: 'title', title: 'New chapter' }
     : k === 'moment' ? { kind: 'moment', clip: first.id, start: 0, end: Math.min(10, first.duration || 10), caption: '' }

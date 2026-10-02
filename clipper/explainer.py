@@ -175,7 +175,33 @@ with the scene; every visual after it needs "at". "title" is a 1-4 word label
 for the top corner. Emoji: one plain emoji like 🎮 🖥️ 💻 📺 🔫 👀 🧑 🔒 ⚡ 🧠 🤖 🛡️ 🏆 🎯 🚀."""
 
 
-def _script_prompt(dossier: dict, channel: str, minutes: int = 8) -> str:
+def _clips_block(library: List[dict], project_dir) -> str:
+    """The streamer clips Dean kept, for the script prompt ("" when none,
+    so the prompt is then exactly what it was before clips existed)."""
+    from .documentary import _transcript_marked, clip_words
+
+    if not library:
+        return ""
+    lines = [f"{c['id']} | {c.get('streamer') or '?'} | {c.get('game') or '-'} | {c['duration']:.0f}s | \"{c['title']}\""
+             + (f" ({c['what']})" if c.get("what") else "")
+             + f"\n    transcript: {_transcript_marked(clip_words(project_dir, c['id']))}" for c in library]
+    return f"""
+
+STREAMER CLIPS YOU CAN USE (id | streamer | game | length | title, then what is said with [seconds] markers):
+{chr(10).join(lines)}
+
+Besides "narrate" and "title" scenes you may use a third kind:
+- "moment": one of these clips plays at full volume, no narration. Give
+  "clip", "start" and "end" in seconds from its transcript markers, 4 to
+  12 seconds, cut on full sentences. Use a clip only where it shows the
+  thing being explained happening to a real player: as the cold open
+  (before the first narration) or right before the part that explains it.
+  Follow every moment with narration that says what just happened and
+  why. Use 1 to 4 moments in the episode, each clip once. Quote a
+  streamer only from a transcript, and never mock them."""
+
+
+def _script_prompt(dossier: dict, channel: str, minutes: int = 8, clips: str = "") -> str:
     srcs = []
     for w in dossier.get("wikipedia") or []:
         srcs.append(f"WIKIPEDIA \"{w['title']}\":\n{w['text'][:15000]}")
@@ -202,7 +228,7 @@ Write the episode as a list of scenes of two kinds:
   at that moment -- a new one about every 20 to 25 words.
 - "title": a chapter card, "title" under 32 characters.
 
-{DIAGRAMS}
+{DIAGRAMS}{clips}
 
 Structure (this is what keeps viewers watching):
 1. Cold open (one "narrate" scene, under 60 words): a moment every gamer
@@ -481,7 +507,7 @@ def _fmt(v: float) -> str:
     return str(int(v)) if float(v).is_integer() else str(v)
 
 
-def normalize_scenes(items, dossier: dict) -> List[dict]:
+def normalize_scenes(items, dossier: dict, library: Optional[List[dict]] = None) -> List[dict]:
     from .documentary import _numbers
 
     blob = research_text(dossier)
@@ -504,14 +530,28 @@ def normalize_scenes(items, dossier: dict) -> List[dict]:
             title = _clean(it.get("title"), 40)
             if title:
                 scenes.append({"kind": "title", "title": title})
+        elif kind == "moment" and library:
+            from .clip_search import credit
+            from .documentary import normalize_scenes as clip_scenes
+
+            for m in clip_scenes([it], library):
+                # the streamer is always credited on screen
+                clip = next(c for c in library if c["id"] == m["clip"])
+                scenes.append({**m, "caption": credit(clip)[:48]})
     return scenes
 
 
-def write_script(dossier: dict, channel: str = CHANNEL, minutes: int = 8) -> List[dict]:
+def write_script(dossier: dict, channel: str = CHANNEL, minutes: int = 8, library: Optional[List[dict]] = None,
+                 project_dir=None) -> List[dict]:
     from .select_moments import DEFAULT_MODEL, _ask_claude_for_json
 
-    data = _ask_claude_for_json(_script_prompt(dossier, channel, minutes), None, DEFAULT_MODEL)
-    scenes = normalize_scenes(data, dossier)
+    from .documentary import tighten_moments
+
+    library = [c for c in library or [] if c.get("use")] if project_dir else []
+    data = _ask_claude_for_json(_script_prompt(dossier, channel, minutes, _clips_block(library, project_dir)), None, DEFAULT_MODEL)
+    scenes = normalize_scenes(data, dossier, library)
+    if library:
+        scenes = tighten_moments(scenes, project_dir)
     if not any(s["kind"] == "narrate" for s in scenes):
         raise RuntimeError("Claude didn't return a usable script -- try Write the script again.")
     return scenes
@@ -579,6 +619,12 @@ Respond with ONLY a JSON array holding one object:
     src = sources(dossier)
     if src:
         lines += ["", "Sources"] + [f"- {s['title']}: {s['url']}" for s in src]
+    lib = {c["id"]: c for c in project.get("library") or []}
+    used = [lib[cid] for cid in dict.fromkeys(sc.get("clip") for sc in scenes if sc.get("kind") == "moment") if cid in lib]
+    if used:
+        from .clip_search import credit
+
+        lines += ["", "Clips"] + [f"- {credit(c)}: {c['url']}" for c in used]
     lines += ["", "Diagrams made with code. Narrated by a human."]
     return {"titles": titles, "description": "\n".join(lines).strip(), "quiz": quiz_suggestions(scenes, starts)}
 

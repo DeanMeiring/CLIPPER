@@ -295,6 +295,22 @@ merge it yourself; merging stays Dean's call per the rule above.
   - `longform_video.render_scene` dispatches on `scene["visuals"]`.
     `_scene_key` only adds `visuals` when present, so documentary
     scene caches are unchanged (checked).
+- **Streamer clips (Oct 2026):** `clipper/clip_search.py` finds real
+  Twitch moments of what an episode explains, to play as `moment` scenes
+  (credited `twitch.tv/<name>` on screen and under "Clips" in the
+  description). Twitch can't search clips by keyword, so: Claude names the
+  games + title words, `game_clips` reads each game's top English clips
+  (all time + six 2-month windows), `shortlist` keeps matching titles,
+  Claude picks up to 8, `documentary.build_library` downloads and
+  transcribes them, and `check` (Claude, on the transcripts) sets
+  `fits` / `what`; `use` starts as `fits`. Pasted Twitch clip links are
+  always `use`d. It runs on its own after an episode's first research
+  (needs `TWITCH_CLIENT_ID`), or from "🔎 Find clips" (`POST
+  .../clip-search`); Dean ticks clips (`PUT .../library/{id}`), and only
+  ticked ones reach the script prompt (`explainer._clips_block`; with no
+  clips the prompt is byte-identical to before). Explainer chapter cards
+  stay plain (`_scene_plan`), and topics that never happen on stream (DLSS)
+  just find nothing.
 - Its own YouTube account, `EXTRA_YOUTUBE_ACCOUNTS["code"]` (token file
   `_youtube_oauth_token_code.json`). It's deliberately not in
   `CHANNEL_PROFILES`, which would add it to Home's channel switcher and
