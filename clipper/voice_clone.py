@@ -14,6 +14,14 @@ One sample of Dean reading SAMPLE_TEXT (30 seconds or so) is stored under
 the long-form folder and reused for every project. Generated lines go
 through the same misread check as a recorded take, so a garbled line is
 caught the same way a fluffed one is.
+
+Other people's voices work the same way, one folder each with its own
+sample and a voice.json (name, who agreed and when). Dean's friend lives
+far away, so a sample can also be an uploaded voice note, or recorded by
+the friend on a private link (see webapp /voice-sample/<token>).
+Every other voice needs the person's consent first -- the model's terms
+require it -- and videos using one are marked as altered or synthetic
+content on YouTube.
 """
 from __future__ import annotations
 
@@ -41,6 +49,11 @@ SAMPLE_TEXT = (
 
 MIN_SAMPLE_SECONDS = 10.0
 MAX_SAMPLE_SECONDS = 60.0
+# An uploaded file (a voice note sent from far away) can be longer: the
+# first KEEP_SECONDS of it, from where the talking starts, become the sample.
+UPLOAD_MAX_SECONDS = 600.0
+KEEP_SECONDS = 45.0
+MIN_SAMPLE_WORDS = 15
 
 SETUP_HINT = (
     "Your AI voice isn't switched on yet. One-time setup (free): make a Hugging Face account, "
@@ -88,6 +101,36 @@ def status(voice_dir: Path) -> dict:
         "setup_hint": None if configured else SETUP_HINT,
         "sample_text": SAMPLE_TEXT,
     }
+
+
+def read_meta(voice_dir: Path) -> dict:
+    """voice.json of another person's voice: {"name", "consent", "link"...}.
+    Empty for Dean's own voice, which has none."""
+    try:
+        return json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_meta(voice_dir: Path, meta: dict) -> None:
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    tmp = voice_dir / "voice.json.tmp"
+    tmp.write_text(json.dumps(meta), encoding="utf-8")
+    tmp.replace(voice_dir / "voice.json")
+
+
+def trim_sample(src: Path, dst: Path, seconds: float = KEEP_SECONDS) -> None:
+    """Mono 48 kHz wav of `src` from where the talking starts, at most
+    `seconds` long. A voice note often opens with a second of silence or
+    fumbling, which the model would copy as part of the voice."""
+    import subprocess
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(src),
+         "-af", "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.2",
+         "-t", f"{seconds:.1f}", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(dst)],
+        check=True, capture_output=True, timeout=120,
+    )
 
 
 def save_sample_meta(voice_dir: Path, duration: float, check: dict) -> dict:

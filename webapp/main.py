@@ -13,6 +13,7 @@ import queue
 import re
 import secrets
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -2027,6 +2028,7 @@ def upload_clip_to_youtube(job_id: str, filename: str, req: YouTubeUploadRequest
             description=description,
             privacy_status=req.privacy_status,
             is_short=not is_recap,
+            synthetic_media=bool(clip.get("synthetic_voice")),
         )
     except (youtube_upload.UploadError, ValueError) as e:
         raise HTTPException(502, str(e)) from e
@@ -3066,6 +3068,11 @@ def caught_on_code_page() -> str:
     return EXPLAINER_HTML
 
 
+@protected.get("/voices", response_class=HTMLResponse)
+def voices_page() -> str:
+    return VOICES_HTML.replace("__NAV_LINKS__", _nav_links("/voices"))
+
+
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
 # A bi-weekly series on the main (Caught On Stream) channel, a different
 # streamer each episode. Research -> story -> record -> render -> post.
@@ -3829,17 +3836,274 @@ def longform_voice_sample_delete() -> dict:
     return voice_clone.status(_voice_dir)
 
 
-def _voice_check() -> None:
+# ---- Other people's AI voices: a friend who agreed to narrate. One folder
+# each under _voices/<id>/ with its own sample and voice.json (name, who
+# agreed, an optional private link). The friend lives far away, so the
+# sample can be an uploaded voice note, or recorded by the friend on a
+# private link that needs no app password (/voice-sample/<token>). Videos
+# that use one are marked "altered or synthetic content" on YouTube.
+_voices_dir = BASE_DIR / "_longform" / "_voices"
+_VOICE_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+VOICE_LINK_DAYS = 7
+_voice_meta_lock = threading.Lock()
+
+
+def _voice_path(vid: Optional[str]) -> Path:
+    """The folder of a voice: "me" (or nothing) is Dean's own."""
+    if not vid or vid == "me":
+        return _voice_dir
+    if not _VOICE_ID_RE.match(vid) or not (_voices_dir / vid / "voice.json").is_file():
+        raise HTTPException(404, "that voice doesn't exist (any more)")
+    return _voices_dir / vid
+
+
+def _voice_ids() -> List[str]:
+    if not _voices_dir.is_dir():
+        return []
+    found = [d for d in _voices_dir.iterdir() if _VOICE_ID_RE.match(d.name) and (d / "voice.json").is_file()]
+    return [d.name for d in sorted(found, key=lambda d: voice_clone.read_meta(d).get("created_at") or 0)]
+
+
+def _voice_name(vid: Optional[str]) -> str:
+    if not vid or vid == "me":
+        return "You"
+    try:
+        return voice_clone.read_meta(_voice_path(vid)).get("name") or "Friend"
+    except HTTPException:
+        return "a deleted voice"
+
+
+def _voice_row(vid: str) -> dict:
+    d = _voice_path(vid)
+    st = voice_clone.status(d)
+    row = {"id": vid, "name": _voice_name(vid), "mine": vid == "me", "sample": st["sample"], "ready": st["ready"]}
+    if vid != "me":
+        meta = voice_clone.read_meta(d)
+        link = meta.get("link") or {}
+        row["consent"] = meta.get("consent")
+        row["link"] = ({"url": f"/voice-sample/{link['token']}", "expires_at": link["expires_at"]}
+                       if link.get("token") and link.get("expires_at", 0) > time.time() else None)
+    return row
+
+
+@protected.get("/api/voices")
+def list_voices() -> dict:
     st = voice_clone.status(_voice_dir)
+    return {"installed": st["installed"], "configured": st["configured"], "setup_hint": st["setup_hint"],
+            "error": st["error"], "sample_text": voice_clone.SAMPLE_TEXT,
+            "voices": [_voice_row(v) for v in ["me", *_voice_ids()]]}
+
+
+class VoiceCreateRequest(BaseModel):
+    name: str
+    consent: bool = False
+
+
+@protected.post("/api/voices")
+def create_voice(req: VoiceCreateRequest) -> dict:
+    name = " ".join(req.name.split())[:40]
+    if not name:
+        raise HTTPException(400, "Give the voice a name.")
+    if not req.consent:
+        raise HTTPException(400, "Only copy someone's voice after they've said yes. Tick the box once they have.")
+    vid = uuid.uuid4().hex[:8]
+    voice_clone.write_meta(_voices_dir / vid, {
+        "name": name, "created_at": time.time(),
+        "consent": {"confirmed_by": "Dean", "confirmed_at": time.time()},
+    })
+    return _voice_row(vid)
+
+
+@protected.delete("/api/voices/{vid}")
+def delete_voice(vid: str) -> dict:
+    """Removes the sample and the private link. Takes already read in this
+    voice keep their audio."""
+    if vid == "me":
+        raise HTTPException(400, "Your own voice sample is deleted from the long-form page.")
+    d = _voice_path(vid)
+    shutil.rmtree(d, ignore_errors=True)
+    return list_voices()
+
+
+def _store_voice_sample(d: Path, data: bytes, ctype: str, filename: str = "") -> dict:
+    """Check an uploaded or recorded sample and make it the voice's sample.
+    Anything ffmpeg can read works (a WhatsApp voice note, an mp3, a phone
+    recording); the first voice_clone.KEEP_SECONDS of talking are kept.
+    It only has to be clear speech -- reading SAMPLE_TEXT is best but a
+    voice note saying anything works too."""
+    if len(data) < 1000:
+        raise HTTPException(400, "that recording is empty -- check the mic")
+    if len(data) > longform.MAX_TAKE_BYTES:
+        raise HTTPException(413, "that file is too big -- a minute of talking is plenty")
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    ext = Path(filename).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{2,5}", ext):
+        ext = _TAKE_EXTS.get(ctype, ".bin")
+    raw = d / f"upload_{stamp}{ext}"
+    wav = d / f"upload_{stamp}.wav"
+
+    def work() -> dict:
+        raw.write_bytes(data)
+        try:
+            try:
+                full = longform.audio_duration(raw)
+            except Exception:
+                raise ValueError("That file isn't audio the app can read -- try an mp3, m4a or a voice note.")
+            if full > voice_clone.UPLOAD_MAX_SECONDS:
+                raise ValueError("That's over 10 minutes -- send a shorter clip of the voice, about 30 seconds of talking.")
+            try:
+                voice_clone.trim_sample(raw, wav)
+            except subprocess.CalledProcessError:
+                raise ValueError("That file isn't audio the app can read -- try an mp3, m4a or a voice note.")
+        finally:
+            raw.unlink(missing_ok=True)
+        duration = longform.audio_duration(wav)
+        if duration < voice_clone.MIN_SAMPLE_SECONDS:
+            raise ValueError(f"Only {duration:.0f} seconds of talking -- it needs at least 10 (30 is best).")
+        heard = longform.transcribe_take(wav)
+        words = " ".join(heard).split()
+        if len(words) < voice_clone.MIN_SAMPLE_WORDS:
+            raise ValueError("Couldn't hear clear talking in that -- a quiet room and one voice works best.")
+        check = longform.check_take(voice_clone.SAMPLE_TEXT, heard)
+        return {"duration": duration, "coverage": check["coverage"], "heard": " ".join(words)}
+
+    try:
+        result = work()
+    except ValueError as e:
+        wav.unlink(missing_ok=True)
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        wav.unlink(missing_ok=True)
+        print(f"[voices] sample check failed for {d.name}: {e}", flush=True)
+        raise HTTPException(500, f"Couldn't check that recording: {e}")
+    wav.replace(voice_clone.sample_path(d))
+    voice_clone.save_sample_meta(d, result["duration"], result)
+    return result
+
+
+@protected.post("/api/voices/{vid}/sample")
+async def upload_voice_sample(vid: str, request: Request) -> dict:
+    if vid == "me":
+        raise HTTPException(400, "Record your own sample on the long-form page.")
+    d = _voice_path(vid)
+    data = await request.body()
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    await run_in_threadpool(_store_voice_sample, d, data, ctype, request.headers.get("x-filename") or "")
+    return _voice_row(vid)
+
+
+@protected.get("/api/voices/{vid}/sample")
+def voice_sample_audio(vid: str) -> FileResponse:
+    path = voice_clone.sample_path(_voice_path(vid))
+    if not path.is_file():
+        raise HTTPException(404, "no voice sample yet")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@protected.post("/api/voices/{vid}/link")
+def create_voice_link(vid: str) -> dict:
+    """A private link the person opens on their phone to record their own
+    sample: no app password, works for VOICE_LINK_DAYS, one per voice (a
+    new one replaces the old)."""
+    if vid == "me":
+        raise HTTPException(400, "That's your own voice -- record it on the long-form page.")
+    d = _voice_path(vid)
+    with _voice_meta_lock:
+        meta = voice_clone.read_meta(d)
+        meta["link"] = {"token": secrets.token_urlsafe(18), "expires_at": time.time() + VOICE_LINK_DAYS * 86400}
+        voice_clone.write_meta(d, meta)
+    return _voice_row(vid)
+
+
+@protected.delete("/api/voices/{vid}/link")
+def delete_voice_link(vid: str) -> dict:
+    d = _voice_path(vid)
+    with _voice_meta_lock:
+        meta = voice_clone.read_meta(d)
+        meta.pop("link", None)
+        voice_clone.write_meta(d, meta)
+    return _voice_row(vid)
+
+
+class VoicePreviewRequest(BaseModel):
+    text: str
+
+
+@protected.post("/api/voices/{vid}/preview")
+async def preview_voice(vid: str, req: VoicePreviewRequest) -> FileResponse:
+    """Say one line in this voice, to hear how it came out."""
+    text = " ".join(req.text.split())[:300]
+    if not text:
+        raise HTTPException(400, "Type something for the voice to say.")
+    d = _voice_path(vid)
+    _voice_check(vid)
+    if not _voice_busy.acquire(blocking=False):
+        raise HTTPException(409, "The AI voice is busy reading something else -- try again in a few seconds.")
+    out = d / "preview.wav"
+    try:
+        await run_in_threadpool(voice_clone.synthesize, d, text, out)
+    except Exception as e:
+        print(f"[voices] preview failed for {vid}: {e}", flush=True)
+        raise HTTPException(500, f"The voice couldn't read that: {e}")
+    finally:
+        _voice_busy.release()
+    return FileResponse(out, media_type="audio/wav")
+
+
+def _voice_by_token(token: str) -> Path:
+    if _voices_dir.is_dir() and re.fullmatch(r"[A-Za-z0-9_-]{20,40}", token or ""):
+        for vid in _voice_ids():
+            link = voice_clone.read_meta(_voices_dir / vid).get("link") or {}
+            if link.get("token") and secrets.compare_digest(link["token"], token) and link.get("expires_at", 0) > time.time():
+                return _voices_dir / vid
+    raise HTTPException(404, "This link has expired or was switched off. Ask for a new one.")
+
+
+# Public on purpose (no app password): the friend who agreed to narrate
+# records a sample here from far away. The unguessable token is the key;
+# it only lets them set this one voice's sample, nothing else.
+@app.get("/voice-sample/{token}", response_class=HTMLResponse)
+def voice_link_page(token: str) -> str:
+    try:
+        d = _voice_by_token(token)
+    except HTTPException as e:
+        return VOICE_LINK_HTML.replace("__STATE__", json.dumps({"error": e.detail}))
+    meta = voice_clone.read_meta(d)
+    return VOICE_LINK_HTML.replace("__STATE__", json.dumps({
+        "name": meta.get("name") or "", "sample_text": voice_clone.SAMPLE_TEXT,
+        "has_sample": voice_clone.sample_path(d).is_file()}))
+
+
+@app.post("/voice-sample/{token}")
+async def voice_link_upload(token: str, request: Request) -> dict:
+    d = _voice_by_token(token)
+    if request.headers.get("x-consent") != "yes":
+        raise HTTPException(400, "Tick the box to say it's OK first.")
+    data = await request.body()
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    result = await run_in_threadpool(_store_voice_sample, d, data, ctype, request.headers.get("x-filename") or "")
+    with _voice_meta_lock:
+        meta = voice_clone.read_meta(d)
+        meta.setdefault("consent", {})["self_confirmed_at"] = time.time()
+        voice_clone.write_meta(d, meta)
+    return {"ok": True, "duration": round(result["duration"], 1)}
+
+
+def _voice_check(vid: Optional[str] = None) -> None:
+    st = voice_clone.status(_voice_path(vid))
     if not st["installed"] or not st["configured"]:
         raise HTTPException(409, voice_clone.SETUP_HINT)
     if not st["sample"]:
+        if vid and vid != "me":
+            raise HTTPException(409, f"{_voice_name(vid)}'s voice has no sample yet -- add one on the Voices page.")
         raise HTTPException(409, "Record your voice sample first (the “Your AI voice” box at the top).")
 
 
-def _clone_take(pid: str, index: int, script: str) -> dict:
-    """Read one narrated scene in Dean's AI voice, check it like a recorded
-    take and make it the scene's take. The caller holds _voice_busy."""
+def _clone_take(pid: str, index: int, script: str, vid: str = "me") -> dict:
+    """Read one narrated scene in an AI voice (Dean's own unless the episode
+    picked another), check it like a recorded take and make it the scene's
+    take. The caller holds _voice_busy."""
     takes_dir = _longform_store.path(pid) / "takes"
     takes_dir.mkdir(parents=True, exist_ok=True)
     stamp = uuid.uuid4().hex[:8]
@@ -3848,7 +4112,7 @@ def _clone_take(pid: str, index: int, script: str) -> dict:
     started = time.time()
     try:
         try:
-            voice_clone.synthesize(_voice_dir, script, raw)
+            voice_clone.synthesize(_voice_path(vid), script, raw)
             longform.to_wav(raw, wav)
         finally:
             raw.unlink(missing_ok=True)
@@ -3860,6 +4124,10 @@ def _clone_take(pid: str, index: int, script: str) -> dict:
     result = {"duration": round(duration, 2), "heard": " ".join(heard).strip(),
               "took_seconds": round(time.time() - started, 1), **longform.check_take(script, heard)}
     take = {"file": wav.name, "recorded_at": time.time(), "kept": False, "voice": "ai", **result}
+    if vid != "me":
+        # Someone else's voice: the episode gets YouTube's "altered or
+        # synthetic content" label when it's posted.
+        take["voice_id"] = vid
     _longform_set_take(pid, index, script, take, wav)
     return take
 
@@ -3873,12 +4141,13 @@ async def longform_clone_take(pid: str, index: int) -> dict:
     scenes = project.get("scenes") or []
     if not 0 <= index < len(scenes) or not longform.needs_take(scenes[index]):
         raise HTTPException(404, "that scene isn't narrated")
-    _voice_check()
+    vid = project.get("ai_voice") or "me"
+    _voice_check(vid)
     if not _voice_busy.acquire(blocking=False):
         raise HTTPException(409, "Your AI voice is already reading another scene -- give it a few seconds.")
     script = scenes[index]["narration"]
     try:
-        take = await run_in_threadpool(_clone_take, pid, index, script)
+        take = await run_in_threadpool(_clone_take, pid, index, script, vid)
     except HTTPException:
         raise
     except Exception as e:
@@ -3899,7 +4168,7 @@ def _ai_all_set(pid: str, **changes) -> dict:
     return _longform_store.update(pid, lambda pr: pr.update(ai_all={**(pr.get("ai_all") or {}), **changes}))
 
 
-def _longform_ai_all(pid: str, todo: List[int]) -> None:
+def _longform_ai_all(pid: str, todo: List[int], vid: str = "me") -> None:
     done, flagged, failed = 0, [], []
     try:
         for index in todo:
@@ -3919,7 +4188,7 @@ def _longform_ai_all(pid: str, todo: List[int]) -> None:
             try:
                 take = None
                 for _attempt in range(2):
-                    take = _clone_take(pid, index, script)
+                    take = _clone_take(pid, index, script, vid)
                     if take.get("ok"):
                         break
                 if take and not take.get("ok"):
@@ -3950,7 +4219,8 @@ def longform_clone_all(pid: str) -> dict:
     scenes = project.get("scenes") or []
     if project.get("status") != "script_ready" or not scenes:
         raise HTTPException(409, "write the script first")
-    _voice_check()
+    vid = project.get("ai_voice") or "me"
+    _voice_check(vid)
     todo = [i for i, sc in enumerate(scenes) if longform.needs_take(sc) and not longform.scene_ready(sc)]
     if not todo:
         raise HTTPException(409, "Every narrated scene already has a take.")
@@ -3958,7 +4228,7 @@ def longform_clone_all(pid: str) -> dict:
     _longform_store.update(pid, lambda pr: pr.update(ai_all={
         "status": "running", "total": len(todo), "done": 0, "current": None, "flagged": [], "failed": [],
         "started_at": time.time()}))
-    threading.Thread(target=_longform_ai_all, args=(pid, todo), daemon=True).start()
+    threading.Thread(target=_longform_ai_all, args=(pid, todo, vid), daemon=True).start()
     return _longform_store.load(pid)
 
 
@@ -3969,6 +4239,22 @@ def longform_stop_clone_all(pid: str) -> dict:
     if not _longform_is_busy(pid, "ai_all"):
         raise HTTPException(409, "your AI voice isn't reading anything")
     return _ai_all_set(pid, stop=True)
+
+
+class AiVoiceRequest(BaseModel):
+    voice: str = "me"
+
+
+@protected.put("/api/longform/projects/{pid}/ai-voice")
+def longform_set_ai_voice(pid: str, req: AiVoiceRequest) -> dict:
+    """Which AI voice reads this episode's lines: Dean's own ("me") or a
+    friend's from the Voices page. Takes already read stay as they are."""
+    _longform_project(pid)
+    vid = req.voice or "me"
+    _voice_path(vid)
+    if _longform_is_busy(pid, "ai_all"):
+        raise HTTPException(409, "wait for the AI voice to finish (or stop it) first")
+    return _longform_store.update(pid, lambda pr: pr.update(ai_voice=vid))
 
 
 _MUSIC_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mp4": ".m4a",
@@ -4195,6 +4481,13 @@ async def longform_publish_text(pid: str) -> dict:
     return _longform_store.update(pid, lambda pr: pr.update(publish=text))
 
 
+def _longform_other_voice(project: dict) -> bool:
+    """True when a narrated scene was read by someone else's AI voice (a
+    friend's, from the Voices page) -- YouTube wants that disclosed as
+    altered or synthetic content. Dean's own cloned voice doesn't need it."""
+    return any((sc.get("take") or {}).get("voice_id") for sc in project.get("scenes") or [])
+
+
 class LongformUploadRequest(BaseModel):
     title: str
     description: str = ""
@@ -4216,7 +4509,8 @@ def longform_upload(pid: str, req: LongformUploadRequest) -> dict:
     access_token = _longform_access_token(project)
     try:
         video_id = youtube_upload.upload_video(access_token, path, title=title, description=req.description,
-                                               privacy_status=req.privacy_status, is_short=False)
+                                               privacy_status=req.privacy_status, is_short=False,
+                                               synthetic_media=_longform_other_voice(project))
     except (youtube_upload.UploadError, ValueError) as e:
         raise HTTPException(502, str(e)) from e
     url = f"https://youtu.be/{video_id}"
@@ -4385,6 +4679,7 @@ def _longform_build_promo(job_id: str, project: dict, path: Path) -> None:
                 # pipeline: kept out of the clip registry so they don't skew
                 # what the Shorts learn from YouTube stats.
                 "promo": True,
+                **({"synthetic_voice": True} if _longform_other_voice(project) else {}),
             })
         with jobs_lock:
             job = jobs.get(job_id)
@@ -7919,6 +8214,321 @@ loadClips();
 
 # The /long-form page -- "The Story Of" streamer documentaries; see clipper/documentary.py
 # and the /api/longform routes.
+# ---- Voices page and the friend's private recording page ----------------------
+_SIMPLE_PAGE_CSS = """
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f7; --card: #ffffff; --text: #1a1b1f; --muted: #6b7280; --border: #e5e7eb;
+    --accent: #6d28d9; --accent2: #ec4899; --accent-text: #ffffff; --danger: #dc2626;
+    --ok: #15803d; --warn: #b45309;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #1a1c23; --text: #f2f3f7; --muted: #9aa0ac; --border: #2b2e37;
+      --ok: #4ade80; --warn: #fbbf24; --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.4); }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg);
+    color: var(--text); margin: 0; padding: 40px 16px; }
+  .page { max-width: 760px; margin: 0 auto; }
+  .topnav { display: flex; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .topnav a { flex: 1 1 auto; text-align: center; padding: 9px 10px; border-radius: 9px; font-size: 0.84rem;
+    font-weight: 600; color: var(--muted); text-decoration: none; }
+  .topnav a:hover { color: var(--text); }
+  .topnav a.active { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+    padding: 28px 28px 32px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo { font-size: 1.3rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+  h3 { font-size: 1.02rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 4px 0 20px; }
+  label { display: block; margin-top: 14px; font-size: 0.82rem; font-weight: 600; color: var(--muted); }
+  input, select, textarea { width: 100%; padding: 10px 12px; margin-top: 6px; font-size: 0.95rem; background: var(--bg);
+    color: var(--text); font-family: inherit; border: 1px solid var(--border); border-radius: 10px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { width: auto; margin: 0; }
+  button { margin-top: 14px; padding: 10px 18px; font-size: 0.92rem; font-weight: 600; cursor: pointer; border: none;
+    border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-text); }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.danger-link { background: none; border: none; color: var(--danger); padding: 0; font-weight: 600; font-size: 0.85rem; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.recording { background: var(--danger); }
+  .hint { font-size: 0.8rem; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  .section { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .actions button { margin-top: 10px; }
+  .status { border-radius: 10px; padding: 10px 12px; font-size: 0.86rem; margin-top: 10px; background: var(--bg);
+    border: 1px solid var(--border); }
+  .status.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+  .status.bad { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+  .tick { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; font-size: 0.88rem; font-weight: 500;
+    color: var(--text); }
+  .tick input { margin-top: 3px; }
+  a { color: var(--accent); }
+"""
+
+VOICES_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — Voices</title>
+<style>
+__CSS__
+  .voice { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-top: 12px; }
+  .voice .top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .voice .name { font-weight: 700; font-size: 1rem; }
+  .badge { font-size: 0.75rem; font-weight: 700; border-radius: 999px; padding: 3px 9px; background: var(--bg);
+    border: 1px solid var(--border); white-space: nowrap; }
+  .badge.ok { color: var(--ok); }
+  .badge.wait { color: var(--warn); }
+  .link-box { display: flex; gap: 8px; margin-top: 10px; }
+  .link-box input { margin-top: 0; font-size: 0.82rem; }
+  .link-box button { margin-top: 0; white-space: nowrap; }
+  .try { display: flex; gap: 8px; margin-top: 10px; }
+  .try input { margin-top: 0; }
+  .try button { margin-top: 0; white-space: nowrap; }
+  details summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; margin-top: 10px; color: var(--accent); }
+  @media (max-width: 520px) { .card { padding: 20px 16px 24px; } .link-box, .try { flex-direction: column; } }
+</style>
+</head>
+<body>
+<div class="page">
+__NAV_LINKS__
+<div class="card">
+  <div class="brand"><span class="logo">🗣</span><h1>Voices</h1></div>
+  <p class="subtitle">AI copies of voices that can read your lines: yours, and friends who said yes. Pick one when the AI reads a long-form episode or a ranking Short.</p>
+  <div id="setup" class="status" style="display:none"></div>
+  <div id="voices"></div>
+
+  <div class="section">
+    <h3>➕ Add a friend's voice</h3>
+    <div class="hint">Only copy a voice after the person has said yes. Videos that use their voice get YouTube's "altered or synthetic content" label automatically, so viewers know it's AI.</div>
+    <label for="new-name">Their name</label>
+    <input id="new-name" maxlength="40" placeholder="e.g. Sam">
+    <label class="tick"><input type="checkbox" id="new-consent"> <span>They agreed to an AI copy of their voice narrating my videos.</span></label>
+    <button id="add-btn" type="button">Add voice</button>
+    <div class="hint" id="add-msg"></div>
+  </div>
+</div>
+</div>
+<audio id="player" style="display:none"></audio>
+<script>
+const $ = (id) => document.getElementById(id);
+let data = null;
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.detail || `Request failed (${r.status})`);
+  return out;
+}
+const jsonOpts = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function day(ts) { return new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
+function play(url) { const a = $('player'); a.src = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(); a.play(); }
+
+async function load() {
+  data = await api('/api/voices');
+  render();
+}
+function render() {
+  const st = $('setup');
+  if (!data.installed) { st.style.display = 'block'; st.textContent = 'The AI voice isn’t installed on the server yet.'; }
+  else if (data.setup_hint) { st.style.display = 'block'; st.textContent = '⚙️ ' + data.setup_hint; }
+  else if (data.error) { st.style.display = 'block'; st.textContent = '⚠️ ' + data.error; }
+  else st.style.display = 'none';
+  const box = $('voices'); box.innerHTML = '';
+  for (const v of data.voices) box.appendChild(voiceCard(v));
+}
+function voiceCard(v) {
+  const c = el('div', 'voice');
+  const top = el('div', 'top');
+  top.appendChild(el('span', 'name', v.mine ? '🎙 You' : '👤 ' + v.name));
+  top.appendChild(el('span', 'badge ' + (v.sample ? 'ok' : 'wait'),
+    v.sample ? `✅ Sample: ${Math.round(v.sample.duration)} s` : '⏳ No sample yet'));
+  c.appendChild(top);
+  if (v.mine) {
+    c.appendChild(el('div', 'hint', v.sample ? `Recorded ${day(v.sample.recorded_at)}. Re-record it on the long-form page under “Your AI voice”.`
+      : 'Record your sample on the long-form page, under “Your AI voice”.'));
+  } else {
+    const cons = v.consent || {};
+    let line = cons.confirmed_at ? `You confirmed they agreed on ${day(cons.confirmed_at)}.` : '';
+    if (cons.self_confirmed_at) line += ` They agreed on the recording link on ${day(cons.self_confirmed_at)}.`;
+    if (line) c.appendChild(el('div', 'hint', line.trim()));
+  }
+  const acts = el('div', 'actions');
+  if (v.sample) {
+    const p = el('button', 'secondary', '▶ Play sample');
+    p.type = 'button'; p.onclick = () => play(v.mine ? '/api/longform/voice/sample' : `/api/voices/${v.id}/sample`);
+    acts.appendChild(p);
+  }
+  if (!v.mine) {
+    const lk = el('button', 'secondary', v.link ? '🔗 New recording link' : '🔗 Get a recording link');
+    lk.type = 'button';
+    lk.onclick = async () => { try { await api(`/api/voices/${v.id}/link`, { method: 'POST' }); await load(); } catch (e) { alert(e.message); } };
+    acts.appendChild(lk);
+    const up = el('button', 'secondary', '⬆ Upload a voice note'); up.type = 'button';
+    const file = el('input'); file.type = 'file'; file.accept = 'audio/*,video/*,.opus,.m4a,.ogg,.mp3,.wav,.aac'; file.style.display = 'none';
+    up.onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files[0]; if (!f) return;
+      up.disabled = true; up.textContent = 'Checking…';
+      try {
+        await api(`/api/voices/${v.id}/sample`, { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-Filename': f.name }, body: f });
+        await load();
+      } catch (e) { alert(e.message); up.disabled = false; up.textContent = '⬆ Upload a voice note'; }
+    };
+    acts.appendChild(up); acts.appendChild(file);
+    const del = el('button', 'danger-link', 'Delete voice'); del.type = 'button'; del.style.marginLeft = 'auto';
+    del.onclick = async () => {
+      if (!confirm(`Delete ${v.name}'s voice? Lines already read in it keep their audio.`)) return;
+      try { data = await api(`/api/voices/${v.id}`, { method: 'DELETE' }); render(); } catch (e) { alert(e.message); }
+    };
+    acts.appendChild(del);
+  }
+  c.appendChild(acts);
+  if (!v.mine && v.link) {
+    const url = location.origin + v.link.url;
+    const lb = el('div', 'link-box');
+    const inp = el('input'); inp.readOnly = true; inp.value = url; inp.onclick = () => inp.select();
+    const cp = el('button', '', navigator.share ? '📤 Send' : '📋 Copy'); cp.type = 'button';
+    cp.onclick = async () => {
+      const text = `Could you record a 30-second voice sample for my videos? Open this on your phone: ${url}`;
+      try {
+        if (navigator.share) await navigator.share({ text });
+        else { await navigator.clipboard.writeText(url); cp.textContent = '✅ Copied'; }
+      } catch (e) { /* closed the share sheet */ }
+    };
+    lb.appendChild(inp); lb.appendChild(cp);
+    c.appendChild(lb);
+    const off = el('button', 'danger-link', 'Switch the link off'); off.type = 'button'; off.style.marginTop = '8px';
+    off.onclick = async () => { try { await api(`/api/voices/${v.id}/link`, { method: 'DELETE' }); await load(); } catch (e) { alert(e.message); } };
+    c.appendChild(el('div', 'hint', `They open it on their phone, read a short text and tap Stop, no password needed. Works until ${day(v.link.expires_at)}.`));
+    c.appendChild(off);
+  } else if (!v.mine && !v.sample) {
+    c.appendChild(el('div', 'hint', 'Get a link they open on their phone to record the sample themselves (best), or upload a voice note they sent you: 30 seconds of them talking clearly, in a quiet room, nobody else talking.'));
+  }
+  if (v.sample && v.ready) {
+    const d = el('details'); d.appendChild(el('summary', '', '🗣 Hear it say something'));
+    const t = el('div', 'try');
+    const inp = el('input'); inp.placeholder = 'Number two. Chat saw it coming five seconds before he did.';
+    const go = el('button', '', 'Say it'); go.type = 'button';
+    go.onclick = async () => {
+      go.disabled = true; go.textContent = 'Reading…';
+      try {
+        const r = await fetch(`/api/voices/${v.id}/preview`, jsonOpts('POST', { text: inp.value || inp.placeholder }));
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'It couldn’t read that');
+        const a = $('player'); a.src = URL.createObjectURL(await r.blob()); a.play();
+      } catch (e) { alert(e.message); }
+      go.disabled = false; go.textContent = 'Say it';
+    };
+    t.appendChild(inp); t.appendChild(go); d.appendChild(t);
+    d.appendChild(el('div', 'hint', 'The first one after a restart takes up to a minute while the model loads.'));
+    c.appendChild(d);
+  }
+  return c;
+}
+$('add-btn').onclick = async () => {
+  const name = $('new-name').value.trim();
+  $('add-msg').textContent = '';
+  try {
+    await api('/api/voices', jsonOpts('POST', { name, consent: $('new-consent').checked }));
+    $('new-name').value = ''; $('new-consent').checked = false;
+    $('add-msg').textContent = `✅ Added. Now get a recording link for ${name}, or upload a voice note.`;
+    await load();
+  } catch (e) { $('add-msg').textContent = '⚠️ ' + e.message; }
+};
+load().catch(e => { $('voices').textContent = '⚠️ ' + e.message; });
+</script>
+</body>
+</html>
+""".replace("__CSS__", _SIMPLE_PAGE_CSS)
+
+
+VOICE_LINK_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Record a voice sample</title>
+<style>
+__CSS__
+  body { padding: 24px 16px; }
+  .page { max-width: 560px; }
+  .prompter { font-size: 1.15rem; line-height: 1.6; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; margin-top: 14px; }
+  .big { font-size: 1.05rem; padding: 14px 22px; width: 100%; }
+  .timer { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.9rem; margin-left: 8px; }
+</style>
+</head>
+<body>
+<div class="page"><div class="card" id="card">
+  <div class="brand"><span class="logo">🎙</span><h1 id="hello">Record a voice sample</h1></div>
+  <p class="subtitle">You've been asked to lend your voice to some YouTube videos. Read the text below out loud once (about 30 seconds). The app makes an AI copy of your voice from it, which then reads short lines in its videos, marked on YouTube as AI-made.</p>
+  <label class="tick"><input type="checkbox" id="consent"> <span>I'm OK with an AI copy of my voice narrating these videos.</span></label>
+  <div class="hint">Changed your mind later? Tell the person who sent you this link and they'll delete it.</div>
+  <div class="prompter" id="text"></div>
+  <div class="hint">A quiet room, phone about a hand's width from your mouth, your normal talking voice. Nobody else talking.</div>
+  <button id="rec" class="big" type="button">🎙 Start recording</button><span id="timer" class="timer"></span>
+  <div id="result" class="status" style="display:none"></div>
+  <div class="hint" style="margin-top:16px">Can't record here? <a href="#" id="pick">Upload a recording instead</a>.</div>
+  <input type="file" id="file" accept="audio/*,video/*,.opus,.m4a,.ogg,.mp3,.wav,.aac" style="display:none">
+</div></div>
+<script>
+const STATE = __STATE__;
+const $ = (id) => document.getElementById(id);
+if (STATE.error) {
+  $('card').innerHTML = '<div class="brand"><span class="logo">🎙</span><h1>Link not working</h1></div><p class="subtitle"></p>';
+  $('card').querySelector('.subtitle').textContent = STATE.error;
+} else {
+  if (STATE.name) $('hello').textContent = `Hi ${STATE.name}! Record a voice sample`;
+  $('text').textContent = STATE.sample_text;
+  if (STATE.has_sample) show('ok', '✅ We already have a sample from you. Recording again replaces it.');
+}
+let rec = null, chunks = [], stream = null, started = 0, tick = null;
+function show(kind, text) { const r = $('result'); r.style.display = 'block'; r.className = 'status ' + kind; r.textContent = text; }
+function needConsent() { if ($('consent').checked) return false; show('bad', 'Tick the box first to say it\\'s OK.'); return true; }
+async function send(blob, type, name) {
+  show('', '👂 Checking your recording… (about 20 seconds)');
+  $('rec').disabled = true;
+  try {
+    const r = await fetch(location.pathname, { method: 'POST', body: blob,
+      headers: { 'Content-Type': (type || 'application/octet-stream').split(';')[0], 'X-Consent': 'yes', 'X-Filename': name || '' } });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.detail || 'That didn\\'t work, try again.');
+    show('ok', `✅ Got it, ${Math.round(out.duration)} seconds. Thank you! You can close this page.`);
+  } catch (e) { show('bad', '⚠️ ' + e.message); }
+  $('rec').disabled = false;
+}
+if (!STATE.error) $('rec').onclick = async () => {
+  if (rec) { clearInterval(tick); rec.stop(); stream.getTracks().forEach(t => t.stop()); return; }
+  if (needConsent()) return;
+  if (!navigator.mediaDevices || !window.MediaRecorder) { show('bad', 'This browser can\\'t record. Use the upload link below.'); return; }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { show('bad', 'Microphone access was blocked. Allow it and try again.'); return; }
+  const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+  const mime = opts.find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); chunks = [];
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => { const type = rec.mimeType || 'audio/webm'; const b = new Blob(chunks, { type }); rec = null;
+    $('rec').className = 'big'; $('rec').textContent = '🎙 Record again'; $('timer').textContent = ''; send(b, type, ''); };
+  rec.start(); started = Date.now();
+  $('rec').className = 'big recording'; $('rec').textContent = '⏹ Stop';
+  $('result').style.display = 'none';
+  tick = setInterval(() => { const s = Math.round((Date.now() - started) / 1000); $('timer').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }, 500);
+};
+if (!STATE.error) $('pick').onclick = (e) => { e.preventDefault(); if (!needConsent()) $('file').click(); };
+if (!STATE.error) $('file').onchange = () => { const f = $('file').files[0]; if (f) send(f, f.type, f.name); };
+</script>
+</body>
+</html>
+""".replace("__CSS__", _SIMPLE_PAGE_CSS)
+
+
 _LONGFORM_TEMPLATE = """<!doctype html>
 <html>
 <head>
@@ -8114,6 +8724,9 @@ _LONGFORM_TEMPLATE = """<!doctype html>
   .clip-row video { width: 100%; max-width: 420px; margin-top: 8px; border-radius: 8px; }
   @media (max-width: 520px) { .clip-row img { width: 96px; height: 54px; } }
   .ai-all { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .ai-voice-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+  .ai-voice-row select { width: auto; margin-top: 0; padding: 6px 10px; font-size: 0.88rem; }
+  .ai-voice-row a { color: var(--accent); font-weight: 600; text-decoration: none; }
   .ai-all button { margin-top: 0; }
   #ai-all-progress .bar { margin-top: 10px; }
   #ai-all-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.4s; }
@@ -8226,7 +8839,7 @@ _LONGFORM_TEMPLATE = """<!doctype html>
 
     <div class="section" id="voice-section">
       <h3>🗣 Your AI voice</h3>
-      <div class="hint">A copy of your voice for the odd line you keep fluffing, or one you add after recording. Your real voice is what keeps people watching, so use it to patch lines, not to read whole episodes. It’s free and runs on your own server.</div>
+      <div class="hint">A copy of your voice for the odd line you keep fluffing, or one you add after recording. Your real voice is what keeps people watching, so use it to patch lines, not to read whole episodes. It’s free and runs on your own server. A friend’s voice can be added on the <a href="/voices">Voices page</a>.</div>
       <div id="voice-status" class="status-box" style="display:none"></div>
       <details id="voice-record">
         <summary id="voice-summary">Record your voice sample</summary>
@@ -8322,6 +8935,11 @@ _LONGFORM_TEMPLATE = """<!doctype html>
         <button id="next-scene" type="button" class="secondary">Next →</button>
       </div>
       <div class="hint" id="ai-hint"></div>
+      <div class="ai-voice-row" id="ai-voice-row" style="display:none">
+        <span>AI voice for this episode:</span>
+        <select id="ai-voice"></select>
+        <a href="/voices">Voices</a>
+      </div>
       <div class="ai-all" id="ai-all" style="display:none">
         <button id="ai-all-btn" type="button" class="secondary">🤖 Let my AI voice read everything</button>
         <div id="ai-all-progress" style="display:none"><div class="bar"><div id="ai-all-bar"></div></div></div>
@@ -8425,6 +9043,7 @@ let recorder = null, recStream = null, recChunks = [], recStarted = 0, recTick =
 let recTarget = 'scene';  // 'scene' (a narrated scene) or 'sample' (the AI voice sample)
 let lastResult = null;
 let voice = null;  // /api/longform/voice
+let voices = null;  // /api/voices: Dean's own + friends' AI voices
 let aiBusy = false;
 
 function fmtTime(sec) { sec = Math.max(0, Math.round(sec || 0)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
@@ -9059,17 +9678,20 @@ function renderRecorder() {
   $('play-take').style.display = take.file ? 'inline-block' : 'none';
   $('play-take').textContent = take.voice === 'ai' ? '▶ Play AI take' : '▶ Play my take';
   const ab = $('ai-btn');
-  const vReady = !!(voice && voice.ready);
+  const av = aiVoice(), who = aiWho(av);
+  const vReady = !!(av && av.ready);
+  renderVoicePick();
   const aa = project.ai_all || {}, aiAll = aa.status === 'running';
   ab.disabled = !!recorder || aiBusy || !vReady || aiAll;
   if (!recorder) $('rec-btn').disabled = aiBusy || aiAll;
   renderAiAll(vReady, aa, idx.filter(i => !sceneReady(scenes[i])).length);
-  ab.textContent = aiBusy ? '🤖 Reading…' : take.voice === 'ai' ? '🤖 AI voice again' : '🤖 Use my AI voice';
+  ab.textContent = aiBusy ? '🤖 Reading…' : take.voice === 'ai' ? '🤖 AI voice again' : `🤖 Use ${who} AI voice`;
   const narr = idx.map(i => scenes[i]);
   const aiCount = narr.filter(x => (x.take || {}).voice === 'ai').length;
-  $('ai-hint').textContent = !vReady ? 'Want a line read in your AI voice instead? Set it up under “Your AI voice” on the episodes list.'
-    : aiCount ? `AI voice on ${aiCount} of ${narr.length} narrated scenes.` + (aiCount * 3 > narr.length ? ' Keep most of it in your real voice; that’s what viewers stay for.' : '')
-    : 'Stuck on a line? “Use my AI voice” reads this scene for you in 10–30 seconds.';
+  $('ai-hint').textContent = !vReady ? (av && !av.mine ? `${av.name}’s voice has no sample yet: add one on the Voices page.` : 'Want a line read in your AI voice instead? Set it up under “Your AI voice” on the episodes list.')
+    : aiCount ? `AI voice on ${aiCount} of ${narr.length} narrated scenes.` + (av && av.mine && aiCount * 3 > narr.length ? ' Keep most of it in your real voice; that’s what viewers stay for.' : '')
+      + (av && !av.mine ? ` The video gets YouTube’s “altered or synthetic content” label because it uses ${av.name}’s AI voice.` : '')
+    : `Stuck on a line? “Use ${who} AI voice” reads this scene for you in 10–30 seconds.`;
   $('keep-take').style.display = sceneFlagged(s) ? 'inline-block' : 'none';
   const pos = idx.indexOf(recIndex);
   $('prev-scene').disabled = pos <= 0 || !!recorder || aiBusy;
@@ -9153,7 +9775,7 @@ function renderAiAll(vReady, aa, left) {
   const running = aa.status === 'running';
   $('ai-all').style.display = vReady && (left || aa.status) ? 'block' : 'none';
   const b = $('ai-all-btn');
-  b.textContent = running ? (aa.stop ? '⏳ Stopping after this scene…' : '⏹ Stop') : '🤖 Let my AI voice read everything';
+  b.textContent = running ? (aa.stop ? '⏳ Stopping after this scene…' : '⏹ Stop') : `🤖 Let ${aiWho(aiVoice())} AI voice read everything`;
   b.disabled = (running && !!aa.stop) || (!running && (!left || !!recorder || aiBusy));
   $('ai-all-progress').style.display = running ? 'block' : 'none';
   const total = aa.total || 0, done = aa.done || 0;
@@ -9176,7 +9798,8 @@ $('ai-all-btn').addEventListener('click', async () => {
     if (running) project = await api(`/api/longform/projects/${project.id}/clone-all`, { method: 'DELETE' });
     else {
       const left = (project.scenes || []).filter(s => needsTake(s) && !sceneReady(s)).length;
-      if (!confirm(`Your AI voice will read the ${left} narrated scene${left === 1 ? '' : 's'} without a take. Scenes you recorded yourself stay as they are. Start?`)) return;
+      const av = aiVoice();
+      if (!confirm(`${av && !av.mine ? av.name + '’s' : 'Your'} AI voice will read the ${left} narrated scene${left === 1 ? '' : 's'} without a take. Scenes you recorded yourself stay as they are. Start?`)) return;
       project = await api(`/api/longform/projects/${project.id}/clone-all`, { method: 'POST' });
     }
     loadProject(project.id, false);
@@ -9228,8 +9851,37 @@ $('learn-btn').addEventListener('click', async () => {
 // ---------- your AI voice ----------
 async function loadVoice() {
   try { voice = await api('/api/longform/voice'); } catch (e) { voice = null; }
+  try { voices = (await api('/api/voices')).voices; } catch (e) { voices = null; }
   renderVoice();
 }
+// The AI voice this episode reads with: Dean's own unless he picked a
+// friend's on the Voices page.
+function aiVoice() {
+  const id = (project && project.ai_voice) || 'me';
+  return (voices || []).find(v => v.id === id) || (id === 'me' ? { id: 'me', name: 'You', mine: true, ready: !!(voice && voice.ready) } : null);
+}
+function aiWho(v) { return !v || v.mine ? 'my' : `${v.name}’s`; }
+function renderVoicePick() {
+  const row = $('ai-voice-row'), sel = $('ai-voice');
+  const list = voices || [];
+  row.style.display = project && list.length > 1 ? 'flex' : 'none';
+  if (!project || list.length < 2) return;
+  const cur = project.ai_voice || 'me';
+  sel.innerHTML = '';
+  for (const v of list) {
+    const o = document.createElement('option');
+    o.value = v.id; o.textContent = (v.mine ? 'You' : v.name) + (v.sample ? '' : ' (no sample yet)');
+    o.selected = v.id === cur; sel.appendChild(o);
+  }
+  if (!list.some(v => v.id === cur)) {
+    const o = document.createElement('option'); o.value = cur; o.textContent = 'A deleted voice'; o.selected = true; sel.appendChild(o);
+  }
+  sel.disabled = !!recorder || aiBusy || (project.ai_all || {}).status === 'running';
+}
+$('ai-voice').addEventListener('change', async () => {
+  try { project = await api(`/api/longform/projects/${project.id}/ai-voice`, jsonOpts('PUT', { voice: $('ai-voice').value })); lastResult = null; renderRecorder(); }
+  catch (e) { alert(e.message); renderVoicePick(); }
+});
 function renderVoice() {
   const v = voice || {};
   const st = $('voice-status');

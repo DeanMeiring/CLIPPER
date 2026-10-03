@@ -245,6 +245,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   variable was once saved as " HF_TOKEN" with a leading space: if the page
   says it isn't switched on, check the name (Railway MCP `list-variables`
   shows names only).
+- **Friends' voices (Oct 2026):** Dean's friend has a voice he wanted
+  for narration, agreed to it, and lives far away. `/voices` (linked from
+  long-form's "Your AI voice" box) lists Dean's own voice plus other
+  people's, each in `BASE_DIR/_longform/_voices/<8 hex>/` (`sample.wav`,
+  `sample.json`, `voice.json` with name + consent). Adding one needs the
+  "they agreed" box ticked. The sample is an uploaded voice note (any
+  format ffmpeg reads; silence at the start is cut and the first 45 s
+  kept; it only has to be clear talking, >= 15 words) or recorded by the
+  friend on a private link `/voice-sample/<token>`: public on purpose (no
+  app password), the token is the key, works 7 days, only sets that one
+  voice's sample, and needs their own "I'm OK with it" tick (stored as
+  `consent.self_confirmed_at`). A long-form episode picks its AI voice
+  (`project["ai_voice"]`, "me" by default; `PUT .../ai-voice`); takes read
+  by someone else's voice carry `voice_id`. Any upload using another
+  person's cloned voice sets YouTube's `status.containsSyntheticMedia`
+  (`youtube_upload.upload_video(synthetic_media=True)`; the long-form
+  upload, its promo Shorts via `clip["synthetic_voice"]`). Dean's own voice
+  doesn't need the label, and other uploads send exactly what they did.
 - Quiz format: prototyped (higher-or-lower on clip views, who-said-it,
   guess-the-year) and shelved once Dean said he'll use his voice. The
   documentary is the one long-form format for now.

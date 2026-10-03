@@ -61,9 +61,16 @@ def upload_video(
     description: str,
     privacy_status: str = "unlisted",
     is_short: bool = True,
+    synthetic_media: bool = False,
 ) -> str:
     """Upload video_path to the connected channel. Returns the new video's
     id on success.
+
+    `synthetic_media` ticks YouTube's "altered or synthetic content" box
+    (status.containsSyntheticMedia): needed when an AI copy of a real
+    person's voice says things they didn't record -- a friend's cloned
+    voice narrating. Left off otherwise, so other uploads send exactly
+    what they did before.
 
     `is_short` appends the "#Shorts" tag this app's clips need to be
     reliably classified as a Short (see _with_shorts_tag). Set it False
@@ -82,6 +89,9 @@ def upload_video(
     else:
         description = description[:_YOUTUBE_DESCRIPTION_MAX]
     size = video_path.stat().st_size
+    status = {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False}
+    if synthetic_media:
+        status["containsSyntheticMedia"] = True
 
     try:
         init_resp = requests.post(
@@ -99,7 +109,7 @@ def upload_video(
                 # would otherwise fail the whole upload on a 400 instead
                 # of just being trimmed to fit.
                 "snippet": {"title": title[:100], "description": description, "categoryId": _GAMING_CATEGORY_ID},
-                "status": {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False},
+                "status": status,
             },
             timeout=30,
         )
