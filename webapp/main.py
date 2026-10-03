@@ -1126,8 +1126,14 @@ def _gather_clip_performance(refresh: bool = False) -> dict:
     records = clip_registry.all_records(_clip_registry_path)
 
     metrics = youtube_analytics.get_video_retention(access_token, own["id"], lookback_days=365, max_videos=200)
+    try:
+        for vid, extra in youtube_analytics.get_video_engagement(access_token, own["id"]).items():
+            metrics.setdefault(vid, {}).update(extra)
+    except Exception as e:  # noqa: BLE001 - engagement is extra; retention and views stand without it
+        print(f"[clip_performance] engagement unavailable: {e}", flush=True)
     curves = _load_retention_curves(access_token, own["id"], videos)
-    stats = clip_performance.build_stats(videos, metrics, curves, records)
+    stats = clip_performance.build_stats(videos, metrics, curves, records,
+                                         streamers=_profile_logins(DEFAULT_CHANNEL_PROFILE))
     try:
         daily = youtube_analytics.get_daily_totals(access_token, own["id"])
         trend = clip_performance.build_trend(daily, stats["videos"])
@@ -6584,6 +6590,11 @@ ANALYTICS_HTML = """<!doctype html>
   .stat-sub { font-size: 0.68rem; color: var(--muted); margin-top: 2px; }
   .table-scroll { overflow-x: auto; margin-top: 10px; }
   .perf-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  .learning { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .learning h3 { margin: 0 0 4px; font-size: 1rem; }
+  .learn-sub { margin-top: 12px; font-weight: 600; font-size: 0.85rem; }
+  .learn-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.85rem; }
+  .learn-list li { margin: 3px 0; overflow-wrap: anywhere; }
   .perf-table th, .perf-table td {
     padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border);
     white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -6986,20 +6997,21 @@ function buildComparisonTable(groups) {
   const table = el('table', { className: 'perf-table' });
   const head = el('thead');
   const headRow = el('tr');
-  ['', 'Shorts', 'At 3s', 'Watched', 'Median views', 'Subs / 1k views'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  ['', 'Shorts', 'Stayed', 'At 3s', 'Watched', 'Median views', 'Subs / 1k views'].forEach(h => headRow.appendChild(el('th', { text: h })));
   head.appendChild(headRow);
   table.appendChild(head);
   const body = el('tbody');
   groups.forEach(g => {
     const nameRow = el('tr', { className: 'group-name' });
     const nameCell = el('th', { text: g.name + (g.made_here_only ? ' (clips made here only)' : '') });
-    nameCell.colSpan = 6;
+    nameCell.colSpan = 7;
     nameRow.appendChild(nameCell);
     body.appendChild(nameRow);
     g.buckets.forEach(b => {
       const row = el('tr', { className: b.enough ? '' : 'thin' });
       row.appendChild(el('td', { text: b.label + (b.enough ? '' : ' *') }));
       row.appendChild(el('td', { text: String(b.n) }));
+      row.appendChild(el('td', { text: fmtFraction(b.stayed) }));
       row.appendChild(el('td', { text: fmtFraction(b.watch_3s) }));
       row.appendChild(el('td', { text: fmtPercent(b.avg_view_pct) }));
       row.appendChild(el('td', { text: fmtCount(b.median_views) }));
@@ -7012,6 +7024,63 @@ function buildComparisonTable(groups) {
   return wrap;
 }
 
+// What the clip picker learns from (clip_performance.build_learning): the
+// last two weeks vs the two before, best and worst recent Shorts, streamers.
+function buildLearningBlock(L) {
+  const box = el('div', { className: 'learning' });
+  box.appendChild(el('h3', { text: 'What the clip picker learns from' }));
+  box.appendChild(el('div', { className: 'hint', text: 'Every new batch of clips is picked with these in front of Claude, alongside the comparisons below.' }));
+  const a = L.last_14 || {}, b = L.prev_14 || {};
+  if (a.n && b.n) {
+    const tiles = el('div', { className: 'stat-row' });
+    const change = (x, y) => (x != null && y) ? `${x >= y ? '+' : ''}${Math.round((x - y) / y * 100)}% vs the 2 weeks before` : '';
+    tiles.appendChild(statTile('Median views, last 2 weeks', fmtCount(a.median_views), change(a.median_views, b.median_views) || `${a.n} Shorts`));
+    if (a.stayed != null) tiles.appendChild(statTile('Stayed to watch, last 2 weeks', fmtFraction(a.stayed), b.stayed != null ? `was ${fmtFraction(b.stayed)}` : ''));
+    box.appendChild(tiles);
+  }
+  const list = (title, items) => {
+    if (!items || !items.length) return;
+    box.appendChild(el('div', { className: 'learn-sub', text: title }));
+    const ul = el('ul', { className: 'learn-list' });
+    items.forEach(e => {
+      const li = el('li');
+      const link = el('a', { text: e.title, href: `https://youtube.com/shorts/${encodeURIComponent(e.id)}` });
+      link.target = '_blank'; link.rel = 'noopener';
+      li.appendChild(link);
+      const bits = [fmtCount(e.views) + ' views', e.stayed != null ? fmtFraction(e.stayed) + ' stayed' : null,
+        e.duration != null ? Math.round(e.duration) + 's' : null, e.moment_type, e.streamer].filter(Boolean);
+      li.appendChild(el('span', { className: 'hint', text: ' · ' + bits.join(' · ') }));
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  };
+  list('Best recent Shorts', L.best);
+  list('Worst recent Shorts', L.worst);
+  if (L.streamers && L.streamers.length) {
+    box.appendChild(el('div', { className: 'learn-sub', text: 'By streamer (last 60 days)' }));
+    const wrap = el('div', { className: 'table-scroll' });
+    const t = el('table', { className: 'perf-table' });
+    const hr = el('tr');
+    ['Streamer', 'Shorts', 'Median views', 'Stayed', 'Last 3 weeks', 'Before'].forEach(h => hr.appendChild(el('th', { text: h })));
+    const th = el('thead'); th.appendChild(hr); t.appendChild(th);
+    const tb = el('tbody');
+    L.streamers.forEach(x => {
+      const r = el('tr');
+      const down = x.recent_median != null && x.earlier_median != null && x.recent_median < x.earlier_median * 0.7;
+      const up = x.recent_median != null && x.earlier_median != null && x.recent_median > x.earlier_median * 1.3;
+      r.appendChild(el('td', { text: x.name + (down ? ' ↓' : up ? ' ↑' : '') }));
+      r.appendChild(el('td', { text: String(x.n) }));
+      r.appendChild(el('td', { text: fmtCount(x.median_views) }));
+      r.appendChild(el('td', { text: fmtFraction(x.stayed) }));
+      r.appendChild(el('td', { text: x.recent_median == null ? '–' : `${fmtCount(x.recent_median)} (${x.recent_n})` }));
+      r.appendChild(el('td', { text: x.earlier_median == null ? '–' : `${fmtCount(x.earlier_median)} (${x.earlier_n})` }));
+      tb.appendChild(r);
+    });
+    t.appendChild(tb); wrap.appendChild(t); box.appendChild(wrap);
+  }
+  return box;
+}
+
 function buildVideoTable(videos) {
   const details = el('details', { className: 'perf-videos' });
   details.appendChild(el('summary', { text: `Every Short in this analysis (${videos.length})` }));
@@ -7019,7 +7088,7 @@ function buildVideoTable(videos) {
   const table = el('table', { className: 'perf-table' });
   const head = el('thead');
   const headRow = el('tr');
-  ['Title', 'At 3s', 'Watched', 'Views', 'Subs', 'Length', 'Posted', 'Made here'].forEach(h => headRow.appendChild(el('th', { text: h })));
+  ['Title', 'Stayed', 'At 3s', 'Watched', 'Views', 'Shares / 1k', 'Subs', 'Length', 'Posted', 'Made here'].forEach(h => headRow.appendChild(el('th', { text: h })));
   head.appendChild(headRow);
   table.appendChild(head);
   const body = el('tbody');
@@ -7032,9 +7101,11 @@ function buildVideoTable(videos) {
     titleCell.appendChild(link);
     if (v.too_new_to_judge) titleCell.appendChild(el('span', { className: 'hint', text: ' (too new to judge)' }));
     row.appendChild(titleCell);
+    row.appendChild(el('td', { text: fmtFraction(v.stayed) }));
     row.appendChild(el('td', { text: fmtFraction(v.retention ? v.retention.watch_3s : null) }));
     row.appendChild(el('td', { text: fmtPercent(v.avg_view_pct) }));
     row.appendChild(el('td', { text: fmtCount(v.views) }));
+    row.appendChild(el('td', { text: v.shares_per_1k == null ? '–' : v.shares_per_1k.toFixed(1) }));
     row.appendChild(el('td', { text: v.subs_gained == null ? '–' : fmtSigned(v.subs_gained) }));
     row.appendChild(el('td', { text: v.duration != null ? `${Math.round(v.duration)}s` : '–' }));
     row.appendChild(el('td', { text: v.published_at ? new Date(v.published_at).toLocaleDateString() : '–' }));
@@ -7083,6 +7154,7 @@ async function loadClipPerformance(refresh) {
   const tiles = el('div', { className: 'stat-row' });
   tiles.appendChild(statTile('Median views', fmtCount(s.median_views)));
   tiles.appendChild(statTile('Watched on average', fmtPercent(s.avg_view_pct), 'of each Short, replays included'));
+  if (s.stayed != null) tiles.appendChild(statTile('Stayed to watch', fmtFraction(s.stayed), 'plays not swiped away · 70%+ is viral, ~50% average'));
   tiles.appendChild(statTile('Still watching at 3s', fmtFraction(s.watch_3s), 'per view'));
   if (s.subs_per_1k != null) {
     tiles.appendChild(statTile('Subscribers per 1,000 views', s.subs_per_1k.toFixed(1), 'across these Shorts'));
@@ -7097,6 +7169,7 @@ async function loadClipPerformance(refresh) {
       body.appendChild(el('div', { className: 'hint', text: `The single biggest drop usually lands ${s.typical_steepest_drop_at}s in.` }));
     }
   }
+  if (data.learning) body.appendChild(buildLearningBlock(data.learning));
   if (data.groups && data.groups.length) {
     const note = el('div', {
       className: 'hint',

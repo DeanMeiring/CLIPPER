@@ -53,6 +53,25 @@ merge it yourself; merging stays Dean's call per the rule above.
 - The "learns from YouTube stats" notes (`_load_strategy_notes` /
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
+- **Learning upgrade (Oct 2026):** Dean saw Shorts views declining and
+  asked the picker to learn more from past videos. `clip_performance`
+  now also gets `youtube_analytics.get_video_engagement` (engagedViews,
+  likes, comments, shares per video; falls back without engagedViews):
+  "stayed to watch" = engagedViews / views, the API's nearest thing to
+  Studio's "viewed vs swiped away" (since March 2025 a Shorts view counts
+  every start or replay). `build_learning` adds the last 2 weeks vs the 2
+  before, the 6 best and 6 worst Shorts of the last 60 days (with moment
+  type, hook text, length, Claude's own score) and per-streamer momentum
+  (streamer = first `TRENDING_TWITCH_LOGINS` name in the title or source
+  title; recent = last 3 weeks). All of it goes into the performance notes
+  the picker and the AI overview read (`render_prompt_text`), and into a
+  "What the clip picker learns from" block on Analytics. The picker
+  prompt's own wording is unchanged.
+- YouTube announced on 1 Oct 2026 that the Shorts feed will cut reach for
+  channels that mainly re-upload others' clips without significant changes
+  (voice-over describing the clip, minor edits and templates don't count;
+  own commentary, analysis, storytelling do; permission doesn't help).
+  This is the biggest outside risk to the clip channel; Dean was told.
 
 ## Long-form: "The Story Of" streamer documentaries
 

@@ -79,6 +79,41 @@ def get_video_retention(access_token: str, channel_id: str, lookback_days: int =
     return result
 
 
+def get_video_engagement(access_token: str, channel_id: str, lookback_days: int = 365, max_videos: int = 200) -> dict:
+    """Per-video engagedViews, likes, comments and shares, keyed by video id.
+
+    Since March 2025 a Shorts "view" counts every start or replay, however
+    short; engagedViews keeps the old count (watched past the first
+    moments). engagedViews / views is the closest the API gets to Studio's
+    "viewed vs swiped away" -- the signal the Shorts feed weighs most.
+    Shares and comments are the next-strongest signals."""
+    import requests
+
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=lookback_days)
+    params = {
+        "ids": f"channel=={channel_id}",
+        "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "metrics": "engagedViews,likes,comments,shares",
+        "dimensions": "video",
+        "sort": "-likes",
+        "maxResults": max_videos,
+    }
+    names = ["engaged_views", "likes", "comments", "shares"]
+    try:
+        data = _get(ANALYTICS_URL, access_token, params)
+    except requests.HTTPError as e:
+        # An account or API version without engagedViews still has the rest.
+        if e.response is None or e.response.status_code != 400:
+            raise
+        names = names[1:]
+        data = _get(ANALYTICS_URL, access_token, {**params, "metrics": "likes,comments,shares"})
+    result: dict = {}
+    for row in data.get("rows") or []:
+        result[row[0]] = {name: row[i + 1] for i, name in enumerate(names) if i + 1 < len(row)}
+    return result
+
+
 def get_daily_totals(access_token: str, channel_id: str, days: int = 63) -> list:
     """Channel-wide views and subscribers per day, oldest first:
     [{"date": "2026-09-01", "views": 1200, "subscribers_gained": 3,
