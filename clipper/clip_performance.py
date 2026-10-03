@@ -67,12 +67,23 @@ def build_rows(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, reco
             "views": m.get("views", v.get("views")),
             "avg_view_pct": m.get("average_view_percentage"),
             "subs_gained": m.get("subscribers_gained"),
+            "engaged_views": m.get("engaged_views"),
+            "likes": m.get("likes"),
+            "comments": m.get("comments"),
+            "shares": m.get("shares"),
             "retention": curve_metrics(curves_by_id.get(v["id"]) or [], v.get("duration_seconds")),
             "made_here": record is not None,
             "clip": None,
         }
         row.update(title_features(v["title"]))
+        views = row["views"] or 0
+        # Engaged views / views: the share of plays that didn't swipe away
+        # in the first moments (see youtube_analytics.get_video_engagement).
+        row["stayed"] = round(min(1.0, row["engaged_views"] / views), 3) if row["engaged_views"] is not None and views else None
+        row["shares_per_1k"] = round(row["shares"] / views * 1000, 2) if row["shares"] is not None and views else None
+        row["comments_per_1k"] = round(row["comments"] / views * 1000, 2) if row["comments"] is not None and views else None
         if record is not None:
+            row["source_title"] = record.get("source_title")
             row["clip"] = {
                 **(record.get("features") or {}),
                 "layout": record.get("layout"),
@@ -271,11 +282,13 @@ def _bucket_stats(label: str, rows: List[dict]) -> dict:
     views = [r["views"] for r in rows if r.get("views") is not None]
     pcts = [r["avg_view_pct"] for r in rows if r.get("avg_view_pct") is not None]
     watch_3s = [r["retention"]["watch_3s"] for r in rows if r.get("retention")]
+    stayed = [r["stayed"] for r in rows if r.get("stayed") is not None]
     median_views = _median(views)
     return {
         "label": label,
         "n": len(rows),
         "median_views": round(median_views) if median_views is not None else None,
+        "stayed": _mean(stayed),
         "subs_per_1k": _subs_per_1k(rows),
         "avg_view_pct": round(statistics.mean(pcts), 1) if pcts else None,
         "watch_3s": _mean(watch_3s),
@@ -301,7 +314,8 @@ def _group(rows: List[dict], key: str, name: str, fn: Callable, order: List[str]
     }
 
 
-def build_stats(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, records: List[dict]) -> dict:
+def build_stats(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, records: List[dict],
+                streamers: Optional[List[str]] = None) -> dict:
     rows = build_rows(videos, metrics_by_id, curves_by_id, records)
     settled = [r for r in rows if not r["too_new_to_judge"]]
     with_curve = [r for r in settled if r.get("retention")]
@@ -329,9 +343,94 @@ def build_stats(videos: List[dict], metrics_by_id: dict, curves_by_id: dict, rec
         "overall_vs_similar": _mean(curve_values("overall_vs_similar")),
     }
     summary["subs_per_1k"] = _subs_per_1k(settled)
+    summary["stayed"] = _mean([r["stayed"] for r in settled if r.get("stayed") is not None])
+    for r in rows:
+        r["streamer"] = _streamer(r, streamers or [])
     groups = [g for g in (_group(settled, *spec) for spec in GROUPS) if g]
     rows.sort(key=lambda r: r.get("published_at") or "", reverse=True)
-    return {"summary": summary, "groups": groups, "videos": rows}
+    return {"summary": summary, "groups": groups, "videos": rows, "learning": build_learning(settled)}
+
+
+# ---------------------------------------------------------- learning ---
+# Group averages alone taught the picker little (Dean, Oct 2026: views
+# declining). These give it concrete cases from the channel itself: the
+# best and worst recent Shorts with what they were, which streamers'
+# clips are rising or wearing out, and whether the last two weeks are up
+# or down -- the closest thing to watching the channel's own analytics.
+
+RECENT_DAYS = 60
+
+
+def _norm(text: str) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def _streamer(row: dict, streamers: List[str]) -> Optional[str]:
+    """Which tracked streamer a Short is about: the one whose name appears
+    first in its title (titles lead with the streamer's name), else in the
+    source stream's title. None when no tracked name appears."""
+    names = [(n, _norm(n)) for n in streamers if len(_norm(n)) >= 3]
+    for text in (row.get("title"), row.get("source_title")):
+        hay = _norm(text)
+        found = [(hay.find(key), name) for name, key in names if key and key in hay]
+        if found:
+            return min(found)[1]
+    return None
+
+
+def _example(r: dict) -> dict:
+    clip = r.get("clip") or {}
+    return {
+        "id": r["id"], "title": r["title"], "views": r.get("views"), "duration": r.get("duration"),
+        "age_days": r.get("age_days"), "streamer": r.get("streamer"),
+        "stayed": r.get("stayed"), "watch_3s": (r.get("retention") or {}).get("watch_3s"),
+        "avg_view_pct": r.get("avg_view_pct"), "shares_per_1k": r.get("shares_per_1k"),
+        "comments_per_1k": r.get("comments_per_1k"), "subs_gained": r.get("subs_gained"),
+        "moment_type": clip.get("moment_type"), "hook_caption": clip.get("hook_caption"),
+        "score": clip.get("score"), "first_word_delay": clip.get("first_word_delay"),
+    }
+
+
+def _window(rows: List[dict], lo: int, hi: int) -> dict:
+    part = [r for r in rows if r.get("age_days") is not None and lo <= r["age_days"] <= hi]
+    views = [r["views"] for r in part if r.get("views") is not None]
+    med = _median(views)
+    return {
+        "n": len(part),
+        "median_views": round(med) if med is not None else None,
+        "stayed": _mean([r["stayed"] for r in part if r.get("stayed") is not None]),
+        "watch_3s": _mean([r["retention"]["watch_3s"] for r in part if r.get("retention")]),
+    }
+
+
+def build_learning(settled: List[dict]) -> dict:
+    recent = [r for r in settled if r.get("age_days") is not None and r["age_days"] <= RECENT_DAYS and r.get("views") is not None]
+    ranked = sorted(recent, key=lambda r: r["views"], reverse=True)
+    k = min(6, len(ranked) // 3)
+    best = [_example(r) for r in ranked[:k]] if k >= 2 else []
+    worst = [_example(r) for r in ranked[-k:][::-1]] if k >= 2 else []
+    by: dict = {}
+    for r in recent:
+        if r.get("streamer"):
+            by.setdefault(r["streamer"], []).append(r)
+    streamers = []
+    for name, rs in by.items():
+        if len(rs) < 2:
+            continue
+        newer = [r["views"] for r in rs if r["age_days"] <= 21]
+        older = [r["views"] for r in rs if r["age_days"] > 21]
+        med = _median([r["views"] for r in rs])
+        streamers.append({
+            "name": name, "n": len(rs), "median_views": round(med) if med is not None else None,
+            "stayed": _mean([r["stayed"] for r in rs if r.get("stayed") is not None]),
+            "recent_median": round(_median(newer)) if newer else None, "recent_n": len(newer),
+            "earlier_median": round(_median(older)) if older else None, "earlier_n": len(older),
+        })
+    streamers.sort(key=lambda x: (-x["n"], -(x["median_views"] or 0)))
+    return {
+        "best": best, "worst": worst, "streamers": streamers[:12],
+        "last_14": _window(settled, 0, 14), "prev_14": _window(settled, 15, 28),
+    }
 
 
 TREND_WEEKS = 8
@@ -413,6 +512,8 @@ def _bucket_line(b: dict) -> str:
         details.append(f"{b['avg_view_pct']:.0f}% of the video watched")
     if b["watch_3s"] is not None:
         details.append(f"{_pct(b['watch_3s'])} still watching at 3s (from {b['n_retention']} curves)")
+    if b.get("stayed") is not None:
+        details.append(f"{_pct(b['stayed'])} stayed to watch")
     return parts[0] + (": " + ", ".join(details) if details else "")
 
 
@@ -434,6 +535,8 @@ def render_prompt_text(stats: dict) -> str:
             f"per view, {_pct(s['watch_1s'])} still watching at 1s, {_pct(s['watch_3s'])} at 3s, "
             f"{_pct(s['watch_mid'])} at the halfway point, {_pct(s['watch_end'])} near the end"
         )
+    if s.get("stayed") is not None:
+        overall.append(f"{_pct(s['stayed'])} of plays stayed to watch rather than swiping away (engaged views / views)")
     if s["typical_steepest_drop_at"] is not None:
         overall.append(f"the single biggest drop typically lands at {s['typical_steepest_drop_at']}s")
     if overall:
@@ -465,4 +568,53 @@ def render_prompt_text(stats: dict) -> str:
             )
         if trend["views_change_pct"] is not None:
             lines.append(f"Latest week vs the week before: views {trend['views_change_pct']:+d}%.")
+    lines += _learning_lines(stats.get("learning") or {})
     return "\n".join(lines)
+
+
+def _example_line(e: dict) -> str:
+    bits = [f"{e['views']:,} views" if e.get("views") is not None else None,
+            f"{_pct(e['stayed'])} stayed to watch" if e.get("stayed") is not None else None,
+            f"{_pct(e['watch_3s'])} at 3s" if e.get("watch_3s") is not None else None,
+            f"{e['avg_view_pct']:.0f}% watched" if e.get("avg_view_pct") is not None else None,
+            f"{e['shares_per_1k']:.1f} shares/1k" if e.get("shares_per_1k") is not None else None,
+            f"{e['comments_per_1k']:.1f} comments/1k" if e.get("comments_per_1k") is not None else None,
+            f"{e['duration']:.0f}s long" if e.get("duration") is not None else None,
+            f"a {e['moment_type']} moment" if e.get("moment_type") else None,
+            f"hook text \"{e['hook_caption']}\"" if e.get("hook_caption") else None,
+            f"first words after {e['first_word_delay']:.1f}s" if e.get("first_word_delay") is not None else None,
+            f"you scored it {e['score']}/10 when picking" if e.get("score") is not None else None]
+    return f"- \"{e['title']}\": " + ", ".join(b for b in bits if b)
+
+
+def _learning_lines(learning: dict) -> List[str]:
+    out = []
+    a, b = learning.get("last_14") or {}, learning.get("prev_14") or {}
+    if a.get("n") and b.get("n"):
+        def part(w: dict) -> str:
+            bits = [f"{w['n']} Shorts", f"median {w['median_views']:,} views" if w.get("median_views") is not None else None,
+                    f"{_pct(w['stayed'])} stayed to watch" if w.get("stayed") is not None else None,
+                    f"{_pct(w['watch_3s'])} at 3s" if w.get("watch_3s") is not None else None]
+            return ", ".join(x for x in bits if x)
+        out.append(f"Momentum: Shorts posted in the last 2 weeks: {part(a)}. The 2 weeks before: {part(b)}.")
+    if learning.get("best") and learning.get("worst"):
+        out.append(
+            f"This channel's BEST and WORST Shorts of the last {RECENT_DAYS} days, by views. Before picking, work out "
+            "what the best share that the worst lack -- kind of moment, how fast it gets going, the hook, length, "
+            "which streamer -- and pick and cut toward the best. Where your own score was high on a flop, that "
+            "kind of moment is weaker for this audience than it looks in a transcript:")
+        out.append("BEST:")
+        out += [_example_line(e) for e in learning["best"]]
+        out.append("WORST:")
+        out += [_example_line(e) for e in learning["worst"]]
+    if learning.get("streamers"):
+        out.append(f"By streamer (last {RECENT_DAYS} days; 'recent' = last 3 weeks). A streamer whose recent clips "
+                   "do clearly worse than before is wearing out with this audience: only pick them for an "
+                   "outstanding moment. One whose recent clips do better is gaining: favour them.")
+        for x in learning["streamers"]:
+            bits = [f"{x['n']} Shorts", f"median {x['median_views']:,} views" if x.get("median_views") is not None else None,
+                    f"{_pct(x['stayed'])} stayed" if x.get("stayed") is not None else None]
+            if x.get("recent_median") is not None and x.get("earlier_median") is not None:
+                bits.append(f"recent median {x['recent_median']:,} ({x['recent_n']}) vs earlier {x['earlier_median']:,} ({x['earlier_n']})")
+            out.append(f"- {x['name']}: " + ", ".join(b for b in bits if b))
+    return out
