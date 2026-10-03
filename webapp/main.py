@@ -43,6 +43,7 @@ from clipper import longform_analytics
 from clipper import explainer
 from clipper import longform_promo
 from clipper import longform_thumbnail
+from clipper import ranking
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -1133,8 +1134,12 @@ def _gather_clip_performance(refresh: bool = False) -> dict:
     except Exception as e:  # noqa: BLE001 - engagement is extra; retention and views stand without it
         print(f"[clip_performance] engagement unavailable: {e}", flush=True)
     curves = _load_retention_curves(access_token, own["id"], videos)
-    stats = clip_performance.build_stats(videos, metrics, curves, records,
+    # Posted ranking Shorts are a different format (several moments and a
+    # narrator): reported on their own, kept out of what the picker learns.
+    ranking_ids = _ranking_video_ids()
+    stats = clip_performance.build_stats([v for v in videos if v["id"] not in ranking_ids], metrics, curves, records,
                                          streamers=_profile_logins(DEFAULT_CHANNEL_PROFILE))
+    ranking_rows = clip_performance.build_rows([v for v in videos if v["id"] in ranking_ids], metrics, curves, [])
     try:
         daily = youtube_analytics.get_daily_totals(access_token, own["id"])
         trend = clip_performance.build_trend(daily, stats["videos"])
@@ -1149,6 +1154,7 @@ def _gather_clip_performance(refresh: bool = False) -> dict:
         "generated_at": time.time(),
         **stats,
         "trend": trend,
+        "rankings": ranking_rows,
     }
     _clip_performance_cache.update(at=time.time(), data=data)
     return data
@@ -3073,6 +3079,11 @@ def voices_page() -> str:
     return VOICES_HTML.replace("__NAV_LINKS__", _nav_links("/voices"))
 
 
+@protected.get("/rankings", response_class=HTMLResponse)
+def rankings_page() -> str:
+    return RANKINGS_HTML.replace("__NAV_LINKS__", _nav_links("/rankings"))
+
+
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
 # A bi-weekly series on the main (Caught On Stream) channel, a different
 # streamer each episode. Research -> story -> record -> render -> post.
@@ -4731,6 +4742,549 @@ def longform_promo_shorts(pid: str) -> dict:
     return _longform_store.update(pid, lambda pr: pr.update(promo_job_id=job_id))
 
 
+# ---- Ranking Shorts (clipper/ranking.py): "Ranking <streamer>'s Funniest
+# Moments" built from clips the pipeline already found. Claude orders them
+# and writes a label and a narrator line for each; Dean (or a voice from the
+# Voices page) reads the lines; the render lands on Home as a finished job
+# to post like any Short. Projects live in BASE_DIR/_rankings/<id>/.
+_rankings = longform.ProjectStore(BASE_DIR / "_rankings")
+_RANK_KEYS = "ABCDE"
+_ranking_busy: set = set()
+_ranking_busy_lock = threading.Lock()
+
+
+def _ranking(rid: str) -> dict:
+    try:
+        project = _rankings.load(rid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "ranking not found")
+    if project.get("status") in ("planning", "rendering") and rid not in _ranking_busy:
+        # The server restarted mid-way: say so instead of spinning forever.
+        project = _rankings.update(rid, lambda p: p.update(
+            status="error" if p.get("status") == "planning" else "ready",
+            error="The server restarted while this was running -- try again.",
+            render={**(p.get("render") or {}), "status": "error"} if p.get("status") == "rendering" else p.get("render")))
+    return project
+
+
+def _ranking_claim(rid: str) -> None:
+    with _ranking_busy_lock:
+        if rid in _ranking_busy:
+            raise HTTPException(409, "this ranking is busy -- give it a moment")
+        _ranking_busy.add(rid)
+
+
+def _ranking_release(rid: str) -> None:
+    with _ranking_busy_lock:
+        _ranking_busy.discard(rid)
+
+
+def _clip_source_path(job_id: str, clip: dict) -> Optional[Path]:
+    name = clip.get("source_video")
+    if not name or Path(name).name != name:
+        return None
+    path = BASE_DIR / job_id / "_source" / name
+    return path if path.is_file() else None
+
+
+def _streamer_in(text: str) -> str:
+    """The tracked streamer named in a stream title, as it's written there
+    ("StableRonaldo", not "stableronaldo")."""
+    found = []
+    for login in _profile_logins(DEFAULT_CHANNEL_PROFILE):
+        m = re.search(re.escape(login), text or "", re.I)
+        if m and len(login) >= 3:
+            found.append((m.start(), m.group(0)))
+    return min(found)[1] if found else ""
+
+
+def _ranking_job_clip(job_id: str, file: str) -> tuple:
+    with jobs_lock:
+        job = dict(jobs.get(job_id) or {})
+        clip = next((dict(c) for c in job.get("clips") or [] if c.get("file") == file), None)
+    if not job or clip is None:
+        raise HTTPException(404, f"clip {file} isn't there any more")
+    return job, clip
+
+
+@protected.get("/api/rankings/clips")
+def ranking_clip_choices(days: int = 30) -> dict:
+    """Clips the pipeline made in the last `days` whose downloaded source
+    is still on disk, newest job first, best-scored first within a job."""
+    since = time.time() - max(1, min(days, 365)) * 86400
+    with jobs_lock:
+        snapshot = [(jid, dict(j), [dict(c) for c in j.get("clips") or []]) for jid, j in jobs.items()]
+    rows = []
+    for jid, job, clips in snapshot:
+        if job.get("state") != "done" or job.get("promo_episode") or job.get("ranking_id") or (job.get("created_at") or 0) < since:
+            continue
+        if _profile_or_default(job.get("channel_profile")) != DEFAULT_CHANNEL_PROFILE:
+            continue
+        for c in clips:
+            if c.get("promo") or c.get("is_recap") or c.get("start") is None or not _clip_source_path(jid, c):
+                continue
+            rows.append({
+                "job_id": jid, "file": c["file"], "title": c.get("upload_title") or c.get("title") or c["file"],
+                "source_title": job.get("source_title") or "", "streamer": _streamer_in(job.get("source_title") or ""),
+                "score": c.get("score"), "moment_type": c.get("moment_type"),
+                "seconds": round(float(c["end"]) - float(c["start"]), 1), "created_at": job.get("created_at"),
+                "posted": bool(c.get("youtube_video_id")), "frame": c.get("source_frame"),
+            })
+    rows.sort(key=lambda r: (-(r["created_at"] or 0), -(r["score"] or 0)))
+    return {"clips": rows[:150], "themes": ranking.THEMES, "emoji": ranking.EMOJI}
+
+
+def _ranking_summary(p: dict) -> dict:
+    slots = p.get("slots") or []
+    title = (p.get("publish") or {}).get("title") or f"Ranking {p.get('streamer') or ''}'s {p.get('theme') or ''}"
+    return {"id": p["id"], "title": title, "status": p.get("status"), "created_at": p.get("created_at"),
+            "slots": len(slots), "voiced": sum(1 for s in slots if _slot_ready(s)),
+            "rendered": (p.get("render") or {}).get("status") == "done", "job_id": (p.get("render") or {}).get("job_id")}
+
+
+def _slot_ready(slot: dict) -> bool:
+    t = slot.get("take") or {}
+    return bool(t.get("file")) and bool(t.get("ok") or t.get("kept"))
+
+
+@protected.get("/api/rankings")
+def list_rankings() -> dict:
+    return {"rankings": [_ranking_summary(p) for p in _rankings.list()]}
+
+
+class RankingPick(BaseModel):
+    job_id: str
+    file: str
+
+
+class RankingCreateRequest(BaseModel):
+    clips: List[RankingPick]
+    theme: str = "Funniest Moments"
+    streamer: str = ""
+
+
+def _ranking_inputs(project: dict) -> List[dict]:
+    """The picked clips as ranking.plan() wants them: source video, cut
+    range in it, and the cached transcript's words relative to the clip."""
+    out = []
+    for k, src in enumerate(project.get("sources") or []):
+        job, clip = _ranking_job_clip(src["job_id"], src["file"])
+        video = _clip_source_path(src["job_id"], clip)
+        if video is None:
+            raise HTTPException(409, f"the downloaded stream for “{clip.get('title') or src['file']}” was deleted")
+        start, end = float(clip["start"]), float(clip["end"])
+        words = _cached_words(BASE_DIR / src["job_id"] / "_source").get(clip.get("window_index")) or []
+        rel = [{"w": w.text, "s": round(w.start - start, 2), "e": round(w.end - start, 2)}
+               for w in words if w.start >= start - 0.05 and w.end <= end + 0.05]
+        out.append({"key": _RANK_KEYS[k], "job_id": src["job_id"], "file": src["file"], "video": video,
+                    "start": start, "duration": round(end - start, 2), "words": rel,
+                    "title": clip.get("title"), "reason": clip.get("reason")})
+    return out
+
+
+def _ranking_plan(rid: str) -> None:
+    try:
+        project = _rankings.load(rid)
+        inputs = _ranking_inputs(project)
+        streamer, theme = project.get("streamer") or "this streamer", project.get("theme") or ranking.THEMES[0]
+        result = ranking.plan(inputs, streamer, theme)
+        by_key = {c["key"]: c for c in inputs}
+        slots = [{**s, "job_id": by_key[s["key"]]["job_id"], "file": by_key[s["key"]]["file"],
+                  "duration": by_key[s["key"]]["duration"], "take": None} for s in result["slots"]]
+        pub = ranking.publish_text(result["title"], result["description"], streamer)
+        _rankings.update(rid, lambda p: p.update(status="ready", error=None, slots=slots, publish=pub))
+    except Exception as e:
+        print(f"[ranking] planning {rid} failed: {e}", flush=True)
+        detail = e.detail if isinstance(e, HTTPException) else str(e)
+        _rankings.update(rid, lambda p: p.update(status="error", error=f"Couldn't rank these: {detail}"))
+    finally:
+        _ranking_release(rid)
+
+
+@protected.post("/api/rankings")
+def create_ranking(req: RankingCreateRequest) -> dict:
+    picks = []
+    for p in req.clips:
+        key = (p.job_id, p.file)
+        if key not in picks:
+            picks.append(key)
+    if not ranking.MIN_SLOTS <= len(picks) <= ranking.MAX_SLOTS:
+        raise HTTPException(400, f"Pick {ranking.MIN_SLOTS} to {ranking.MAX_SLOTS} clips.")
+    streamer = " ".join(req.streamer.split())[:40]
+    for job_id, file in picks:
+        job, clip = _ranking_job_clip(job_id, file)
+        if not _clip_source_path(job_id, clip):
+            raise HTTPException(409, f"the downloaded stream for “{clip.get('title') or file}” was deleted")
+        streamer = streamer or _streamer_in(job.get("source_title") or "")
+    theme = " ".join(req.theme.split())[:40] or ranking.THEMES[0]
+    project = _rankings.create({"status": "planning", "theme": theme, "streamer": streamer or "this streamer",
+                                "sources": [{"job_id": j, "file": f} for j, f in picks], "ai_voice": "me", "slots": []})
+    _ranking_claim(project["id"])
+    threading.Thread(target=_ranking_plan, args=(project["id"],), daemon=True).start()
+    return project
+
+
+@protected.get("/api/rankings/{rid}")
+def get_ranking(rid: str) -> dict:
+    return _ranking(rid)
+
+
+@protected.post("/api/rankings/{rid}/replan")
+def replan_ranking(rid: str) -> dict:
+    """Ask Claude again (new order, cuts, labels, lines). Recorded lines go."""
+    _ranking(rid)
+    _ranking_claim(rid)
+    project = _rankings.update(rid, lambda p: p.update(status="planning", error=None))
+    for f in (_rankings.path(rid) / "takes").glob("*"):
+        f.unlink(missing_ok=True)
+    threading.Thread(target=_ranking_plan, args=(rid,), daemon=True).start()
+    return project
+
+
+class RankingSlotEdit(BaseModel):
+    key: str
+    label: Optional[str] = None
+    emoji: Optional[str] = None
+    line: Optional[str] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+
+
+class RankingEditRequest(BaseModel):
+    theme: Optional[str] = None
+    streamer: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    slots: Optional[List[RankingSlotEdit]] = None  # in the new rank order, 1 first
+
+
+@protected.put("/api/rankings/{rid}")
+def edit_ranking(rid: str, req: RankingEditRequest) -> dict:
+    """Edits from the page. Reordering changes the ranks; a changed line
+    drops that line's recording (it no longer says the same thing)."""
+    _ranking(rid)
+    if rid in _ranking_busy:
+        raise HTTPException(409, "wait until it's done ranking or rendering")
+    dropped = []
+
+    def apply(p: dict) -> None:
+        if req.theme is not None:
+            p["theme"] = " ".join(req.theme.split())[:40] or p.get("theme")
+        if req.streamer is not None:
+            p["streamer"] = " ".join(req.streamer.split())[:40] or p.get("streamer")
+        pub = dict(p.get("publish") or {})
+        if req.title is not None:
+            pub["title"] = " ".join(req.title.split())[:100]
+        if req.description is not None:
+            pub["description"] = req.description[:4000]
+        p["publish"] = pub
+        if req.slots is None:
+            return
+        by_key = {s["key"]: s for s in p.get("slots") or []}
+        if sorted(e.key for e in req.slots) != sorted(by_key):
+            raise HTTPException(400, "the moments changed -- reload the page")
+        new = []
+        for rank, e in enumerate(req.slots, start=1):
+            s = dict(by_key[e.key])
+            if e.label is not None:
+                s["label"] = ranking._clean(e.label, ranking.LABEL_MAX_CHARS) or s["label"]
+            if e.emoji is not None and e.emoji in ranking.EMOJI:
+                s["emoji"] = e.emoji
+            if e.line is not None:
+                line = ranking._clean(e.line, ranking.LINE_MAX_CHARS)
+                if line and line != s.get("line"):
+                    s["line"] = line
+                    if (s.get("take") or {}).get("file"):
+                        dropped.append(s["take"]["file"])
+                    s["take"] = None
+            if e.start is not None or e.end is not None:
+                dur = float(s.get("duration") or 0)
+                a = max(0.0, min(dur, float(e.start if e.start is not None else s["start"])))
+                b = max(0.0, min(dur, float(e.end if e.end is not None else s["end"])))
+                if b - a < ranking.MOMENT_MIN - 0.01 or b - a > ranking.MOMENT_MAX + 0.01:
+                    raise HTTPException(400, f"Moment {rank}: keep it {ranking.MOMENT_MIN:.0f} to {ranking.MOMENT_MAX:.0f} seconds long.")
+                s["start"], s["end"] = round(a, 2), round(b, 2)
+            s["rank"] = rank
+            new.append(s)
+        p["slots"] = new
+
+    project = _rankings.update(rid, apply)
+    for f in dropped:
+        (_rankings.path(rid) / "takes" / f).unlink(missing_ok=True)
+    return project
+
+
+@protected.delete("/api/rankings/{rid}")
+def delete_ranking(rid: str) -> dict:
+    _ranking(rid)
+    if rid in _ranking_busy:
+        raise HTTPException(409, "wait until it's done first")
+    _rankings.delete(rid)
+    return list_rankings()
+
+
+@protected.put("/api/rankings/{rid}/voice")
+def ranking_voice(rid: str, req: AiVoiceRequest) -> dict:
+    _ranking(rid)
+    vid = req.voice or "me"
+    _voice_path(vid)
+    return _rankings.update(rid, lambda p: p.update(ai_voice=vid))
+
+
+def _ranking_slot(project: dict, key: str) -> dict:
+    slot = next((s for s in project.get("slots") or [] if s.get("key") == key), None)
+    if slot is None:
+        raise HTTPException(404, "that moment isn't in this ranking")
+    return slot
+
+
+def _ranking_set_take(rid: str, key: str, line: str, take: dict, wav: Path) -> None:
+    replaced = []
+
+    def apply(p: dict) -> None:
+        s = _ranking_slot(p, key)
+        if s.get("line") != line:
+            raise HTTPException(409, "the line changed while this was being checked -- read it again")
+        old = s.get("take") or {}
+        if old.get("file") and old["file"] != wav.name:
+            replaced.append(old["file"])
+        s["take"] = take
+    try:
+        _rankings.update(rid, apply)
+    except HTTPException:
+        wav.unlink(missing_ok=True)
+        raise
+    for name in replaced:
+        (wav.parent / name).unlink(missing_ok=True)
+
+
+@protected.post("/api/rankings/{rid}/slots/{key}/take")
+async def ranking_record_take(rid: str, key: str, request: Request) -> dict:
+    """Dean reading one moment's line. Checked like a long-form take."""
+    project = _ranking(rid)
+    line = _ranking_slot(project, key)["line"]
+    data = await request.body()
+    if len(data) < 1000:
+        raise HTTPException(400, "that recording is empty -- check your mic")
+    if len(data) > longform.MAX_TAKE_BYTES:
+        raise HTTPException(413, "that recording is too long")
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    takes = _rankings.path(rid) / "takes"
+    takes.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    raw = takes / f"{key}_{stamp}{_TAKE_EXTS.get(ctype, '.webm')}"
+    wav = takes / f"{key}_{stamp}.wav"
+
+    def work() -> dict:
+        raw.write_bytes(data)
+        try:
+            longform.to_wav(raw, wav)
+        finally:
+            raw.unlink(missing_ok=True)
+        duration = longform.audio_duration(wav)
+        if duration > ranking.LINE_MAX_SECONDS:
+            raise ValueError(f"That's {duration:.0f} seconds -- keep the line short and punchy (under {ranking.LINE_MAX_SECONDS:.0f}).")
+        heard = longform.transcribe_take(wav)
+        return {"duration": round(duration, 2), "heard": " ".join(heard).strip(), **longform.check_take(line, heard)}
+
+    try:
+        result = await run_in_threadpool(work)
+    except ValueError as e:
+        wav.unlink(missing_ok=True)
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        wav.unlink(missing_ok=True)
+        raise HTTPException(500, f"Couldn't check that take: {e}")
+    take = {"file": wav.name, "recorded_at": time.time(), "kept": False, **result}
+    _ranking_set_take(rid, key, line, take, wav)
+    return {"take": take}
+
+
+def _ranking_clone(rid: str, key: str, line: str, vid: str) -> dict:
+    """One line in an AI voice, checked like a recording. Caller holds _voice_busy."""
+    takes = _rankings.path(rid) / "takes"
+    takes.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    raw, wav = takes / f"{key}_{stamp}_ai24k.wav", takes / f"{key}_{stamp}_ai.wav"
+    try:
+        try:
+            voice_clone.synthesize(_voice_path(vid), line, raw)
+            longform.to_wav(raw, wav)
+        finally:
+            raw.unlink(missing_ok=True)
+        duration = longform.audio_duration(wav)
+        heard = longform.transcribe_take(wav)
+    except Exception:
+        wav.unlink(missing_ok=True)
+        raise
+    take = {"file": wav.name, "recorded_at": time.time(), "kept": False, "voice": "ai",
+            "duration": round(duration, 2), "heard": " ".join(heard).strip(), **longform.check_take(line, heard)}
+    if vid != "me":
+        take["voice_id"] = vid
+    _ranking_set_take(rid, key, line, take, wav)
+    return take
+
+
+@protected.post("/api/rankings/{rid}/slots/{key}/clone")
+async def ranking_clone_take(rid: str, key: str) -> dict:
+    project = _ranking(rid)
+    line = _ranking_slot(project, key)["line"]
+    vid = project.get("ai_voice") or "me"
+    _voice_check(vid)
+    if not _voice_busy.acquire(blocking=False):
+        raise HTTPException(409, "The AI voice is busy reading something else -- try again in a few seconds.")
+    try:
+        take = await run_in_threadpool(_ranking_clone, rid, key, line, vid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ranking] AI voice failed for {rid} {key}: {e}", flush=True)
+        raise HTTPException(500, f"The AI voice couldn't read this line: {e}")
+    finally:
+        _voice_busy.release()
+    return {"take": take}
+
+
+@protected.post("/api/rankings/{rid}/slots/{key}/keep")
+def ranking_keep_take(rid: str, key: str) -> dict:
+    def apply(p: dict) -> None:
+        s = _ranking_slot(p, key)
+        if not (s.get("take") or {}).get("file"):
+            raise HTTPException(404, "nothing recorded for that line yet")
+        s["take"]["kept"] = True
+    _ranking(rid)
+    return _rankings.update(rid, apply)
+
+
+@protected.get("/api/rankings/{rid}/slots/{key}/take")
+def ranking_take_audio(rid: str, key: str) -> FileResponse:
+    take = _ranking_slot(_ranking(rid), key).get("take") or {}
+    path = _rankings.path(rid) / "takes" / (take.get("file") or "_none")
+    if not take.get("file") or not path.is_file():
+        raise HTTPException(404, "nothing recorded for that line yet")
+    return FileResponse(path, media_type="audio/wav")
+
+
+def _ranking_render(rid: str) -> None:
+    try:
+        project = _rankings.load(rid)
+        inputs = {c["key"]: c for c in _ranking_inputs(project)}
+        slots = project.get("slots") or []
+        takes_dir = _rankings.path(rid) / "takes"
+        voiced = [s if _slot_ready(s) else {**s, "take": None} for s in slots]
+        fitted = ranking.fit_lengths(voiced, [float((s.get("take") or {}).get("duration") or 0) for s in voiced])
+        items = []
+        for s in fitted:
+            c = inputs[s["key"]]
+            t = s.get("take") or {}
+            items.append({
+                "rank": s["rank"], "video": c["video"], "start": c["start"] + s["start"], "end": c["start"] + s["end"],
+                "words": [{"w": w["w"], "s": round(w["s"] - s["start"], 2), "e": round(w["e"] - s["start"], 2)}
+                          for w in c["words"] if w["s"] >= s["start"] - 0.05 and w["e"] <= s["end"] + 0.05],
+                "label": s["label"], "emoji": s["emoji"], "line": s["line"],
+                "take": takes_dir / t["file"] if t.get("file") else None, "take_seconds": t.get("duration") or 0,
+            })
+        out = _rankings.path(rid) / "ranking.mp4"
+        tmp_out = out.with_name(".ranking_tmp.mp4")
+        result = ranking.render(items, project.get("streamer") or "", project.get("theme") or "", _longform_brand(), tmp_out, seed=rid)
+        tmp_out.replace(out)
+        job_id = _ranking_to_home(project, out, result["duration"])
+        _rankings.update(rid, lambda p: p.update(status="ready", render={
+            "status": "done", "duration": result["duration"], "reveal": result["reveal"], "job_id": job_id,
+            "finished_at": time.time(), "voiced": sum(1 for s in voiced if s.get("take"))}))
+    except Exception as e:
+        print(f"[ranking] render {rid} failed: {e}", flush=True)
+        detail = e.detail if isinstance(e, HTTPException) else str(e)
+        _rankings.update(rid, lambda p: p.update(status="ready", render={"status": "error", "error": detail[-400:]}))
+    finally:
+        _ranking_release(rid)
+
+
+def _ranking_to_home(project: dict, video: Path, duration: float) -> str:
+    """Put the finished ranking on Home as a done job with one clip, ready
+    to post like any Short. A re-render replaces the clip in the same job
+    until it's been posted; after that it gets a new job."""
+    pub = project.get("publish") or {}
+    title = pub.get("title") or f"Ranking {project.get('streamer')}'s {project.get('theme')}"
+    clip = {
+        "file": "ranking.mp4", "start": 0.0, "end": duration, "duration": duration,
+        "title": title, "upload_title": title, "description": pub.get("description") or "",
+        "hook_caption": title, "reason": "Ranking Short",
+        # Not one clip the pipeline picked: kept out of the clip registry
+        # (like the long-form promo Shorts) so it doesn't skew what the
+        # normal clip picker learns from YouTube stats.
+        "promo": True, "ranking": True, "ranking_id": project["id"],
+    }
+    if any((s.get("take") or {}).get("voice_id") for s in project.get("slots") or [] if _slot_ready(s)):
+        clip["synthetic_voice"] = True
+    old = (project.get("render") or {}).get("job_id")
+    with jobs_lock:
+        job = jobs.get(old or "")
+        reuse = job is not None and not any(c.get("youtube_video_id") for c in job.get("clips") or [])
+        job_id = old if reuse else uuid.uuid4().hex[:12]
+        if not reuse:
+            jobs[job_id] = {
+                "id": job_id, "source_url": f"Ranking Short: {title}", "created_at": time.time(), "state": "done",
+                "message": "Done", "progress": 1.0, "estimate_minutes": 0, "clips": [], "error": None, "saved": True,
+                "request": JobRequest(source=str(video), num_clips=1, focus=title),
+                "channel_profile": DEFAULT_CHANNEL_PROFILE, "ranking_id": project["id"],
+                "source_title": f"🏆 {title}",
+            }
+    out_dir = BASE_DIR / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(video, out_dir / "ranking.mp4")
+    with jobs_lock:
+        jobs[job_id].update(clips=[clip], state="done", message="Done", progress=1.0, created_at=time.time())
+    _persist(job_id)
+    return job_id
+
+
+@protected.post("/api/rankings/{rid}/render")
+def render_ranking(rid: str) -> dict:
+    project = _ranking(rid)
+    if project.get("status") != "ready" or not project.get("slots"):
+        raise HTTPException(409, "rank the moments first")
+    _ranking_claim(rid)
+    project = _rankings.update(rid, lambda p: p.update(status="rendering", render={
+        **(p.get("render") or {}), "status": "rendering", "started_at": time.time(), "error": None}))
+    threading.Thread(target=_ranking_render, args=(rid,), daemon=True).start()
+    return project
+
+
+@protected.get("/api/rankings/{rid}/video")
+def ranking_video(rid: str) -> FileResponse:
+    _ranking(rid)
+    path = _rankings.path(rid) / "ranking.mp4"
+    if not path.is_file():
+        raise HTTPException(404, "not rendered yet")
+    return FileResponse(path, media_type="video/mp4")
+
+
+def _ranking_video_ids() -> set:
+    with jobs_lock:
+        return {c["youtube_video_id"] for j in jobs.values() for c in j.get("clips") or []
+                if c.get("ranking") and c.get("youtube_video_id")}
+
+
+@protected.get("/api/rankings-compare")
+def rankings_compare(refresh: bool = False) -> dict:
+    """Posted ranking Shorts next to the channel's normal Shorts: views and
+    the share who stayed to watch. From the Analytics data (cached 10 min)."""
+    data = _gather_clip_performance(refresh)
+    if not data.get("available"):
+        return {"available": False, "reason": data.get("reason")}
+    normal = [r for r in data.get("videos") or [] if not r.get("too_new_to_judge")]
+
+    def median(xs):
+        xs = sorted(x for x in xs if x is not None)
+        return xs[len(xs) // 2] if xs else None
+    rows = [{k: r.get(k) for k in ("id", "title", "views", "stayed", "avg_view_pct", "subs_gained", "age_days", "too_new_to_judge")}
+            for r in data.get("rankings") or []]
+    return {"available": True, "rankings": rows,
+            "normal": {"count": len(normal), "median_views": median([r.get("views") for r in normal]),
+                       "median_stayed": median([r.get("stayed") for r in normal])}}
+
+
 app.include_router(protected)
 
 
@@ -5655,7 +6209,8 @@ async function loadJobsList() {
         viewBtn.addEventListener('click', () => attachToJob(job.id));
         row.appendChild(viewBtn);
       }
-      if (!running && !['weekly_recap', 'game_recap'].includes(job.pipeline)) {
+      // Ranking and cliffhanger Shorts are made elsewhere: nothing to regenerate here.
+      if (!running && !['weekly_recap', 'game_recap'].includes(job.pipeline) && !job.ranking_id && !job.promo_episode) {
         const regenBtn = document.createElement('button');
         regenBtn.type = 'button';
         regenBtn.textContent = 'Generate more clips';
@@ -6712,7 +7267,7 @@ notifyTestBtn.addEventListener('click', async () => {
 def _nav_links(active_path: str) -> str:
     """The shared topnav, repeated on every page -- active_path marks which
     link (by href) gets the highlighted style."""
-    links = [("Home", "/"), ("Analytics", "/analytics"), ("Hook Line", "/hook-line")]
+    links = [("Home", "/"), ("Rankings", "/rankings"), ("Analytics", "/analytics"), ("Hook Line", "/hook-line")]
 
     def _link(label: str, href: str) -> str:
         active_attr = ' class="active"' if href == active_path else ""
@@ -6920,6 +7475,7 @@ ANALYTICS_HTML = """<!doctype html>
 <div class="page">
 <div class="topnav">
   <a href="/">Home</a>
+  <a href="/rankings">Rankings</a>
   <a href="/analytics" class="active">Analytics</a>
   <a href="/hook-line">Hook Line</a>
 </div>
@@ -8037,6 +8593,7 @@ HOOK_LINE_HTML = """<!doctype html>
 <div class="page">
   <div class="topnav">
     <a href="/">Home</a>
+    <a href="/rankings">Rankings</a>
     <a href="/analytics">Analytics</a>
     <a href="/hook-line" class="active">Hook Line</a>
   </div>
@@ -8523,6 +9080,386 @@ if (!STATE.error) $('rec').onclick = async () => {
 };
 if (!STATE.error) $('pick').onclick = (e) => { e.preventDefault(); if (!needConsent()) $('file').click(); };
 if (!STATE.error) $('file').onchange = () => { const f = $('file').files[0]; if (f) send(f, f.type, f.name); };
+</script>
+</body>
+</html>
+""".replace("__CSS__", _SIMPLE_PAGE_CSS)
+
+
+RANKINGS_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — Rankings</title>
+<style>
+__CSS__
+  .item { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-top: 10px; display: flex;
+    gap: 12px; align-items: center; cursor: pointer; }
+  .item:hover { border-color: var(--accent); }
+  .item .t { font-weight: 700; font-size: 0.95rem; }
+  .item .m { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
+  .item .go { margin-left: auto; color: var(--accent); font-weight: 700; }
+  .filters { display: flex; gap: 10px; }
+  .filters > * { flex: 1; }
+  .clips { margin-top: 12px; max-height: 520px; overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; }
+  .clip { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .clip:last-child { border-bottom: none; }
+  .clip.on { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .clip img, .clip .noimg { width: 96px; height: 54px; object-fit: cover; border-radius: 6px; background: var(--bg); flex: none; }
+  .clip .t { font-size: 0.88rem; font-weight: 600; }
+  .clip .m { font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+  .clip input { flex: none; }
+  .pickbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .pickbar button { margin-top: 12px; }
+  .slot { border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-top: 12px; }
+  .slot-head { display: flex; align-items: center; gap: 10px; }
+  .rank { font-size: 1.6rem; font-weight: 900; font-style: italic; width: 44px; flex: none; }
+  .rank.r1 { color: #d4a106; } .rank.r2 { color: #8a94a6; } .rank.r3 { color: #e07b2a; }
+  .slot-head input { margin-top: 0; font-weight: 700; }
+  .slot-head select { width: 74px; margin-top: 0; font-size: 1.2rem; padding: 6px; flex: none; }
+  .move { display: flex; flex-direction: column; gap: 2px; flex: none; }
+  .move button { margin: 0; padding: 2px 8px; font-size: 0.75rem; }
+  .cut { display: flex; gap: 8px; align-items: center; font-size: 0.82rem; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
+  .cut input { width: 76px; margin-top: 0; padding: 6px 8px; }
+  .said { font-size: 0.8rem; color: var(--muted); margin-top: 6px; font-style: italic; }
+  .line-row { margin-top: 10px; }
+  .line-row textarea { margin-top: 4px; }
+  .take { margin-top: 6px; font-size: 0.84rem; }
+  .take.ok { color: var(--ok); } .take.bad { color: var(--danger); }
+  .voice-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 0.85rem; color: var(--muted); }
+  .voice-row select { width: auto; margin-top: 0; padding: 6px 10px; }
+  video { width: 100%; max-width: 300px; border-radius: 12px; margin-top: 12px; display: block; background: #000; }
+  .compare table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin-top: 8px; }
+  .compare td, .compare th { padding: 6px 4px; border-bottom: 1px solid var(--border); text-align: left; }
+  .compare th { color: var(--muted); font-weight: 600; font-size: 0.76rem; }
+  .compare td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 520px) { .card { padding: 20px 14px 24px; } .filters { flex-direction: column; gap: 0; } .clip img, .clip .noimg { width: 72px; height: 40px; } }
+</style>
+</head>
+<body>
+<div class="page">
+__NAV_LINKS__
+<div class="card">
+  <div class="brand"><span class="logo">🏆</span><h1>Rankings</h1></div>
+  <p class="subtitle">Turn 3 to 5 clips the app already found into one ranking Short: a numbered list that fills in out of order, #1 last, with your voice placing each moment.</p>
+
+  <div id="list-view">
+    <div id="rankings"></div>
+    <div class="section">
+      <h3>➕ New ranking</h3>
+      <div class="hint">Pick 3 to 5 clips, ideally from the same streamer. Claude orders them, cuts each to its best few seconds and writes a label and a short line for you to say after each one.</div>
+      <div class="filters">
+        <div><label for="q">Find clips</label><input id="q" placeholder="Streamer or title"></div>
+        <div><label for="theme">Ranking</label><select id="theme"></select></div>
+      </div>
+      <div class="clips" id="clips"><div class="hint" style="padding:12px">Loading clips…</div></div>
+      <div class="pickbar"><button id="make" type="button" disabled>🏆 Rank them</button><span class="hint" id="pick-msg">Pick 3 to 5 clips.</span></div>
+    </div>
+    <div class="section compare" id="compare" style="display:none">
+      <h3>📊 How rankings are doing</h3>
+      <div id="compare-body"></div>
+    </div>
+  </div>
+
+  <div id="project-view" style="display:none">
+    <a href="/rankings" class="hint" id="back">← All rankings</a>
+    <div class="row" style="display:flex;gap:10px">
+      <div style="flex:1"><label for="p-streamer">Streamer</label><input id="p-streamer" maxlength="40"></div>
+      <div style="flex:1"><label for="p-theme">Ranking</label><input id="p-theme" maxlength="40"></div>
+    </div>
+    <div id="p-status" class="status" style="display:none"></div>
+    <div id="slots"></div>
+    <div class="voice-row" id="voice-row">
+      <span>AI voice for the lines:</span><select id="p-voice"></select><a href="/voices">Voices</a>
+    </div>
+    <div class="actions"><button id="replan" type="button" class="secondary">🔄 Rank again</button></div>
+
+    <div class="section">
+      <h3>🎬 Make the video</h3>
+      <div class="hint" id="render-hint"></div>
+      <label for="p-title">YouTube title</label><input id="p-title" maxlength="100">
+      <label for="p-desc">Description</label><textarea id="p-desc" rows="3"></textarea>
+      <div class="actions"><button id="render" type="button">🎬 Make the video</button><button id="delete" type="button" class="danger-link" style="margin-left:auto">Delete ranking</button></div>
+      <div id="render-status" class="status" style="display:none"></div>
+      <video id="video" controls playsinline style="display:none"></video>
+    </div>
+  </div>
+</div>
+</div>
+<audio id="player" style="display:none"></audio>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.detail || `Request failed (${r.status})`);
+  return out;
+}
+const jsonOpts = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function day(ts) { return ts ? new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''; }
+const fmt = (n) => n == null ? '–' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+const pct = (x) => x == null ? '–' : Math.round(x * 100) + '%';
+
+let choices = null, picked = [], project = null, voices = null, poll = null;
+let rec = null, recKey = null, recChunks = [], recStream = null, busyKey = null;
+const EMO = {};
+
+// ---------- list ----------
+async function showList() {
+  project = null; clearTimeout(poll);
+  $('project-view').style.display = 'none'; $('list-view').style.display = 'block';
+  const { rankings } = await api('/api/rankings');
+  const box = $('rankings'); box.innerHTML = '';
+  if (rankings.length) box.appendChild(el('h3', '', 'Your rankings'));
+  for (const r of rankings) {
+    const it = el('div', 'item');
+    const txt = el('div');
+    txt.appendChild(el('div', 't', r.title || 'Ranking'));
+    const st = r.status === 'planning' ? 'Claude is ranking…' : r.status === 'rendering' ? 'Making the video…'
+      : r.status === 'error' ? 'Something went wrong' : r.rendered ? '✅ Video ready (on Home)' : `${r.voiced} of ${r.slots} lines voiced`;
+    txt.appendChild(el('div', 'm', `${day(r.created_at)} · ${st}`));
+    it.appendChild(txt); it.appendChild(el('span', 'go', 'Open →'));
+    it.onclick = () => openProject(r.id);
+    box.appendChild(it);
+  }
+  if (!choices) {
+    choices = await api('/api/rankings/clips');
+    for (const [k, code] of Object.entries(choices.emoji)) EMO[k] = String.fromCodePoint(...code.split('-').map(h => parseInt(h, 16)));
+    const th = $('theme'); th.innerHTML = '';
+    for (const t of choices.themes) { const o = el('option', '', t); o.value = t; th.appendChild(o); }
+  }
+  renderClips();
+  loadCompare();
+}
+function renderClips() {
+  const q = $('q').value.trim().toLowerCase();
+  const box = $('clips'); box.innerHTML = '';
+  const rows = choices.clips.filter(c => !q || (c.title + ' ' + c.streamer + ' ' + c.source_title).toLowerCase().includes(q));
+  if (!rows.length) box.appendChild(el('div', 'hint', choices.clips.length ? 'No clips match.' : 'No clips yet with their stream still on the server. Make some clips on Home first.')).style.padding = '12px';
+  for (const c of rows.slice(0, 80)) {
+    const key = c.job_id + '/' + c.file;
+    const on = picked.includes(key);
+    const row = el('div', 'clip' + (on ? ' on' : ''));
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = on;
+    row.appendChild(cb);
+    if (c.frame) { const img = el('img'); img.loading = 'lazy'; img.src = `/api/jobs/${c.job_id}/clips/${c.frame}`; img.alt = ''; row.appendChild(img); }
+    else row.appendChild(el('div', 'noimg'));
+    const txt = el('div');
+    txt.appendChild(el('div', 't', c.title));
+    txt.appendChild(el('div', 'm', [c.streamer, Math.round(c.seconds) + ' s', day(c.created_at), c.posted ? 'posted' : ''].filter(Boolean).join(' · ')));
+    row.appendChild(txt);
+    row.onclick = () => {
+      if (picked.includes(key)) picked = picked.filter(k => k !== key);
+      else if (picked.length < 5) picked.push(key);
+      renderClips();
+    };
+    box.appendChild(row);
+  }
+  $('make').disabled = picked.length < 3 || picked.length > 5;
+  $('pick-msg').textContent = picked.length ? `${picked.length} picked` + (picked.length < 3 ? ` — pick ${3 - picked.length} more` : '') : 'Pick 3 to 5 clips.';
+}
+$('q').addEventListener('input', renderClips);
+$('make').onclick = async () => {
+  const b = $('make'); b.disabled = true;
+  try {
+    const p = await api('/api/rankings', jsonOpts('POST', { theme: $('theme').value,
+      clips: picked.map(k => { const i = k.indexOf('/'); return { job_id: k.slice(0, i), file: k.slice(i + 1) }; }) }));
+    picked = [];
+    openProject(p.id);
+  } catch (e) { alert(e.message); b.disabled = false; }
+};
+async function loadCompare() {
+  try {
+    const d = await api('/api/rankings-compare');
+    if (!d.available || !d.rankings.length) { $('compare').style.display = 'none'; return; }
+    $('compare').style.display = 'block';
+    const t = el('table');
+    const hr = el('tr'); for (const h of ['Short', 'Views', 'Stayed to watch']) hr.appendChild(el('th', '', h)); t.appendChild(hr);
+    for (const r of d.rankings) {
+      const tr = el('tr'); tr.appendChild(el('td', '', r.title + (r.too_new_to_judge ? ' (new)' : '')));
+      tr.appendChild(el('td', 'n', fmt(r.views))); tr.appendChild(el('td', 'n', pct(r.stayed))); t.appendChild(tr);
+    }
+    const tr = el('tr'); tr.appendChild(el('td', '', `Your normal Shorts (middle of ${d.normal.count})`));
+    tr.appendChild(el('td', 'n', fmt(d.normal.median_views))); tr.appendChild(el('td', 'n', pct(d.normal.median_stayed)));
+    tr.style.fontWeight = '700'; t.appendChild(tr);
+    const body = $('compare-body'); body.innerHTML = ''; body.appendChild(t);
+    body.appendChild(el('div', 'hint', 'Kept apart from your normal Shorts, so the clip picker only learns from single clips.'));
+  } catch (e) { $('compare').style.display = 'none'; }
+}
+
+// ---------- one ranking ----------
+async function openProject(id) {
+  history.replaceState(null, '', '/rankings?r=' + id);
+  $('list-view').style.display = 'none'; $('project-view').style.display = 'block';
+  if (!voices) { try { voices = (await api('/api/voices')).voices; } catch (e) { voices = []; } }
+  if (!choices) {
+    try { choices = await api('/api/rankings/clips'); for (const [k, code] of Object.entries(choices.emoji)) EMO[k] = String.fromCodePoint(...code.split('-').map(h => parseInt(h, 16))); }
+    catch (e) { choices = { clips: [], themes: [], emoji: {} }; }
+  }
+  project = await api('/api/rankings/' + id);
+  render();
+}
+function aiVoice() { const id = project.ai_voice || 'me'; return (voices || []).find(v => v.id === id); }
+function slotReady(s) { const t = s.take || {}; return !!t.file && !!(t.ok || t.kept); }
+function render() {
+  clearTimeout(poll);
+  const p = project, busy = p.status === 'planning' || p.status === 'rendering';
+  $('p-streamer').value = p.streamer || ''; $('p-theme').value = p.theme || '';
+  $('p-title').value = (p.publish || {}).title || ''; $('p-desc').value = (p.publish || {}).description || '';
+  const st = $('p-status');
+  st.style.display = p.status === 'planning' || p.status === 'error' ? 'block' : 'none';
+  st.className = 'status' + (p.status === 'error' ? ' bad' : '');
+  st.textContent = p.status === 'planning' ? '🧠 Claude is watching the clips and ranking them (about 30 seconds)…' : '⚠️ ' + (p.error || '');
+  // voice picker
+  const sel = $('p-voice'); sel.innerHTML = '';
+  for (const v of voices || []) { const o = el('option', '', (v.mine ? 'You' : v.name) + (v.sample ? '' : ' (no sample yet)')); o.value = v.id; o.selected = v.id === (p.ai_voice || 'me'); sel.appendChild(o); }
+  $('voice-row').style.display = (voices || []).length ? 'flex' : 'none';
+  // slots
+  const box = $('slots'); box.innerHTML = '';
+  const slots = p.slots || [];
+  slots.forEach((s, i) => box.appendChild(slotCard(s, i, slots.length, busy)));
+  $('replan').disabled = busy;
+  // render
+  const missing = slots.filter(s => !slotReady(s)).length;
+  const av = aiVoice();
+  $('render-hint').textContent = !slots.length ? '' : missing
+    ? `${missing} of ${slots.length} lines have no voice yet. Without your voice it's a plain compilation, which YouTube shows to fewer people. Record them, or tap 🤖 for the AI voice.`
+    : 'Every line is voiced. About a minute to make.' + (slots.some(s => (s.take || {}).voice_id) ? ' It uses a friend’s AI voice, so it’s marked as AI-made on YouTube.' : '');
+  const r = p.render || {};
+  $('render').disabled = busy || !slots.length;
+  $('render').textContent = r.status === 'rendering' ? '⏳ Making it…' : r.status === 'done' ? '🎬 Make it again' : '🎬 Make the video';
+  const rs = $('render-status');
+  rs.style.display = r.status ? 'block' : 'none';
+  rs.className = 'status' + (r.status === 'done' ? ' ok' : r.status === 'error' ? ' bad' : '');
+  rs.innerHTML = '';
+  if (r.status === 'rendering') rs.textContent = '⏳ Making the video (about a minute)…';
+  else if (r.status === 'error') rs.textContent = '⚠️ ' + (r.error || 'It failed.');
+  else if (r.status === 'done') {
+    rs.appendChild(document.createTextNode(`✅ Ready: ${Math.round(r.duration)} seconds. It's on Home as its own job, post it from there like any Short. `));
+    const a = el('a', '', 'Go to Home →'); a.href = '/'; rs.appendChild(a);
+  }
+  const v = $('video');
+  if (r.status === 'done') { const src = `/api/rankings/${p.id}/video?t=${r.finished_at}`; if (v.getAttribute('src') !== src) v.src = src; v.style.display = 'block'; }
+  else v.style.display = 'none';
+  if (busy) poll = setTimeout(async () => { try { project = await api('/api/rankings/' + p.id); render(); } catch (e) {} }, 2500);
+}
+function slotCard(s, i, n, busy) {
+  const c = el('div', 'slot');
+  const head = el('div', 'slot-head');
+  head.appendChild(el('span', 'rank r' + s.rank, '#' + s.rank));
+  const lab = el('input'); lab.value = s.label; lab.maxLength = 26; lab.disabled = busy;
+  lab.onchange = () => { s.label = lab.value; save(); };
+  head.appendChild(lab);
+  const emo = el('select'); emo.disabled = busy;
+  for (const k of Object.keys(EMO)) { const o = el('option', '', EMO[k]); o.value = k; o.selected = k === s.emoji; emo.appendChild(o); }
+  emo.onchange = () => { s.emoji = emo.value; save(); };
+  head.appendChild(emo);
+  const mv = el('div', 'move');
+  const up = el('button', 'secondary', '▲'); up.type = 'button'; up.disabled = busy || i === 0; up.title = 'Rank higher';
+  const dn = el('button', 'secondary', '▼'); dn.type = 'button'; dn.disabled = busy || i === n - 1; dn.title = 'Rank lower';
+  up.onclick = () => { const a = project.slots; [a[i - 1], a[i]] = [a[i], a[i - 1]]; save(); };
+  dn.onclick = () => { const a = project.slots; [a[i + 1], a[i]] = [a[i], a[i + 1]]; save(); };
+  mv.appendChild(up); mv.appendChild(dn); head.appendChild(mv);
+  c.appendChild(head);
+  const src = (choices.clips || []).find(x => x.job_id === s.job_id && x.file === s.file);
+  const cut = el('div', 'cut');
+  cut.appendChild(el('span', '', 'Show seconds'));
+  const a = el('input'); a.type = 'number'; a.step = '0.1'; a.min = 0; a.value = s.start; a.disabled = busy;
+  const b = el('input'); b.type = 'number'; b.step = '0.1'; b.min = 0; b.value = s.end; b.disabled = busy;
+  a.onchange = () => { s.start = parseFloat(a.value); save(); }; b.onchange = () => { s.end = parseFloat(b.value); save(); };
+  cut.appendChild(a); cut.appendChild(el('span', '', 'to')); cut.appendChild(b);
+  cut.appendChild(el('span', '', `of the ${Math.round(s.duration || 0)} s clip` + (src ? ` “${src.title}”` : '')));
+  c.appendChild(cut);
+  const lr = el('div', 'line-row');
+  lr.appendChild(el('label', '', 'What you say after it'));
+  const ta = el('textarea'); ta.rows = 2; ta.value = s.line; ta.maxLength = 110; ta.disabled = busy;
+  ta.onchange = () => { s.line = ta.value; save(); };
+  lr.appendChild(ta); c.appendChild(lr);
+  const acts = el('div', 'actions');
+  const recording = rec && recKey === s.key;
+  const rb = el('button', recording ? 'recording' : '', recording ? '⏹ Stop and check' : '🎙 Record'); rb.type = 'button';
+  rb.disabled = busy || (!!rec && !recording) || !!busyKey;
+  rb.onclick = () => recording ? stopRec() : startRec(s.key);
+  acts.appendChild(rb);
+  const av = aiVoice();
+  const ab = el('button', 'secondary', busyKey === s.key ? '🤖 Reading…' : `🤖 ${av && !av.mine ? av.name + '’s' : 'My'} AI voice`); ab.type = 'button';
+  ab.disabled = busy || !!rec || !!busyKey || !(av && av.ready);
+  ab.onclick = () => clone(s.key);
+  acts.appendChild(ab);
+  const t = s.take || {};
+  if (t.file) {
+    const pb = el('button', 'secondary', '▶ Play'); pb.type = 'button';
+    pb.onclick = () => { const p = $('player'); p.src = `/api/rankings/${project.id}/slots/${s.key}/take?t=${t.recorded_at}`; p.play(); };
+    acts.appendChild(pb);
+    if (!t.ok && !t.kept) {
+      const kb = el('button', 'secondary', 'Keep anyway'); kb.type = 'button';
+      kb.onclick = async () => { try { project = await api(`/api/rankings/${project.id}/slots/${s.key}/keep`, { method: 'POST' }); render(); } catch (e) { alert(e.message); } };
+      acts.appendChild(kb);
+    }
+  }
+  c.appendChild(acts);
+  if (s._msg) c.appendChild(el('div', 'take bad', s._msg));
+  else if (t.file) {
+    const good = t.ok || t.kept;
+    c.appendChild(el('div', 'take ' + (good ? 'ok' : 'bad'), (t.voice === 'ai' ? '🤖 ' : '🎙 ') + (good ? (t.kept && !t.ok ? 'Kept as it is.' : 'Sounds right.') : (t.message || 'Some of it didn’t match the line.') + (t.heard ? ` Heard: “${t.heard}”` : ''))));
+  }
+  return c;
+}
+let saving = null;
+async function save() {
+  const body = { streamer: $('p-streamer').value, theme: $('p-theme').value, title: $('p-title').value, description: $('p-desc').value,
+    slots: project.slots.map(s => ({ key: s.key, label: s.label, emoji: s.emoji, line: s.line, start: s.start, end: s.end })) };
+  try { project = await api('/api/rankings/' + project.id, jsonOpts('PUT', body)); }
+  catch (e) { alert(e.message); project = await api('/api/rankings/' + project.id); }
+  render();
+}
+for (const id of ['p-streamer', 'p-theme', 'p-title', 'p-desc']) $(id).addEventListener('change', save);
+$('p-voice').addEventListener('change', async () => {
+  try { project = await api(`/api/rankings/${project.id}/voice`, jsonOpts('PUT', { voice: $('p-voice').value })); render(); } catch (e) { alert(e.message); }
+});
+$('replan').onclick = async () => {
+  if (!confirm('Ask Claude to rank them again? Your edits and recorded lines are replaced.')) return;
+  try { project = await api(`/api/rankings/${project.id}/replan`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
+};
+$('render').onclick = async () => {
+  try { project = await api(`/api/rankings/${project.id}/render`, { method: 'POST' }); render(); } catch (e) { alert(e.message); }
+};
+$('delete').onclick = async () => {
+  if (!confirm('Delete this ranking? A video already on Home stays there.')) return;
+  try { await api('/api/rankings/' + project.id, { method: 'DELETE' }); showList(); } catch (e) { alert(e.message); }
+};
+async function clone(key) {
+  busyKey = key; render();
+  const s = project.slots.find(x => x.key === key);
+  try { const { take } = await api(`/api/rankings/${project.id}/slots/${key}/clone`, { method: 'POST' }); s.take = take; s._msg = null; }
+  catch (e) { s._msg = '⚠️ ' + e.message; }
+  busyKey = null; render();
+}
+async function startRec(key) {
+  if (!navigator.mediaDevices || !window.MediaRecorder) { alert('This browser can’t record audio. Try Chrome or Safari.'); return; }
+  try { recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { alert('Microphone access was blocked. Allow it for this site and try again.'); return; }
+  const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+  const mime = opts.find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  rec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined); recChunks = []; recKey = key;
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  rec.onstop = upload;
+  rec.start(); render();
+}
+function stopRec() { if (!rec) return; rec.stop(); recStream.getTracks().forEach(t => t.stop()); }
+async function upload() {
+  const key = recKey, type = (rec && rec.mimeType) || 'audio/webm';
+  const blob = new Blob(recChunks, { type });
+  rec = null; recKey = null; busyKey = key; render();
+  const s = project.slots.find(x => x.key === key);
+  try { const { take } = await api(`/api/rankings/${project.id}/slots/${key}/take`, { method: 'POST', headers: { 'Content-Type': type.split(';')[0] }, body: blob }); s.take = take; s._msg = null; }
+  catch (e) { s._msg = '⚠️ ' + e.message; }
+  busyKey = null; render();
+}
+const rid = new URLSearchParams(location.search).get('r');
+(rid ? openProject(rid) : showList()).catch(e => alert(e.message));
 </script>
 </body>
 </html>

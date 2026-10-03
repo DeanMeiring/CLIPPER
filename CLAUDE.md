@@ -37,7 +37,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   from there. The Spanish channel (`/espanol`), Weekly Recap and Game
   Recap pages were removed, including their code, and the recap-only
   helpers in `clipper/trending.py`. Pages left: Home (`/`), Analytics,
-  Hook Line.
+  Hook Line; since added: Rankings (`/rankings`) and Voices (`/voices`).
 - `CHANNEL_PROFILES` in `webapp/main.py` holds just `main`. The profile
   plumbing (per-channel Twitch logins env var, brand name, mascot accent,
   YouTube token file, `output_language`) was kept on purpose so a new
@@ -53,6 +53,32 @@ merge it yourself; merging stays Dean's call per the rule above.
 - The "learns from YouTube stats" notes (`_load_strategy_notes` /
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
+- **Ranking Shorts (Oct 2026):** Dean liked the "Ranking <streamer>'s Funny
+  Moments" format (a 1-5 list on screen, filled in out of order, #1 last)
+  and asked for it after views declined. Researched before building: the
+  format keeps viewers to the end and gets comments, but a list with
+  labels only is the "clips edited together with little or no narrative"
+  YouTube's reused-content rules and the 1 Oct 2026 change name. So each
+  moment ends with a short spoken line (Dean, or a voice from `/voices`)
+  placing it: that's the commentary. `/rankings` (in the top nav):
+  pick 3-5 finished clips whose downloaded source is still in
+  `<job>/_source/` → `clipper/ranking.py` `plan()` (Claude: rank, 3-9 s
+  cut, 2-4 word label, emoji from the bundled Fluent set, the narrator's
+  line; `normalize_plan` keeps it inside each clip) → edit / reorder /
+  record or AI-voice each line (same misread check) → `render()`: one
+  segment per moment in the reveal order (shuffled, #1 last), the
+  narrator's line over a freeze of the moment's last frame, the label pops
+  in as he says it, captions in the Shorts' ASS style; wide streams sit
+  under the list, vertical ones fill the screen with the list over them.
+  Fits in 58 s by trimming moments from their start. The video lands on
+  Home as its own done job (`job["ranking_id"]`, clip `ranking`/`promo`,
+  `synthetic_voice` when a friend's voice read a line); a re-render
+  replaces it until posted. Projects: `BASE_DIR/_rankings/<id>/`. Posted
+  rankings are kept out of `clip_performance.build_stats` (the picker's
+  learning) and shown on their own (`data["rankings"]`,
+  `GET /api/rankings-compare`: views + stayed-to-watch vs the normal
+  Shorts' middle). Chat-reaction numbers were pitched but not built: chat
+  replay fetching fails often in production logs.
 - **Learning upgrade (Oct 2026):** Dean saw Shorts views declining and
   asked the picker to learn more from past videos. `clip_performance`
   now also gets `youtube_analytics.get_video_engagement` (engagedViews,
