@@ -37,7 +37,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   from there. The Spanish channel (`/espanol`), Weekly Recap and Game
   Recap pages were removed, including their code, and the recap-only
   helpers in `clipper/trending.py`. Pages left: Home (`/`), Analytics,
-  Hook Line.
+  Hook Line; since added: Rankings (`/rankings`) and Voices (`/voices`).
 - `CHANNEL_PROFILES` in `webapp/main.py` holds just `main`. The profile
   plumbing (per-channel Twitch logins env var, brand name, mascot accent,
   YouTube token file, `output_language`) was kept on purpose so a new
@@ -53,6 +53,32 @@ merge it yourself; merging stays Dean's call per the rule above.
 - The "learns from YouTube stats" notes (`_load_strategy_notes` /
   `_load_performance_notes`) come from the main channel's account. Dean
   especially values this feature — don't break it.
+- **Ranking Shorts (Oct 2026):** Dean liked the "Ranking <streamer>'s Funny
+  Moments" format (a 1-5 list on screen, filled in out of order, #1 last)
+  and asked for it after views declined. Researched before building: the
+  format keeps viewers to the end and gets comments, but a list with
+  labels only is the "clips edited together with little or no narrative"
+  YouTube's reused-content rules and the 1 Oct 2026 change name. So each
+  moment ends with a short spoken line (Dean, or a voice from `/voices`)
+  placing it: that's the commentary. `/rankings` (in the top nav):
+  pick 3-5 finished clips whose downloaded source is still in
+  `<job>/_source/` → `clipper/ranking.py` `plan()` (Claude: rank, 3-9 s
+  cut, 2-4 word label, emoji from the bundled Fluent set, the narrator's
+  line; `normalize_plan` keeps it inside each clip) → edit / reorder /
+  record or AI-voice each line (same misread check) → `render()`: one
+  segment per moment in the reveal order (shuffled, #1 last), the
+  narrator's line over a freeze of the moment's last frame, the label pops
+  in as he says it, captions in the Shorts' ASS style; wide streams sit
+  under the list, vertical ones fill the screen with the list over them.
+  Fits in 58 s by trimming moments from their start. The video lands on
+  Home as its own done job (`job["ranking_id"]`, clip `ranking`/`promo`,
+  `synthetic_voice` when a friend's voice read a line); a re-render
+  replaces it until posted. Projects: `BASE_DIR/_rankings/<id>/`. Posted
+  rankings are kept out of `clip_performance.build_stats` (the picker's
+  learning) and shown on their own (`data["rankings"]`,
+  `GET /api/rankings-compare`: views + stayed-to-watch vs the normal
+  Shorts' middle). Chat-reaction numbers were pitched but not built: chat
+  replay fetching fails often in production logs.
 - **Learning upgrade (Oct 2026):** Dean saw Shorts views declining and
   asked the picker to learn more from past videos. `clip_performance`
   now also gets `youtube_analytics.get_video_engagement` (engagedViews,
@@ -245,6 +271,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   variable was once saved as " HF_TOKEN" with a leading space: if the page
   says it isn't switched on, check the name (Railway MCP `list-variables`
   shows names only).
+- **Friends' voices (Oct 2026):** Dean's friend has a voice he wanted
+  for narration, agreed to it, and lives far away. `/voices` (linked from
+  long-form's "Your AI voice" box) lists Dean's own voice plus other
+  people's, each in `BASE_DIR/_longform/_voices/<8 hex>/` (`sample.wav`,
+  `sample.json`, `voice.json` with name + consent). Adding one needs the
+  "they agreed" box ticked. The sample is an uploaded voice note (any
+  format ffmpeg reads; silence at the start is cut and the first 45 s
+  kept; it only has to be clear talking, >= 15 words) or recorded by the
+  friend on a private link `/voice-sample/<token>`: public on purpose (no
+  app password), the token is the key, works 7 days, only sets that one
+  voice's sample, and needs their own "I'm OK with it" tick (stored as
+  `consent.self_confirmed_at`). A long-form episode picks its AI voice
+  (`project["ai_voice"]`, "me" by default; `PUT .../ai-voice`); takes read
+  by someone else's voice carry `voice_id`. Any upload using another
+  person's cloned voice sets YouTube's `status.containsSyntheticMedia`
+  (`youtube_upload.upload_video(synthetic_media=True)`; the long-form
+  upload, its promo Shorts via `clip["synthetic_voice"]`). Dean's own voice
+  doesn't need the label, and other uploads send exactly what they did.
 - Quiz format: prototyped (higher-or-lower on clip views, who-said-it,
   guess-the-year) and shelved once Dean said he'll use his voice. The
   documentary is the one long-form format for now.
