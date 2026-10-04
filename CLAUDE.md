@@ -426,6 +426,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   tracks (NCS, free phonk) keep a Short earning; the song's credit is
   added to the description. A label's song gets a Content ID claim: under
   60 s the Short stays up but the label takes its ad money. Dean was told.
+- Trimming is done on the original (Dean asked): a timeline under the
+  video (kept part, goal in orange, playhead; tap to seek) with Start here /
+  End here / Goal here / Play the cut; a made Short can be flipped back to
+  the original. The Music box links to NCS, Pixabay free phonk and the
+  YouTube Audio Library. Uploads warn before leaving the page and "Connect"
+  opens in a new tab: on the first real try, tapping Connect mid-upload cut
+  the upload off (ClientDisconnect, now a quiet 400). The sandbox Chromium
+  can't play H.264, so browser tests of the player need a WebM clip.
 - His branding (pfp from his Steam avatar or a "D" logo, banner with an
   original GC badge, not Psyonix's rank icon) was made in the sandbox, not
   in the app.

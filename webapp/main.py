@@ -5379,11 +5379,14 @@ def rl_state() -> dict:
         used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
     return {"settings": s, "clips": views, "tracks": _rl.tracks(), "schedule": taken, "next_slot": slot,
             "uploads_today": _rl_uploads_today(clips), "uploads_per_day": RL_UPLOADS_PER_DAY,
+            "max_seconds": rocket_league.MAX_SECONDS,
             "connected": _youtube_token_stores[RL_PROFILE].is_connected(), "storage_mb": round(used / 1e6)}
 
 
 async def _rl_receive(request: Request, dest: Path) -> int:
     """Stream an upload to disk (clips can be hundreds of MB)."""
+    from starlette.requests import ClientDisconnect
+
     size = 0
     try:
         with dest.open("wb") as f:
@@ -5392,6 +5395,11 @@ async def _rl_receive(request: Request, dest: Path) -> int:
                 if size > RL_MAX_UPLOAD:
                     raise HTTPException(413, "that file is over 2 GB -- trim it first")
                 f.write(chunk)
+    except ClientDisconnect:
+        # The phone left the page or lost signal mid-upload: nothing to keep,
+        # and not an error worth a red traceback in the logs.
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "the upload was cut off -- try again and stay on the page until it's done")
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
@@ -9924,7 +9932,20 @@ __CSS__
   .st { font-size: 0.84rem; margin-top: 8px; }
   .st.ok { color: var(--ok); } .st.bad { color: var(--danger); } .st.wait { color: var(--warn); }
   .name { font-size: 0.74rem; color: var(--muted); margin-top: 4px; word-break: break-all; }
-  @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .clip { flex-direction: column; } .clip .vid { width: 100%; } .clip video { max-height: 420px; } }
+  .clip .vid.wide { width: 320px; }
+  .tl { position: relative; height: 30px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    margin-top: 8px; cursor: pointer; overflow: hidden; touch-action: manipulation; }
+  .tl .win { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-left: 3px solid var(--accent); border-right: 3px solid var(--accent); }
+  .tl .gl { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: #f59e0b; }
+  .tl .ph { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); }
+  .trim-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .trim-btns button { margin-top: 6px; padding: 7px 10px; font-size: 0.8rem; }
+  .vid .flip { margin-top: 6px; padding: 5px 10px; font-size: 0.78rem; }
+  .music-links { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+  .music-links a { display: block; font-weight: 700; margin-top: 8px; text-decoration: none; }
+  .music-links .hint { margin-top: 2px; }
+  @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .clip { flex-direction: column; } .clip .vid, .clip .vid.wide { width: 100%; } .clip video { max-height: 420px; } }
 </style>
 </head>
 <body>
@@ -9958,6 +9979,15 @@ __NAV_LINKS__
   <div class="section">
     <h3>🎵 Music</h3>
     <div class="hint">Songs to put under your clips; “Auto” rotates through them. Each song's drop lands on the goal: the app finds it, ▶ plays from there, and you can fix the second. Free montage music (NCS, free phonk) keeps a Short earning: paste the credit from the song's page and it's added to the description. A label's song gets claimed and the label takes that Short's ad money.</div>
+    <div class="music-links">
+      <b>Where to get free montage music</b>
+      <a href="https://ncs.io/" target="_blank" rel="noopener">🎧 NCS (NoCopyrightSounds) →</a>
+      <div class="hint">The classic Rocket League montage sound, phonk included (search or filter by genre). Free on YouTube as long as you credit it: copy the credit from the song's page into the song's credit box here.</div>
+      <a href="https://pixabay.com/music/search/phonk/" target="_blank" rel="noopener">🎧 Pixabay: free phonk →</a>
+      <div class="hint">Free, no credit needed. Download the license certificate with the song: if one ever gets claimed, it's your proof when you dispute it.</div>
+      <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
+      <div class="hint">YouTube's own free music. Calmer, but never claimed.</div>
+    </div>
     <div id="tracks"></div>
     <button id="add-music" type="button" class="secondary">⬆ Add songs</button>
     <input type="file" id="music-files" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac" multiple style="display:none">
@@ -9986,6 +10016,7 @@ function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.
 const TZ = 'Africa/Johannesburg';
 const sa = (d, o) => new Date(d).toLocaleString(undefined, { timeZone: TZ, ...o });
 let S = null, tab = 'todo', poll = null;
+const VIEW = {};  // per clip: 'source' or 'short', which video the player shows
 const BUSY = ['uploading', 'analysing', 'rendering'];
 
 async function load() {
@@ -10000,8 +10031,10 @@ function render() {
   if (S.connected) { conn.className = 'status ok'; conn.textContent = '✅ Your Rocket League YouTube channel is connected: Shorts upload there.'; }
   else {
     conn.className = 'status';
-    conn.appendChild(document.createTextNode('Connect your Rocket League channel so the app can upload to it. Sign in with the Google account that owns it. '));
-    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=rl'; conn.appendChild(a);
+    conn.appendChild(document.createTextNode('Connect your Rocket League channel so the app can upload to it. Sign in with the Google account that owns it (and pick the channel if Google asks). '));
+    // A new tab, so an upload running on this page isn't cut off.
+    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=rl'; a.target = '_blank'; conn.appendChild(a);
+    conn.appendChild(el('div', 'hint', 'If Google says the app is blocked or not verified, that Google account has to be added as a test user in Google Cloud (OAuth consent screen → Test users), the same way your other accounts were.'));
   }
   const st = S.settings;
   if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
@@ -10034,6 +10067,11 @@ for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-d
 }
 
 // ---------- uploads ----------
+let uploading = 0;
+// Leaving the page cuts an upload off: ask first.
+window.addEventListener('beforeunload', (e) => { if (uploading) { e.preventDefault(); e.returnValue = ''; } });
+// Back from connecting in the other tab: show the new state.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load().catch(() => {}); });
 $('add-clips').onclick = () => $('clip-files').click();
 $('clip-files').onchange = async () => {
   const files = [...$('clip-files').files]; $('clip-files').value = '';
@@ -10041,7 +10079,9 @@ $('clip-files').onchange = async () => {
   load();
 };
 function sendFile(url, f) {
-  return new Promise((resolve) => {
+  uploading++;
+  return new Promise((done) => {
+    const resolve = () => { uploading--; done(); };
     const row = el('div', 'track');
     const nm = el('span', 'nm', f.name); row.appendChild(nm);
     const bar = el('div', 'bar'); bar.style.flex = '1 1 120px'; const fill = el('div'); bar.appendChild(fill); row.appendChild(bar);
@@ -10111,20 +10151,70 @@ function renderClips() {
   if (!list.length) box.appendChild(el('div', 'hint', tab === 'todo' ? 'Nothing here. Add clips above.' : 'Nothing yet.'));
   for (const c of list) box.appendChild(clipCard(c));
 }
+const r1 = (x) => Math.round(x * 10) / 10;
+const mmss = (x) => `${Math.floor(x / 60)}:${(x % 60).toFixed(1).padStart(4, '0')}`;
+// Trim on the original: the bar shows the whole recording, the part that's
+// kept, the goal (orange) and where the video is; tap it to jump there.
+function trimmer(c, v, save, busy) {
+  const wrap = el('div', 'trim');
+  const D = c.duration, MAX = S.max_seconds || 59;
+  const at = (x) => (100 * Math.max(0, Math.min(D, x)) / D) + '%';
+  const bar = el('div', 'tl'), win = el('div', 'win'), gl = el('div', 'gl'), ph = el('div', 'ph');
+  win.style.left = at(c.start); win.style.width = (100 * (c.end - c.start) / D) + '%';
+  if (c.goal != null) gl.style.left = at(c.goal); else gl.style.display = 'none';
+  bar.append(win, gl, ph);
+  v.addEventListener('timeupdate', () => {
+    ph.style.left = at(v.currentTime);
+    if (v._stopAt != null && v.currentTime >= v._stopAt) { v.pause(); v._stopAt = null; }
+  });
+  bar.onclick = (e) => { const r = bar.getBoundingClientRect(); v.currentTime = D * Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  wrap.appendChild(bar);
+  const outside = c.goal != null && (c.goal < c.start || c.goal >= c.end);
+  wrap.appendChild(el('div', 'hint', `Keeps ${mmss(c.start)} to ${mmss(c.end)} (${Math.round(c.end - c.start)} s of ${Math.round(D)} s).`
+    + (outside ? ' The goal is outside the cut, so there’s no drop on it.' : '')));
+  const row = el('div', 'trim-btns');
+  const b = (label, fn, cls) => { const x = el('button', cls || 'secondary', label); x.type = 'button'; x.disabled = busy; x.onclick = fn; row.appendChild(x); };
+  b('⏮ Start here', () => {
+    const a = r1(v.currentTime); let e = c.end;
+    if (e - a > MAX) e = r1(Math.min(D, a + MAX));
+    if (e - a < 2) { alert('The start has to be at least 2 seconds before the end.'); return; }
+    save({ start: a, end: e });
+  });
+  b('End here ⏭', () => {
+    const e = r1(v.currentTime); let a = c.start;
+    if (e - a > MAX) a = r1(Math.max(0, e - MAX));
+    if (e - a < 2) { alert('The end has to be at least 2 seconds after the start.'); return; }
+    save({ start: a, end: e });
+  });
+  b('⚽ Goal here', () => save({ goal: r1(v.currentTime) }));
+  b('▶ Play the cut', () => { v.currentTime = c.start; v._stopAt = c.end; v.play(); }, '');
+  wrap.appendChild(row);
+  wrap.appendChild(el('div', 'hint', 'Play or scrub to a moment, then tap Start here / End here. A Short can be up to ' + Math.round(MAX) + ' s.'));
+  return wrap;
+}
 function clipCard(c) {
   const card = el('div', 'clip');
   const busy = BUSY.includes(c.status), onYT = ['scheduled', 'posted'].includes(c.status);
   const vid = el('div', 'vid');
+  const save = async (body) => { try { await api('/api/rl/clips/' + c.id, jsonOpts('PUT', body)); load(); } catch (e) { alert(e.message); load(); } };
+  // The original while you trim it; the finished Short once it's made.
+  const canTrim = !onYT && c.has_source && c.duration;
+  const showShort = c.has_short && (!canTrim || (VIEW[c.id] || (c.status === 'ready' ? 'short' : 'source')) === 'short');
   if (c.has_short || c.has_source) {
     const v = el('video'); v.controls = true; v.playsInline = true; v.preload = 'metadata';
-    v.src = `/api/rl/clips/${c.id}/video?which=${c.has_short ? 'short' : 'source'}&t=${(c.short || {}).made_at || c.uploaded_at}`;
+    v.src = `/api/rl/clips/${c.id}/video?which=${showShort ? 'short' : 'source'}&t=${(c.short || {}).made_at || c.uploaded_at}`;
     vid.appendChild(v);
-    card._video = v; card._isShort = c.has_short;
+    card._video = v; card._isShort = showShort;
+    if (canTrim && !showShort) { vid.classList.add('wide'); vid.appendChild(trimmer(c, v, save, busy)); }
+    if (canTrim && c.has_short) {
+      const flip = el('button', 'secondary flip', showShort ? '✂️ Show the original to trim it' : '👀 Show the finished Short'); flip.type = 'button';
+      flip.onclick = () => { VIEW[c.id] = showShort ? 'source' : 'short'; renderClips(); };
+      vid.appendChild(flip);
+    }
   }
   vid.appendChild(el('div', 'name', c.name));
   card.appendChild(vid);
   const f = el('div', 'form');
-  const save = async (body) => { try { await api('/api/rl/clips/' + c.id, jsonOpts('PUT', body)); load(); } catch (e) { alert(e.message); load(); } };
   f.appendChild(el('label', '', 'Text on the video (also the YouTube title)'));
   const tx = el('input'); tx.maxLength = 100; tx.value = c.text || ''; tx.placeholder = 'e.g. Ceiling shot to win it'; tx.disabled = busy || onYT;
   tx.onchange = () => save({ text: tx.value }); f.appendChild(tx);
