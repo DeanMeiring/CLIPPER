@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 
@@ -62,9 +63,13 @@ def upload_video(
     privacy_status: str = "unlisted",
     is_short: bool = True,
     synthetic_media: bool = False,
+    publish_at: Optional[str] = None,
 ) -> str:
     """Upload video_path to the connected channel. Returns the new video's
     id on success.
+
+    `publish_at` (RFC 3339, UTC) schedules it: uploaded private, YouTube
+    makes it public at that time on its own -- even while this app sleeps.
 
     `synthetic_media` ticks YouTube's "altered or synthetic content" box
     (status.containsSyntheticMedia): needed when an AI copy of a real
@@ -92,6 +97,9 @@ def upload_video(
     status = {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False}
     if synthetic_media:
         status["containsSyntheticMedia"] = True
+    if publish_at:
+        status["privacyStatus"] = "private"
+        status["publishAt"] = publish_at
 
     try:
         init_resp = requests.post(
