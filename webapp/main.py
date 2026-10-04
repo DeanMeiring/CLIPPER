@@ -44,6 +44,7 @@ from clipper import explainer
 from clipper import longform_promo
 from clipper import longform_thumbnail
 from clipper import ranking
+from clipper import rocket_league
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -136,9 +137,13 @@ _youtube_token_store = _youtube_token_stores[DEFAULT_CHANNEL_PROFILE]  # back-co
 # long-form explainers, see clipper/explainer.py) has no clip pipeline or
 # Twitch watchlist, so it isn't in CHANNEL_PROFILES (that would add it to
 # Home's channel switcher) -- it only needs its own connected account.
+# Dean's own Rocket League channel ("The Deniboy", /rocket-league) is the
+# same: its own account, no clip pipeline.
+RL_PROFILE = "rl"
 EXTRA_YOUTUBE_ACCOUNTS: dict = {
     explainer.PROFILE: {"label": explainer.CHANNEL, "token_file": "_youtube_oauth_token_code.json",
                         "page_path": "/caught-on-code"},
+    RL_PROFILE: {"label": "Rocket League", "token_file": "_youtube_oauth_token_rl.json", "page_path": "/rocket-league"},
 }
 for _acct, _cfg in EXTRA_YOUTUBE_ACCOUNTS.items():
     _youtube_token_stores[_acct] = youtube_oauth.TokenStore(BASE_DIR / _cfg["token_file"])
@@ -3084,6 +3089,11 @@ def rankings_page() -> str:
     return RANKINGS_HTML.replace("__NAV_LINKS__", _nav_links("/rankings"))
 
 
+@protected.get("/rocket-league", response_class=HTMLResponse)
+def rocket_league_page() -> str:
+    return RL_HTML.replace("__NAV_LINKS__", _nav_links("/rocket-league"))
+
+
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
 # A bi-weekly series on the main (Caught On Stream) channel, a different
 # streamer each episode. Research -> story -> record -> render -> post.
@@ -5285,6 +5295,414 @@ def rankings_compare(refresh: bool = False) -> dict:
                        "median_stayed": median([r.get("stayed") for r in normal])}}
 
 
+# ---- The Deniboy: Dean's own Rocket League clips -> one Short a day on his
+# RL channel (clipper/rocket_league.py). Its own YouTube account ("rl", see
+# EXTRA_YOUTUBE_ACCOUNTS), its own page, nothing shared with the clip
+# pipeline. Data in BASE_DIR/_rl/.
+_rl = rocket_league.Store(BASE_DIR / "_rl")
+RL_UPLOADS_PER_DAY = 4      # the YouTube upload quota is shared with Caught On Stream (~6 uploads/day in all)
+RL_MAX_UPLOAD = 2 * 1024 ** 3
+RL_KEEP_DAYS = 3            # a posted Short's video is kept this long, then deleted to save space
+_rl_busy: set = set()
+_rl_busy_lock = threading.Lock()
+_rl_render_lock = threading.Lock()
+
+
+def _rl_mark(cid: str, on: bool) -> None:
+    with _rl_busy_lock:
+        (_rl_busy.add if on else _rl_busy.discard)(cid)
+
+
+def _rl_clip(cid: str) -> dict:
+    try:
+        return _rl.load(cid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "clip not found")
+
+
+def _rl_source(cid: str, clip: dict) -> Optional[Path]:
+    name = clip.get("source")
+    p = _rl.clip_dir(cid) / name if name else None
+    return p if p and p.is_file() else None
+
+
+def _rl_view(clip: dict) -> dict:
+    """A clip as the page sees it, with stuck states and posted dates fixed."""
+    c = dict(clip)
+    if c.get("status") in ("uploading", "analysing", "rendering") and c["id"] not in _rl_busy:
+        c["status"] = "new" if c.get("duration") else "error"
+        c["error"] = c.get("error") or "The server restarted while this was running -- try again."
+    yt = c.get("youtube") or {}
+    if c.get("status") == "scheduled" and yt.get("publish_at_ts") and yt["publish_at_ts"] <= time.time():
+        c["status"] = "posted"
+    c["has_source"] = bool(_rl_source(c["id"], c))
+    c["has_short"] = bool(c.get("short")) and (_rl.clip_dir(c["id"]) / "short.mp4").is_file()
+    return c
+
+
+def _rl_cleanup(clips: List[dict]) -> None:
+    for c in clips:
+        yt = c.get("youtube") or {}
+        if yt.get("publish_at_ts") and yt["publish_at_ts"] < time.time() - RL_KEEP_DAYS * 86400:
+            (_rl.clip_dir(c["id"]) / "short.mp4").unlink(missing_ok=True)
+
+
+def _rl_taken(clips: List[dict]) -> dict:
+    """Local date -> clip id, for every Short already scheduled."""
+    from zoneinfo import ZoneInfo
+    out = {}
+    for c in clips:
+        ts = (c.get("youtube") or {}).get("publish_at_ts")
+        if ts:
+            out[datetime.datetime.fromtimestamp(ts, ZoneInfo(rocket_league.TZ)).date().isoformat()] = c["id"]
+    return out
+
+
+def _rl_uploads_today(clips: List[dict]) -> int:
+    return sum(1 for c in clips if (c.get("youtube") or {}).get("uploaded_at", 0) > time.time() - 86400)
+
+
+@protected.get("/api/rl")
+def rl_state() -> dict:
+    clips = _rl.clips()
+    _rl_cleanup(clips)
+    views = [_rl_view(c) for c in clips]
+    taken = _rl_taken(clips)
+    s = _rl.settings()
+    try:
+        slot = rocket_league.next_slot(s["post_time"], list(taken)).isoformat()
+    except Exception:
+        slot = None
+    used = 0
+    root = BASE_DIR / "_rl"
+    if root.is_dir():
+        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return {"settings": s, "clips": views, "tracks": _rl.tracks(), "schedule": taken, "next_slot": slot,
+            "uploads_today": _rl_uploads_today(clips), "uploads_per_day": RL_UPLOADS_PER_DAY,
+            "connected": _youtube_token_stores[RL_PROFILE].is_connected(), "storage_mb": round(used / 1e6)}
+
+
+async def _rl_receive(request: Request, dest: Path) -> int:
+    """Stream an upload to disk (clips can be hundreds of MB)."""
+    size = 0
+    try:
+        with dest.open("wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > RL_MAX_UPLOAD:
+                    raise HTTPException(413, "that file is over 2 GB -- trim it first")
+                f.write(chunk)
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    if size < 1000:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "that file is empty")
+    return size
+
+
+def _rl_analyse(cid: str) -> None:
+    try:
+        clip = _rl.load(cid)
+        src = _rl_source(cid, clip)
+        info = rocket_league.probe(src)
+        goal = rocket_league.find_goal(src) if info["audio"] else None
+        dur = info["duration"]
+        start = 0.0
+        if dur > rocket_league.MAX_SECONDS:
+            # Long recording: keep the 59 s around the goal, mostly before it.
+            start = max(0.0, min(dur - rocket_league.MAX_SECONDS, (goal or dur) - rocket_league.MAX_SECONDS + 6))
+        end = min(dur, start + rocket_league.MAX_SECONDS)
+        _rl.update(cid, lambda c: c.update(status="new", error=None, duration=round(dur, 2), width=info["width"],
+                                           height=info["height"], fps=info["fps"], goal=goal, goal_auto=goal,
+                                           start=round(start, 2), end=round(end, 2)))
+    except Exception as e:
+        print(f"[rl] couldn't read clip {cid}: {e}", flush=True)
+        _rl.update(cid, lambda c: c.update(status="error", error="That file isn't a video the app can read."))
+    finally:
+        _rl_mark(cid, False)
+
+
+@protected.post("/api/rl/clips")
+async def rl_upload_clip(request: Request) -> dict:
+    name = Path(request.headers.get("x-filename") or "clip.mp4").name[:120]
+    ext = Path(name).suffix.lower() if re.fullmatch(r"\.[a-z0-9]{2,5}", Path(name).suffix.lower() or "") else ".mp4"
+    clip = _rl.new_clip(name)
+    cid = clip["id"]
+    _rl_mark(cid, True)
+    try:
+        await _rl_receive(request, _rl.clip_dir(cid) / f"source{ext}")
+    except BaseException:
+        _rl_mark(cid, False)
+        _rl.delete(cid)
+        raise
+    clip = _rl.update(cid, lambda c: c.update(source=f"source{ext}", status="analysing"))
+    threading.Thread(target=_rl_analyse, args=(cid,), daemon=True).start()
+    return _rl_view(clip)
+
+
+class RLClipEdit(BaseModel):
+    text: Optional[str] = None
+    description: Optional[str] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+    goal: Optional[float] = None
+    no_goal: bool = False
+    layout: Optional[str] = None
+    music: Optional[str] = None
+    game_level: Optional[str] = None
+
+
+@protected.put("/api/rl/clips/{cid}")
+def rl_edit_clip(cid: str, req: RLClipEdit) -> dict:
+    """Edits drop a finished Short (it no longer matches); a scheduled
+    one can't be changed here -- it's already on YouTube."""
+    _rl_clip(cid)
+    if cid in _rl_busy:
+        raise HTTPException(409, "wait until it's done")
+
+    def apply(c: dict) -> None:
+        if c.get("status") in ("scheduled", "posted"):
+            raise HTTPException(409, "It's already on YouTube -- change it in YouTube Studio.")
+        before = json.dumps({k: c.get(k) for k in ("text", "start", "end", "goal", "layout", "music", "game_level")}, sort_keys=True)
+        if req.text is not None:
+            c["text"] = " ".join(req.text.split())[:100]
+        if req.description is not None:
+            c["description"] = req.description[:4500]
+        dur = float(c.get("duration") or 0)
+        a = float(req.start) if req.start is not None else float(c.get("start") or 0)
+        b = float(req.end) if req.end is not None else float(c.get("end") or dur)
+        a, b = max(0.0, min(a, dur)), max(0.0, min(b, dur))
+        if b - a < 2:
+            raise HTTPException(400, "Keep at least 2 seconds.")
+        if b - a > rocket_league.MAX_SECONDS + 0.01:
+            raise HTTPException(400, f"A Short can be at most {rocket_league.MAX_SECONDS:.0f} seconds here -- move the start or the end.")
+        c["start"], c["end"] = round(a, 2), round(b, 2)
+        if req.no_goal:
+            c["goal"] = None
+        elif req.goal is not None:
+            c["goal"] = round(max(0.0, min(float(req.goal), dur)), 2)
+        if req.layout in ("full", "frame"):
+            c["layout"] = req.layout
+        if req.music is not None:
+            if req.music not in ("auto", "none") and not any(t["id"] == req.music for t in _rl.tracks()):
+                raise HTTPException(400, "that song isn't in your music any more")
+            c["music"] = req.music
+        if req.game_level is not None and req.game_level in rocket_league.GAME_LEVELS:
+            c["game_level"] = req.game_level
+        after = json.dumps({k: c.get(k) for k in ("text", "start", "end", "goal", "layout", "music", "game_level")}, sort_keys=True)
+        if after != before and c.get("status") == "ready":
+            c["status"] = "new"
+    return _rl_view(_rl.update(cid, apply))
+
+
+def _rl_pick_track(clip: dict, clips: List[dict], tracks: List[dict]) -> Optional[dict]:
+    if not tracks or clip.get("music") == "none":
+        return None
+    if clip.get("music") not in (None, "auto"):
+        return next((t for t in tracks if t["id"] == clip["music"]), None)
+    used = {t["id"]: 0 for t in tracks}
+    for c in clips:
+        if c.get("music_used") in used:
+            used[c["music_used"]] += 1
+    return min(tracks, key=lambda t: (used[t["id"]], t.get("added_at") or 0))
+
+
+def _rl_render(cid: str) -> None:
+    try:
+        with _rl_render_lock:
+            clip = _rl.load(cid)
+            _rl.update(cid, lambda c: c.update(status="rendering"))
+            src = _rl_source(cid, clip)
+            if src is None:
+                raise RuntimeError("the original clip is gone")
+            s = _rl.settings()
+            track = _rl_pick_track(clip, _rl.clips(), _rl.tracks())
+            music = _rl.music_dir() / track["file"] if track else None
+            length = rocket_league.render(
+                src, _rl.clip_dir(cid) / "short.mp4", float(clip["start"]), float(clip["end"]), clip.get("goal"),
+                clip.get("text") or "", s.get("watermark") or "", clip.get("layout") or "full", music,
+                (track or {}).get("drop"), clip.get("game_level") or s.get("game_level") or "medium")
+            _rl.update(cid, lambda c: c.update(status="ready", error=None, short={"length": length, "made_at": time.time()},
+                                               music_used=track["id"] if track else None))
+    except Exception as e:
+        print(f"[rl] render {cid} failed: {e}", flush=True)
+        _rl.update(cid, lambda c: c.update(status="new", error=f"Couldn't make the Short: {str(e)[-300:]}"))
+    finally:
+        _rl_mark(cid, False)
+
+
+@protected.post("/api/rl/clips/{cid}/render")
+def rl_render_clip(cid: str) -> dict:
+    clip = _rl_clip(cid)
+    if cid in _rl_busy:
+        raise HTTPException(409, "it's already being made")
+    if clip.get("status") in ("scheduled", "posted"):
+        raise HTTPException(409, "It's already on YouTube.")
+    if not _rl_source(cid, clip):
+        raise HTTPException(409, "the original clip is gone")
+    _rl_mark(cid, True)
+    clip = _rl.update(cid, lambda c: c.update(status="rendering", error=None))
+    threading.Thread(target=_rl_render, args=(cid,), daemon=True).start()
+    return _rl_view(clip)
+
+
+@protected.get("/api/rl/clips/{cid}/video")
+def rl_clip_video(cid: str, which: str = "short") -> FileResponse:
+    clip = _rl_clip(cid)
+    path = _rl.clip_dir(cid) / "short.mp4" if which == "short" else _rl_source(cid, clip)
+    if not path or not path.is_file():
+        raise HTTPException(404, "not there")
+    return FileResponse(path, media_type="video/mp4")
+
+
+class RLScheduleRequest(BaseModel):
+    now: bool = False
+
+
+@protected.post("/api/rl/clips/{cid}/schedule")
+def rl_schedule_clip(cid: str, req: RLScheduleRequest) -> dict:
+    """Upload the Short to the RL channel: private with a publish time on
+    the next free day (YouTube makes it public then), or public now."""
+    clip = _rl_clip(cid)
+    if clip.get("status") != "ready" or not (_rl.clip_dir(cid) / "short.mp4").is_file():
+        raise HTTPException(409, "Make the Short first.")
+    if cid in _rl_busy:
+        raise HTTPException(409, "it's busy -- give it a moment")
+    clips = _rl.clips()
+    if _rl_uploads_today(clips) >= RL_UPLOADS_PER_DAY:
+        raise HTTPException(409, f"That's {RL_UPLOADS_PER_DAY} uploads today -- YouTube's daily upload limit is shared "
+                                 "with Caught On Stream. Schedule the rest tomorrow (they still post one a day).")
+    token = _youtube_token_stores[RL_PROFILE].get_valid_access_token()
+    if not token:
+        raise HTTPException(409, "Connect your Rocket League YouTube channel first (top of this page).")
+    s = _rl.settings()
+    slot = None if req.now else rocket_league.next_slot(s["post_time"], list(_rl_taken(clips)))
+    track = next((t for t in _rl.tracks() if t["id"] == clip.get("music_used")), None)
+    desc = (clip.get("description") if clip.get("description") is not None else s.get("description") or "").strip()
+    if track and track.get("credit"):
+        desc = (desc + "\n\nMusic:\n" + track["credit"].strip()).strip()
+    title = (clip.get("text") or "").strip() or "Rocket League"
+    _rl_mark(cid, True)
+    try:
+        video_id = youtube_upload.upload_video(
+            token, _rl.clip_dir(cid) / "short.mp4", title=title[:100], description=desc, privacy_status="public",
+            is_short=True, publish_at=slot.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if slot else None)
+    except (youtube_upload.UploadError, ValueError) as e:
+        raise HTTPException(502, str(e)) from e
+    finally:
+        _rl_mark(cid, False)
+    yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
+          "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
+    clip = _rl.update(cid, lambda c: c.update(status="scheduled" if slot else "posted", youtube=yt, title=title))
+    src = _rl_source(cid, clip)
+    if src:
+        src.unlink(missing_ok=True)  # the Short is on YouTube; the original isn't needed any more
+    return _rl_view(clip)
+
+
+@protected.delete("/api/rl/clips/{cid}")
+def rl_delete_clip(cid: str) -> dict:
+    _rl_clip(cid)
+    if cid in _rl_busy:
+        raise HTTPException(409, "wait until it's done")
+    _rl.delete(cid)
+    return rl_state()
+
+
+@protected.post("/api/rl/music")
+async def rl_upload_music(request: Request) -> dict:
+    name = Path(request.headers.get("x-filename") or "song.mp3").name[:120]
+    ext = Path(name).suffix.lower()
+    if ext not in (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm", ".mp4"):
+        raise HTTPException(400, "Upload an audio file (mp3, m4a, wav...).")
+    tid = uuid.uuid4().hex[:8]
+    dest = _rl.music_dir() / f"{tid}{ext}"
+    await _rl_receive(request, dest)
+
+    def work() -> dict:
+        drop = rocket_league.find_drop(dest)
+        dur = longform.audio_duration(dest)
+        return {"drop": drop if drop is not None else 0.0, "duration": round(dur, 1)}
+    try:
+        info = await run_in_threadpool(work)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "That file isn't audio the app can read.")
+    track = {"id": tid, "file": dest.name, "name": Path(name).stem[:80], "credit": "", "added_at": time.time(),
+             "drop_auto": info["drop"], **info}
+    with _rl.lock:
+        tracks = _rl.tracks() + [track]
+        _rl.save_tracks(tracks)
+    return track
+
+
+class RLTrackEdit(BaseModel):
+    name: Optional[str] = None
+    credit: Optional[str] = None
+    drop: Optional[float] = None
+
+
+@protected.put("/api/rl/music/{tid}")
+def rl_edit_track(tid: str, req: RLTrackEdit) -> dict:
+    with _rl.lock:
+        tracks = _rl.tracks()
+        t = next((x for x in tracks if x["id"] == tid), None)
+        if t is None:
+            raise HTTPException(404, "song not found")
+        if req.name is not None:
+            t["name"] = " ".join(req.name.split())[:80] or t["name"]
+        if req.credit is not None:
+            t["credit"] = req.credit.strip()[:600]
+        if req.drop is not None:
+            t["drop"] = round(max(0.0, min(float(req.drop), float(t.get("duration") or 0))), 1)
+        _rl.save_tracks(tracks)
+    return t
+
+
+@protected.delete("/api/rl/music/{tid}")
+def rl_delete_track(tid: str) -> dict:
+    with _rl.lock:
+        tracks = _rl.tracks()
+        t = next((x for x in tracks if x["id"] == tid), None)
+        if t is None:
+            raise HTTPException(404, "song not found")
+        (_rl.music_dir() / t["file"]).unlink(missing_ok=True)
+        _rl.save_tracks([x for x in tracks if x["id"] != tid])
+    return rl_state()
+
+
+@protected.get("/api/rl/music/{tid}/audio")
+def rl_track_audio(tid: str) -> FileResponse:
+    t = next((x for x in _rl.tracks() if x["id"] == tid), None)
+    if t is None or not (_rl.music_dir() / t["file"]).is_file():
+        raise HTTPException(404, "song not found")
+    return FileResponse(_rl.music_dir() / t["file"])
+
+
+class RLSettings(BaseModel):
+    post_time: Optional[str] = None
+    watermark: Optional[str] = None
+    description: Optional[str] = None
+    game_level: Optional[str] = None
+
+
+@protected.put("/api/rl/settings")
+def rl_settings(req: RLSettings) -> dict:
+    data = {}
+    if req.post_time is not None:
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", req.post_time):
+            raise HTTPException(400, "Use a time like 17:00.")
+        data["post_time"] = req.post_time
+    if req.watermark is not None:
+        data["watermark"] = " ".join(req.watermark.split())[:40]
+    if req.description is not None:
+        data["description"] = req.description[:4500]
+    if req.game_level is not None and req.game_level in rocket_league.GAME_LEVELS:
+        data["game_level"] = req.game_level
+    return _rl.save_settings(data)
+
+
 app.include_router(protected)
 
 
@@ -5531,6 +5949,7 @@ __NAV_LINKS__
 <p class="subtitle">Paste a YouTube or Twitch link, get back short vertical highlight clips picked by Claude.</p>
 <a class="longform-link" href="/long-form"><span>🎬 Go to long-form videos</span><span>→</span></a>
 <a class="longform-link" href="/caught-on-code"><span>💻 Go to Caught On Code</span><span>→</span></a>
+<a class="longform-link" href="/rocket-league"><span>🚗 Go to my Rocket League channel</span><span>→</span></a>
 
 <div id="profile-row">
   <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
@@ -9460,6 +9879,330 @@ async function upload() {
 }
 const rid = new URLSearchParams(location.search).get('r');
 (rid ? openProject(rid) : showList()).catch(e => alert(e.message));
+</script>
+</body>
+</html>
+""".replace("__CSS__", _SIMPLE_PAGE_CSS)
+
+
+RL_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — Rocket League</title>
+<style>
+__CSS__
+  .row2 { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row2 > div { flex: 1 1 160px; }
+  .days { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 8px; margin-top: 8px; }
+  .day { flex: none; width: 74px; border: 1px solid var(--border); border-radius: 10px; padding: 6px; text-align: center; font-size: 0.74rem; color: var(--muted); }
+  .day b { display: block; font-size: 0.86rem; color: var(--text); }
+  .day.on { border-color: var(--ok); color: var(--ok); }
+  .day.free { border-style: dashed; }
+  .bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
+  .track { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin-top: 8px; }
+  .track input { margin-top: 0; }
+  .track .nm { flex: 2 1 160px; }
+  .track .dp { width: 84px; flex: none; }
+  .track .cr { flex: 3 1 220px; font-size: 0.8rem; }
+  .track button { margin-top: 0; padding: 7px 12px; }
+  .tabs { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .tabs button { margin-top: 0; padding: 7px 14px; }
+  .tabs button.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; }
+  .clip { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin-top: 12px; display: flex; gap: 14px; }
+  .clip .vid { flex: none; width: 170px; }
+  .clip video { width: 100%; border-radius: 10px; background: #000; display: block; max-height: 300px; }
+  .clip .form { flex: 1; min-width: 0; }
+  .clip .form label:first-child { margin-top: 0; }
+  .clip .nums { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+  .clip .nums > div { width: 92px; }
+  .clip .nums input { padding: 7px 8px; }
+  .clip .sel { display: flex; gap: 8px; flex-wrap: wrap; }
+  .clip .sel > div { flex: 1 1 120px; }
+  .st { font-size: 0.84rem; margin-top: 8px; }
+  .st.ok { color: var(--ok); } .st.bad { color: var(--danger); } .st.wait { color: var(--warn); }
+  .name { font-size: 0.74rem; color: var(--muted); margin-top: 4px; word-break: break-all; }
+  @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .clip { flex-direction: column; } .clip .vid { width: 100%; } .clip video { max-height: 420px; } }
+</style>
+</head>
+<body>
+<div class="page">
+__NAV_LINKS__
+<div class="card">
+  <div class="brand"><span class="logo">🚗</span><h1>Rocket League</h1></div>
+  <p class="subtitle">Your own clips as Shorts, one a day on your Rocket League channel. Upload the backlog, type the text, pick a song: the app lines the drop up with your goal and schedules them.</p>
+  <div id="conn" class="status"></div>
+
+  <div class="section">
+    <h3>📅 Posting</h3>
+    <div class="row2">
+      <div><label for="s-time">Every day at (SA time)</label><input id="s-time" type="time"></div>
+      <div><label for="s-mark">Name on the videos</label><input id="s-mark" maxlength="40"></div>
+      <div><label for="s-game">Game sound under the music</label><select id="s-game"><option value="low">Quiet</option><option value="medium">Medium</option><option value="high">Loud</option></select></div>
+    </div>
+    <details><summary>Default description</summary><textarea id="s-desc" rows="4"></textarea><div class="hint">Used when a clip's own description is empty. A song's credit is added under it.</div></details>
+    <div class="days" id="days"></div>
+    <div class="hint" id="quota"></div>
+  </div>
+
+  <div class="section">
+    <h3>⬆ Add clips</h3>
+    <div class="hint">Pick as many as you like. Any video file from console or PC. Longer than a minute? It keeps the 59 seconds around the goal and you can move it.</div>
+    <button id="add-clips" type="button">⬆ Add clips</button>
+    <input type="file" id="clip-files" accept="video/*,.mp4,.mov,.mkv,.webm" multiple style="display:none">
+    <div id="uploads"></div>
+  </div>
+
+  <div class="section">
+    <h3>🎵 Music</h3>
+    <div class="hint">Songs to put under your clips; “Auto” rotates through them. Each song's drop lands on the goal: the app finds it, ▶ plays from there, and you can fix the second. Free montage music (NCS, free phonk) keeps a Short earning: paste the credit from the song's page and it's added to the description. A label's song gets claimed and the label takes that Short's ad money.</div>
+    <div id="tracks"></div>
+    <button id="add-music" type="button" class="secondary">⬆ Add songs</button>
+    <input type="file" id="music-files" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac" multiple style="display:none">
+  </div>
+
+  <div class="section">
+    <h3>🎬 Your clips</h3>
+    <div class="tabs" id="tabs"></div>
+    <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
+    <div id="clips"></div>
+  </div>
+</div>
+</div>
+<audio id="player" style="display:none"></audio>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.detail || `Request failed (${r.status})`);
+  return out;
+}
+const jsonOpts = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+// Dates and times are shown in SA time, whatever the phone's own clock says.
+const TZ = 'Africa/Johannesburg';
+const sa = (d, o) => new Date(d).toLocaleString(undefined, { timeZone: TZ, ...o });
+let S = null, tab = 'todo', poll = null;
+const BUSY = ['uploading', 'analysing', 'rendering'];
+
+async function load() {
+  S = await api('/api/rl');
+  render();
+  clearTimeout(poll);
+  if (S.clips.some(c => BUSY.includes(c.status))) poll = setTimeout(load, 3000);
+}
+function render() {
+  const conn = $('conn');
+  conn.innerHTML = '';
+  if (S.connected) { conn.className = 'status ok'; conn.textContent = '✅ Your Rocket League YouTube channel is connected: Shorts upload there.'; }
+  else {
+    conn.className = 'status';
+    conn.appendChild(document.createTextNode('Connect your Rocket League channel so the app can upload to it. Sign in with the Google account that owns it. '));
+    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=rl'; conn.appendChild(a);
+  }
+  const st = S.settings;
+  if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
+  if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
+  if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
+  $('s-game').value = st.game_level;
+  // next 14 days
+  const days = $('days'); days.innerHTML = '';
+  const today = new Date();
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(today.getTime() + i * 86400000);
+    const iso = d.toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
+    const on = !!S.schedule[iso];
+    const box = el('div', 'day' + (on ? ' on' : ' free'));
+    box.appendChild(el('b', '', sa(d, { weekday: 'short' })));
+    box.appendChild(document.createTextNode(sa(d, { day: 'numeric', month: 'short' })));
+    box.appendChild(el('div', '', on ? '✅' : '—'));
+    days.appendChild(box);
+  }
+  const left = Math.max(0, S.uploads_per_day - S.uploads_today);
+  $('quota').textContent = (S.next_slot ? `Next free day: ${sa(S.next_slot, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}. ` : '')
+    + `You can schedule ${left} more today (YouTube's daily upload limit is shared with Caught On Stream). Storage used: ${S.storage_mb} MB.`;
+  renderTracks();
+  renderClips();
+}
+for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-desc', 'description'], ['s-game', 'game_level']]) {
+  $(id).addEventListener('change', async () => {
+    try { S.settings = await api('/api/rl/settings', jsonOpts('PUT', { [key]: $(id).value })); load(); } catch (e) { alert(e.message); }
+  });
+}
+
+// ---------- uploads ----------
+$('add-clips').onclick = () => $('clip-files').click();
+$('clip-files').onchange = async () => {
+  const files = [...$('clip-files').files]; $('clip-files').value = '';
+  for (const f of files) await sendFile('/api/rl/clips', f);
+  load();
+};
+function sendFile(url, f) {
+  return new Promise((resolve) => {
+    const row = el('div', 'track');
+    const nm = el('span', 'nm', f.name); row.appendChild(nm);
+    const bar = el('div', 'bar'); bar.style.flex = '1 1 120px'; const fill = el('div'); bar.appendChild(fill); row.appendChild(bar);
+    const msg = el('span', 'hint', ''); row.appendChild(msg);
+    $('uploads').appendChild(row);
+    const x = new XMLHttpRequest();
+    x.open('POST', url);
+    x.setRequestHeader('X-Filename', f.name);
+    x.setRequestHeader('Content-Type', f.type || 'application/octet-stream');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) fill.style.width = Math.round(100 * e.loaded / e.total) + '%'; };
+    x.onload = () => {
+      if (x.status < 300) { row.remove(); }
+      else { let d = {}; try { d = JSON.parse(x.responseText); } catch (e) {} msg.textContent = '⚠️ ' + (d.detail || 'failed'); }
+      resolve();
+    };
+    x.onerror = () => { msg.textContent = '⚠️ upload failed'; resolve(); };
+    x.send(f);
+  });
+}
+
+// ---------- music ----------
+$('add-music').onclick = () => $('music-files').click();
+$('music-files').onchange = async () => {
+  const files = [...$('music-files').files]; $('music-files').value = '';
+  for (const f of files) await sendFile('/api/rl/music', f);
+  load();
+};
+function renderTracks() {
+  const box = $('tracks'); box.innerHTML = '';
+  if (!S.tracks.length) box.appendChild(el('div', 'hint', 'No songs yet.'));
+  for (const t of S.tracks) {
+    const r = el('div', 'track');
+    const nm = el('input', 'nm'); nm.value = t.name; nm.onchange = () => editTrack(t.id, { name: nm.value });
+    const dp = el('input', 'dp'); dp.type = 'number'; dp.step = '0.1'; dp.value = t.drop; dp.title = 'Drop at (seconds)';
+    dp.onchange = () => editTrack(t.id, { drop: parseFloat(dp.value) });
+    const pl = el('button', 'secondary', '▶ Drop'); pl.type = 'button';
+    pl.onclick = () => { const a = $('player'); if (!a.paused && a.dataset.t === t.id) { a.pause(); return; } a.src = `/api/rl/music/${t.id}/audio`; a.dataset.t = t.id; a.currentTime = Math.max(0, (parseFloat(dp.value) || 0) - 3); a.play(); };
+    const cr = el('input', 'cr'); cr.placeholder = 'Credit (paste from the song’s page, e.g. NCS)'; cr.value = t.credit || '';
+    cr.onchange = () => editTrack(t.id, { credit: cr.value });
+    const del = el('button', 'danger-link', 'Remove'); del.type = 'button';
+    del.onclick = async () => { if (confirm(`Remove “${t.name}”?`)) { try { await api('/api/rl/music/' + t.id, { method: 'DELETE' }); load(); } catch (e) { alert(e.message); } } };
+    r.appendChild(nm); r.appendChild(el('span', 'hint', 'drop at')); r.appendChild(dp); r.appendChild(el('span', 'hint', 's')); r.appendChild(pl); r.appendChild(cr); r.appendChild(del);
+    box.appendChild(r);
+  }
+}
+async function editTrack(id, body) { try { await api('/api/rl/music/' + id, jsonOpts('PUT', body)); load(); } catch (e) { alert(e.message); } }
+
+// ---------- clips ----------
+const GROUPS = { todo: ['uploading', 'analysing', 'new', 'rendering', 'ready', 'error'], scheduled: ['scheduled'], posted: ['posted'] };
+function renderClips() {
+  const tabs = $('tabs'); tabs.innerHTML = '';
+  for (const [k, label] of [['todo', 'To do'], ['scheduled', 'Scheduled'], ['posted', 'Posted']]) {
+    const n = S.clips.filter(c => GROUPS[k].includes(c.status)).length;
+    const b = el('button', 'secondary' + (tab === k ? ' on' : ''), `${label} (${n})`); b.type = 'button';
+    b.onclick = () => { tab = k; renderClips(); };
+    tabs.appendChild(b);
+  }
+  const ready = S.clips.filter(c => c.status === 'ready');
+  const left = Math.max(0, S.uploads_per_day - S.uploads_today);
+  const sa = $('sched-all');
+  sa.style.display = tab === 'todo' && ready.length > 1 && S.connected ? 'inline-block' : 'none';
+  sa.textContent = `📅 Schedule ${Math.min(ready.length, left)} ready Short${Math.min(ready.length, left) === 1 ? '' : 's'} (one a day)`;
+  sa.disabled = !left;
+  const box = $('clips'); box.innerHTML = '';
+  const list = S.clips.filter(c => GROUPS[tab].includes(c.status));
+  if (tab !== 'todo') list.sort((a, b) => ((a.youtube || {}).publish_at_ts || 0) - ((b.youtube || {}).publish_at_ts || 0));
+  if (!list.length) box.appendChild(el('div', 'hint', tab === 'todo' ? 'Nothing here. Add clips above.' : 'Nothing yet.'));
+  for (const c of list) box.appendChild(clipCard(c));
+}
+function clipCard(c) {
+  const card = el('div', 'clip');
+  const busy = BUSY.includes(c.status), onYT = ['scheduled', 'posted'].includes(c.status);
+  const vid = el('div', 'vid');
+  if (c.has_short || c.has_source) {
+    const v = el('video'); v.controls = true; v.playsInline = true; v.preload = 'metadata';
+    v.src = `/api/rl/clips/${c.id}/video?which=${c.has_short ? 'short' : 'source'}&t=${(c.short || {}).made_at || c.uploaded_at}`;
+    vid.appendChild(v);
+    card._video = v; card._isShort = c.has_short;
+  }
+  vid.appendChild(el('div', 'name', c.name));
+  card.appendChild(vid);
+  const f = el('div', 'form');
+  const save = async (body) => { try { await api('/api/rl/clips/' + c.id, jsonOpts('PUT', body)); load(); } catch (e) { alert(e.message); load(); } };
+  f.appendChild(el('label', '', 'Text on the video (also the YouTube title)'));
+  const tx = el('input'); tx.maxLength = 100; tx.value = c.text || ''; tx.placeholder = 'e.g. Ceiling shot to win it'; tx.disabled = busy || onYT;
+  tx.onchange = () => save({ text: tx.value }); f.appendChild(tx);
+  if (!onYT) {
+    const nums = el('div', 'nums');
+    const num = (label, val, key) => {
+      const d = el('div'); d.appendChild(el('label', '', label));
+      const i = el('input'); i.type = 'number'; i.step = '0.1'; i.min = 0; i.value = val == null ? '' : val; i.disabled = busy;
+      i.onchange = () => save({ [key]: i.value === '' ? null : parseFloat(i.value), ...(key === 'goal' && i.value === '' ? { no_goal: true } : {}) });
+      d.appendChild(i); nums.appendChild(d); return i;
+    };
+    num('Start (s)', c.start, 'start'); num('End (s)', c.end, 'end'); const gi = num('Goal at (s)', c.goal, 'goal');
+    const pg = el('button', 'secondary', '▶ Goal'); pg.type = 'button'; pg.style.marginTop = '0';
+    pg.onclick = () => { const v = card._video; if (!v || c.goal == null) return; v.currentTime = Math.max(0, (card._isShort ? c.goal - c.start : c.goal) - 3); v.play(); };
+    nums.appendChild(pg);
+    f.appendChild(nums);
+    f.appendChild(el('div', 'hint', c.goal_auto != null ? `The app heard the goal at ${c.goal_auto} s (the loudest moment). Clear the box for no drop effect.` : 'No goal found in the sound: type the second, or leave it empty.'));
+    const sel = el('div', 'sel');
+    const pick = (label, opts, val, key) => {
+      const d = el('div'); d.appendChild(el('label', '', label));
+      const s = el('select'); s.disabled = busy;
+      for (const [v, t] of opts) { const o = el('option', '', t); o.value = v; o.selected = v === val; s.appendChild(o); }
+      s.onchange = () => save({ [key]: s.value }); d.appendChild(s); sel.appendChild(d);
+    };
+    pick('Song', [['auto', '🔀 Auto'], ['none', 'No music'], ...S.tracks.map(t => [t.id, t.name])], c.music || 'auto', 'music');
+    pick('Layout', [['full', 'Full screen'], ['frame', 'Whole frame']], c.layout || 'full', 'layout');
+    pick('Game sound', [['', 'Default'], ['low', 'Quiet'], ['medium', 'Medium'], ['high', 'Loud']], c.game_level || '', 'game_level');
+    f.appendChild(sel);
+    const det = el('details'); det.appendChild(el('summary', '', 'Description'));
+    const ds = el('textarea'); ds.rows = 3; ds.placeholder = S.settings.description; ds.value = c.description || ''; ds.disabled = busy;
+    ds.onchange = () => save({ description: ds.value }); det.appendChild(ds); f.appendChild(det);
+  }
+  const acts = el('div', 'actions');
+  const btn = (label, cls, fn, dis) => { const b = el('button', cls, label); b.type = 'button'; b.disabled = !!dis; b.onclick = fn; acts.appendChild(b); return b; };
+  if (!onYT) {
+    btn(c.status === 'ready' ? '🎬 Make again' : '🎬 Make Short', c.status === 'ready' ? 'secondary' : '', async () => {
+      try { await api(`/api/rl/clips/${c.id}/render`, { method: 'POST' }); load(); } catch (e) { alert(e.message); } }, busy || !c.has_source);
+    if (c.status === 'ready') {
+      btn('📅 Schedule', '', () => schedule(c, false), !S.connected);
+      btn('🚀 Post now', 'secondary', () => { if (confirm('Post it publicly right now instead of on its day?')) schedule(c, true); }, !S.connected);
+    }
+  }
+  const del = btn('🗑 Delete', 'danger-link', async () => {
+    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone).' : 'Delete this clip?')) return;
+    try { await api('/api/rl/clips/' + c.id, { method: 'DELETE' }); load(); } catch (e) { alert(e.message); } }, busy);
+  del.style.marginLeft = 'auto';
+  f.appendChild(acts);
+  const yt = c.youtube || {};
+  const msg = c.status === 'uploading' ? ['wait', '⏳ Uploading…'] : c.status === 'analysing' ? ['wait', '👂 Finding the goal…']
+    : c.status === 'rendering' ? ['wait', '🎬 Making the Short (about the clip’s length)…']
+    : c.status === 'ready' ? ['ok', `✅ Short ready (${Math.round((c.short || {}).length || 0)} s). Schedule it for ${S.next_slot ? sa(S.next_slot, { weekday: 'short', day: 'numeric', month: 'short' }) : 'the next free day'}.`]
+    : c.status === 'scheduled' ? ['ok', `📅 Goes public ${sa(yt.publish_at, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}.`]
+    : c.status === 'posted' ? ['ok', '✅ Posted.'] : c.error ? ['bad', '⚠️ ' + c.error] : ['', 'Type the text, check the goal second, then 🎬 Make Short.'];
+  const sl = el('div', 'st ' + msg[0], msg[1]);
+  if (c.error && c.status !== 'error' && !busy) sl.textContent = '⚠️ ' + c.error;
+  if (yt.url) { sl.appendChild(document.createTextNode(' ')); const a = el('a', '', 'Open on YouTube'); a.href = yt.url; a.target = '_blank'; sl.appendChild(a); }
+  f.appendChild(sl);
+  card.appendChild(f);
+  return card;
+}
+async function schedule(c, now) {
+  try { await api(`/api/rl/clips/${c.id}/schedule`, jsonOpts('POST', { now })); }
+  catch (e) { alert(e.message); }
+  load();
+}
+$('sched-all').onclick = async () => {
+  const b = $('sched-all'); b.disabled = true;
+  const ready = S.clips.filter(c => c.status === 'ready');
+  for (const c of ready) {
+    b.textContent = '⏳ Uploading “' + (c.text || c.name) + '”…';
+    try { await api(`/api/rl/clips/${c.id}/schedule`, jsonOpts('POST', { now: false })); }
+    catch (e) { alert(e.message); break; }
+  }
+  load();
+};
+const params = new URLSearchParams(location.search);
+if (params.has('youtube_connected')) history.replaceState(null, '', '/rocket-league');
+load().catch(e => alert(e.message));
 </script>
 </body>
 </html>

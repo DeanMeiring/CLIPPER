@@ -397,6 +397,39 @@ merge it yourself; merging stays Dean's call per the rule above.
   libs and a venv). The app uses the Pillow templates instead, so there's
   no new dependency or Docker change.
 
+## The Deniboy: Dean's own Rocket League channel (Oct 2026)
+
+- Dean plays Rocket League (SA Grand Champ, channel "The Deniboy") and has a
+  backlog of his own clips to post as one Short a day. Home has "🚗 Go to my
+  Rocket League channel" → `/rocket-league` (`RL_HTML`), code in
+  `clipper/rocket_league.py`, routes `/api/rl/*`, data in `BASE_DIR/_rl/`
+  (`clips/<id>/` with `source.*`, `clip.json`, `short.mp4`; `music/` +
+  `music.json`; `settings.json`). Nothing shared with the clip pipeline.
+- Its own YouTube account `EXTRA_YOUTUBE_ACCOUNTS["rl"]` (token
+  `_youtube_oauth_token_rl.json`; connect with
+  `/auth/youtube/login?profile=rl`, the callback returns to the page).
+- Flow: upload many clips (streamed to disk, ≤ 2 GB each) → `find_goal`
+  (loudest burst in the game audio: explosion + horn) sets the goal second
+  and a ≤ 59 s window around it → Dean types the text (also the YouTube
+  title) → `render`: full screen (middle of the frame; default) or whole
+  frame over a blur, the text on top, his name at the bottom, a white flash
+  + quick zoom on the goal, the song's drop (`find_drop`: biggest jump in
+  bass energy, editable per song) lined up with the goal, game sound
+  loudnormed under the music (quiet/medium/loud) → "📅 Schedule" uploads
+  it private with `publishAt` on the next free day at his time (SA time,
+  default 17:00; `youtube_upload.upload_video(publish_at=...)`), so YouTube
+  posts it even while the Railway app sleeps. Max 4 uploads a day
+  (`RL_UPLOADS_PER_DAY`): the 10,000-unit quota is shared with Caught On
+  Stream. After upload the source is deleted; the Short is deleted 3 days
+  after it goes public (`RL_KEEP_DAYS`) -- the volume is near the 5 GB cap.
+- Music is his own uploads ("Auto" rotates the least-used song). Free
+  tracks (NCS, free phonk) keep a Short earning; the song's credit is
+  added to the description. A label's song gets a Content ID claim: under
+  60 s the Short stays up but the label takes its ad money. Dean was told.
+- His branding (pfp from his Steam avatar or a "D" logo, banner with an
+  original GC badge, not Psyonix's rank icon) was made in the sandbox, not
+  in the app.
+
 ## Clip layout
 
 - Clips render in the IRL layout by default (`reframe.LetterboxLayout`,
