@@ -5385,6 +5385,8 @@ def rl_state() -> dict:
 
 async def _rl_receive(request: Request, dest: Path) -> int:
     """Stream an upload to disk (clips can be hundreds of MB)."""
+    from starlette.requests import ClientDisconnect
+
     size = 0
     try:
         with dest.open("wb") as f:
@@ -5393,6 +5395,11 @@ async def _rl_receive(request: Request, dest: Path) -> int:
                 if size > RL_MAX_UPLOAD:
                     raise HTTPException(413, "that file is over 2 GB -- trim it first")
                 f.write(chunk)
+    except ClientDisconnect:
+        # The phone left the page or lost signal mid-upload: nothing to keep,
+        # and not an error worth a red traceback in the logs.
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "the upload was cut off -- try again and stay on the page until it's done")
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
@@ -10024,8 +10031,10 @@ function render() {
   if (S.connected) { conn.className = 'status ok'; conn.textContent = '✅ Your Rocket League YouTube channel is connected: Shorts upload there.'; }
   else {
     conn.className = 'status';
-    conn.appendChild(document.createTextNode('Connect your Rocket League channel so the app can upload to it. Sign in with the Google account that owns it. '));
-    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=rl'; conn.appendChild(a);
+    conn.appendChild(document.createTextNode('Connect your Rocket League channel so the app can upload to it. Sign in with the Google account that owns it (and pick the channel if Google asks). '));
+    // A new tab, so an upload running on this page isn't cut off.
+    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=rl'; a.target = '_blank'; conn.appendChild(a);
+    conn.appendChild(el('div', 'hint', 'If Google says the app is blocked or not verified, that Google account has to be added as a test user in Google Cloud (OAuth consent screen → Test users), the same way your other accounts were.'));
   }
   const st = S.settings;
   if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
@@ -10058,6 +10067,11 @@ for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-d
 }
 
 // ---------- uploads ----------
+let uploading = 0;
+// Leaving the page cuts an upload off: ask first.
+window.addEventListener('beforeunload', (e) => { if (uploading) { e.preventDefault(); e.returnValue = ''; } });
+// Back from connecting in the other tab: show the new state.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load().catch(() => {}); });
 $('add-clips').onclick = () => $('clip-files').click();
 $('clip-files').onchange = async () => {
   const files = [...$('clip-files').files]; $('clip-files').value = '';
@@ -10065,7 +10079,9 @@ $('clip-files').onchange = async () => {
   load();
 };
 function sendFile(url, f) {
-  return new Promise((resolve) => {
+  uploading++;
+  return new Promise((done) => {
+    const resolve = () => { uploading--; done(); };
     const row = el('div', 'track');
     const nm = el('span', 'nm', f.name); row.appendChild(nm);
     const bar = el('div', 'bar'); bar.style.flex = '1 1 120px'; const fill = el('div'); bar.appendChild(fill); row.appendChild(bar);
