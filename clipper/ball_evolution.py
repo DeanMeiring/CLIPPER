@@ -615,9 +615,13 @@ class Painter:
             e = int(R * 1.45)
             im.alpha_composite(self.emoji[tier].resize((e, e), Image.LANCZOS),
                                (int(c - e / 2), int(c - e / 2)))
+            # the shine goes on its own layer: drawn straight onto im it
+            # would replace the pixels and leave a see-through grey spot
             hr = R * 0.25
-            d.ellipse((c - R * 0.5 - hr, c - R * 0.55 - hr, c - R * 0.5 + hr, c - R * 0.55 + hr),
-                      fill=(255, 255, 255, 90))
+            shine = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+            ImageDraw.Draw(shine).ellipse((c - R * 0.5 - hr, c - R * 0.55 - hr, c - R * 0.5 + hr,
+                                           c - R * 0.55 + hr), fill=(255, 255, 255, 90))
+            im.alpha_composite(shine)
             self.sprites[key] = im.resize((s // ss, s // ss), Image.LANCZOS)
         return self.sprites[key]
 
