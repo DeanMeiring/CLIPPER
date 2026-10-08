@@ -438,6 +438,39 @@ merge it yourself; merging stays Dean's call per the rule above.
   original GC badge, not Psyonix's rank icon) was made in the sandbox, not
   in the app.
 
+## Ball Evolution: physics Shorts (Oct 2026)
+
+- Dean asked for a "satisfying" format: a ball falls slowly through a small
+  opening, multiplies when it hits certain points, and keeps going until
+  the jar is full, with a sound on every hit. Researched first: a real
+  niche (marble/ball simulation channels), but the "millions of views"
+  claims come mostly from people selling templates, and YouTube's July
+  2026 "generic or repetitive content" wording won't monetize
+  template-looking videos with little variation, so each one must differ.
+  It doesn't fit Caught On Stream's audience; a separate channel if posted.
+- He then asked for Cow Evolution-style merging (same things combine into
+  the next, bigger one), with audio, keeping the first design. Both
+  prototypes were rendered in the sandbox; he said "I like it, it's good".
+- `clipper/ball_evolution.py` (CLI: `python -m clipper.ball_evolution
+  out.mp4 [--seed N]`): bees drip from a hole, gold pegs send a copy back
+  out of the hole, and in the jar matching animals merge: bee > mouse >
+  frog > chicken > cat > dog > panda > lion > unicorn (bundled Fluent
+  Emoji, not Cow Evolution's art). A ladder at the top reveals each animal;
+  it ends on "EVOLVED!" at the unicorn. All audio is generated in numpy
+  (music loop, pling per multiply, pop per merge that deepens with size,
+  unlock chime, fanfare), so nothing can be claimed.
+- Physics is pymunk (added to requirements; `pip --dry-run --report`
+  showed no other package version change, only cffi/pycparser added).
+  Fixes from the prototype: a wider neck plus "the hole waits while 90
+  are still falling" stopped bees piling up over the pegs; frogs and up
+  pull toward their nearest match in the jar (force applied every
+  substep: pymunk clears forces after each step), which stopped runs
+  stalling with two lions apart. Runs still vary, so `pick_seed`
+  simulates seeds without drawing (~1 s each, in parallel) and keeps one
+  with the unicorn at 40-62 s and no wait over 16 s between reveals
+  (about 1 in 5 seeds). A 55 s video renders in ~3 min on 4 CPUs.
+- Not built yet: a page on the site (render/upload to its own channel).
+
 ## Clip layout
 
 - Clips render in the IRL layout by default (`reframe.LetterboxLayout`,

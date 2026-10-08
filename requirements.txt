@@ -12,3 +12,5 @@ Pillow>=10.1
 # Long-form "AI voice": Dean's own voice cloned (Kyutai Pocket TTS, CPU,
 # ~0.6 GB RAM). The Dockerfile installs the CPU build of torch first.
 pocket-tts==3.3.0
+# Ball Evolution Shorts: 2D physics for the falling/merging animals.
+pymunk>=7.0
