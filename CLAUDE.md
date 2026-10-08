@@ -549,7 +549,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   every video.json, kept after the mp4 is gone. A make interrupted by a
   restart is queued again from scratch on the next page load; Cancel kills
   the subprocess. Upload/schedule mirrors Rocket League (`publishAt` on
-  the next free day at his SA time, `rocket_league.next_slot`), max 2
+  the next free posting slot, `_balls_next_free_slot`), max 2
   uploads/day here (`BALLS_UPLOADS_PER_DAY`; the 10,000-unit quota is
   shared by every channel), category Entertainment (`upload_video
   (category_id="24")`; every other upload still sends Gaming), mp4 deleted
@@ -558,6 +558,30 @@ merge it yourself; merging stays Dean's call per the rule above.
   videos" (watermark) is drawn bottom-right on videos made after it's set.
   Uploads are `selfDeclaredMadeForKids: False` like every upload here;
   Dean was told to decide whether this channel is "made for kids".
+- **Autopilot (Oct 2026):** Dean wants the channel fully automated: 2
+  videos a day at 08:00 and 15:00 SA time, YouTube + Instagram, the kind
+  rotating by day (`BALLS_FORMAT_ROTATION` evolve -> escape -> touch,
+  `date.toordinal() % 3`, both slots that day). Settings `autopilot`,
+  `slots` (1-4 HH:MM), `auto_instagram`, `ahead_days` (2).
+  `_balls_autopilot_tick` (non-blocking lock): (1) plans one video per
+  coming slot within `ahead_days` (`options = {format, slot, auto}`; a
+  slot is taken by a plan or an upload's publish time, `_slot_key`
+  "YYYY-MM-DDTHH:MM" SA time); (2) uploads ready ones with
+  `publishAt` = their slot (now, if the slot passed < 3 h ago); (3) posts
+  to Instagram the videos that went public in the last 12 h. It runs
+  after every make, every 10 min while the app is awake, on saving the
+  settings, and from the public `GET /autopilot/tick?key=$AUTOPILOT_KEY`
+  (404 without the variable), which a Railway cron service calls to wake
+  the sleeping app (a few minutes after each slot, so the Instagram post
+  follows). `_balls_work` keeps the app awake (`_keepalive_loop`) while
+  it renders. Upload count "today" is YouTube's quota day (midnight
+  Pacific = 09:00/10:00 SA), not the last 24 h: the two slots fall in
+  different Pacific days, so a rolling window would sometimes block the
+  second upload. Hitting the 2/day cap is normal (`quota_wait`), not an
+  error. Deleting an uploaded video only hides it (`hidden`), so its slot
+  stays taken and the autopilot doesn't post a second one there. "🚀 Post
+  now to YouTube + Instagram" (`POST .../post-both`) shows when Instagram
+  is connected.
 
 ## Instagram posting (Oct 2026)
 
