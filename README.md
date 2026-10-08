@@ -313,11 +313,17 @@ documentary series for the same channel.
    make two promo Shorts that link back to it.
 
 **Ball Evolution (`/ball-evolution`)**: satisfying physics Shorts for their
-own channel. One item drops, gold pegs multiply it, and matching ones merge
-into something bigger until the last one appears. Pick a theme, course and
-jar (or leave them on Auto, which avoids anything posted recently), make 1, 3
-or 7 at once, then schedule them one a day on the channel's own YouTube
-account. All visuals and sound are generated, so nothing can be claimed.
+own channel, in three kinds that take turns day by day: Evolve (one item
+drops, gold pegs multiply it, matching ones merge into something bigger),
+Escape the ring (a spinning ring with a gap; every ball that gets out makes
+two more) and Touch & multiply (two balls touch, a new one pops out). Pick a
+kind and theme (or leave them on Auto, which avoids anything posted
+recently), make 1, 3 or 7 at once, and schedule them on the channel's own
+YouTube account, or post one to YouTube and Instagram at once. With
+**Autopilot** on, the page makes the next two days' videos by itself,
+schedules one on YouTube for each posting time (08:00 and 15:00 SA time by
+default) and posts each to Instagram once it's public. All visuals and
+sound are generated, so nothing can be claimed.
 
 Editing lessons (seeded from YouTube's review of the first episode, and
 anything you paste in) are kept and fed into the next scripts.
@@ -353,6 +359,7 @@ or a local `.env`), never hardcoded.
 | `CLIPPER_FFMPEG` | — | ffmpeg binary for long-form rendering (optional; default `ffmpeg`) |
 | `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` | Ball Evolution → Instagram | the Meta app's App ID and secret (App settings → Basic); without them the Instagram buttons don't show |
 | `INSTAGRAM_FB_CONFIG_ID` | Instagram connect | optional Facebook Login for Business configuration ID; without it the login asks for the permissions by name |
+| `AUTOPILOT_KEY` | Ball Evolution autopilot | any long random string; a Railway cron service calls `/autopilot/tick?key=…` at the posting times to wake the app |
 | `INSTAGRAM_LOGIN` | Instagram connect | `facebook` (default: Instagram linked to a Facebook Page) or `instagram` (Instagram Login, no Page; uses the Instagram app ID/secret) |
 
 ### Channel profiles

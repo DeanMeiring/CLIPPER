@@ -27,6 +27,11 @@ DEFAULT_SETTINGS = {
     "watermark": "",
     "description": "",
     "bed": "auto",          # background sound: auto / rain / air / hush / off
+    # autopilot: make videos ahead and post one at each slot (SA time)
+    "autopilot": False,
+    "slots": ["08:00", "15:00"],
+    "auto_instagram": True,
+    "ahead_days": 2,
 }
 
 

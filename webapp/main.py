@@ -5854,26 +5854,36 @@ def _balls_start_worker() -> None:
 
 
 def _balls_work() -> None:
-    while True:
-        queued = [v for v in _balls.videos() if v.get("status") == "queued"]
-        if not queued:
-            return
-        try:
-            _balls_make(queued[0]["id"])
-        except Exception:
-            traceback.print_exc()
+    # Railway sleeps the app when no HTTP traffic arrives -- a batch of
+    # renders with nobody on the page would be cut off without this.
+    stop_keepalive = threading.Event()
+    threading.Thread(target=_keepalive_loop, args=(stop_keepalive,), daemon=True).start()
+    try:
+        while True:
+            queued = [v for v in _balls.videos() if v.get("status") == "queued"]
+            if not queued:
+                return
             try:
-                _balls.update(queued[0]["id"], lambda v: v.update(status="error", error="Something went wrong making this one."))
-            except (KeyError, OSError, ValueError):
-                pass
+                _balls_make(queued[0]["id"])
+            except Exception:
+                traceback.print_exc()
+                try:
+                    _balls.update(queued[0]["id"], lambda v: v.update(status="error", error="Something went wrong making this one."))
+                except (KeyError, OSError, ValueError):
+                    pass
+            if _balls.settings().get("autopilot"):
+                threading.Thread(target=_balls_autopilot_tick, args=("made",), daemon=True).start()
+    finally:
+        stop_keepalive.set()
 
 
 def _balls_make(vid: str) -> None:
     video = _balls.load(vid)
     opts = video.get("options") or {}
     settings = _balls.settings()
+    fmt = opts.get("format") or _balls_format_for(datetime.datetime.now(_balls_tz()).date())
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
-                                        opts.get("theme"), opts.get("course"), opts.get("jar"))
+                                        opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
     recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -5954,23 +5964,94 @@ def _balls_view(v: dict) -> dict:
     r = c.get("recipe") or {}
     if r.get("theme") in ball_evolution.THEMES:
         theme = ball_evolution.THEMES[r["theme"]]
-        c["chips"] = [f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}", r.get("course"),
-                      r.get("jar"), f"{r.get('key')} {r.get('scale')}"]
+        fmt = r.get("format") or "evolve"
+        c["chips"] = [BALLS_FORMAT_LABELS.get(fmt, fmt), f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}"]
+        if fmt == "evolve":
+            c["chips"] += [r.get("course"), r.get("jar")]
+        c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
     return c
 
 
-def _balls_taken(videos: List[dict]) -> dict:
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch")   # one per day, both slots that day
+BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply"}
+
+
+def _balls_tz():
     from zoneinfo import ZoneInfo
-    out = {}
+    return ZoneInfo(rocket_league.TZ)
+
+
+def _balls_format_for(day: datetime.date) -> str:
+    return BALLS_FORMAT_ROTATION[day.toordinal() % len(BALLS_FORMAT_ROTATION)]
+
+
+def _balls_slot_times(s: dict) -> List[str]:
+    times = [t for t in (s.get("slots") or []) if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t or "")]
+    return sorted(set(times)) or [s.get("post_time") or "17:00"]
+
+
+def _slot_key(dt: datetime.datetime) -> str:
+    return dt.astimezone(_balls_tz()).strftime("%Y-%m-%dT%H:%M")
+
+
+def _balls_slots_ahead(s: dict, days: int, now: Optional[datetime.datetime] = None) -> List[datetime.datetime]:
+    """Every posting slot from now through `days` days ahead (SA time)."""
+    tz = _balls_tz()
+    now = (now or datetime.datetime.now(tz)).astimezone(tz)
+    out = []
+    for d in range(days + 1):
+        day = now.date() + datetime.timedelta(days=d)
+        for t in _balls_slot_times(s):
+            hh, mm = (int(x) for x in t.split(":"))
+            dt = datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=tz)
+            if dt > now:
+                out.append(dt)
+    return out
+
+
+def _balls_taken_slots(videos: List[dict]) -> set:
+    """Slots already used: by an upload's publish time or an autopilot plan."""
+    out = set()
     for v in videos:
         ts = (v.get("youtube") or {}).get("publish_at_ts")
         if ts:
-            out[datetime.datetime.fromtimestamp(ts, ZoneInfo(rocket_league.TZ)).date().isoformat()] = v["id"]
+            out.add(_slot_key(datetime.datetime.fromtimestamp(ts, _balls_tz())))
+        slot = (v.get("options") or {}).get("slot")
+        if slot and v.get("status") != "error" and not v.get("youtube"):
+            out.add(slot)
+    return out
+
+
+def _balls_next_free_slot(videos: List[dict], s: dict, exclude: Optional[str] = None) -> datetime.datetime:
+    """The next posting slot at least 30 minutes away that nothing uses yet
+    (``exclude``: a video's own planned slot doesn't count as taken)."""
+    taken = _balls_taken_slots(videos) - ({exclude} if exclude else set())
+    soon = datetime.datetime.now(_balls_tz()) + datetime.timedelta(minutes=30)
+    for dt in _balls_slots_ahead(s, 400):
+        if dt >= soon and _slot_key(dt) not in taken:
+            return dt
+    raise RuntimeError("no free slot in the next year")
+
+
+def _balls_taken(videos: List[dict]) -> dict:
+    """Local date -> how many videos are scheduled that day (the calendar)."""
+    out: dict = {}
+    for v in videos:
+        ts = (v.get("youtube") or {}).get("publish_at_ts")
+        if ts:
+            day = datetime.datetime.fromtimestamp(ts, _balls_tz()).date().isoformat()
+            out[day] = out.get(day, 0) + 1
     return out
 
 
 def _balls_uploads_today(videos: List[dict]) -> int:
-    return sum(1 for v in videos if (v.get("youtube") or {}).get("uploaded_at", 0) > time.time() - 86400)
+    """Uploads since YouTube's quota day began (midnight in California, 09:00
+    or 10:00 SA time). Counted that way, not over the last 24 hours, the
+    autopilot's two uploads a day never trip over yesterday's."""
+    from zoneinfo import ZoneInfo
+    start = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return sum(1 for v in videos if (v.get("youtube") or {}).get("uploaded_at", 0) >= start)
 
 
 @protected.get("/api/balls")
@@ -5992,28 +6073,52 @@ def balls_state() -> dict:
     taken = _balls_taken(videos)
     s = _balls.settings()
     try:
-        slot = rocket_league.next_slot(s["post_time"], list(taken)).isoformat()
+        slot = _balls_next_free_slot(videos, s).isoformat()
     except Exception:
         slot = None
+    if s.get("autopilot"):
+        _balls_start_autopilot_loop()
+    today = datetime.datetime.now(_balls_tz()).date()
+    upcoming = []
+    by_slot = {}
+    for v in videos:
+        key = (v.get("options") or {}).get("slot")
+        ts = (v.get("youtube") or {}).get("publish_at_ts")
+        if ts:
+            key = _slot_key(datetime.datetime.fromtimestamp(ts, _balls_tz()))
+        if key:
+            by_slot[key] = v
+    for dt in _balls_slots_ahead(s, max(1, int(s.get("ahead_days") or 2)))[:6]:
+        v = by_slot.get(_slot_key(dt))
+        upcoming.append({"at": dt.isoformat(), "format": _balls_format_for(dt.date()),
+                         "video": v["id"] if v else None, "status": _balls_view(v)["status"] if v else None,
+                         "title": (v or {}).get("title")})
+    autopilot = {"on": bool(s.get("autopilot")), "slots": _balls_slot_times(s), "upcoming": upcoming,
+                 "today": _balls_format_for(today), "tomorrow": _balls_format_for(today + datetime.timedelta(days=1)),
+                 "waker": bool(os.environ.get("AUTOPILOT_KEY")), "last_tick": _balls_last_tick}
     used = 0
     root = BASE_DIR / "_balls"
     if root.is_dir():
         used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
     themes = [{"key": k, "label": f"{ball_evolution.emoji_char(t['chain'][0][0])} {k.capitalize()}"}
               for k, t in ball_evolution.THEMES.items()]
-    return {"settings": s, "videos": [_balls_view(v) for v in reversed(videos)], "schedule": taken,
+    return {"settings": s, "videos": [_balls_view(v) for v in reversed(videos) if not v.get("hidden")],
+            "schedule": taken,
             "next_slot": slot, "uploads_today": _balls_uploads_today(videos),
             "uploads_per_day": BALLS_UPLOADS_PER_DAY, "connected": _youtube_token_stores[BALLS_PROFILE].is_connected(),
             "youtube_channel": (_youtube_token_stores[BALLS_PROFILE].load() or {}).get("channel"),
             "storage_mb": round(used / 1e6),
             "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
-            "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS}}
+            "autopilot": autopilot,
+            "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS,
+                        "formats": [{"key": k, "label": BALLS_FORMAT_LABELS[k]} for k in BALLS_FORMAT_ROTATION]}}
 
 
 class BallsMakeRequest(BaseModel):
     theme: Optional[str] = None
     course: Optional[str] = None
     jar: Optional[str] = None
+    format: Optional[str] = None
     count: int = 1
 
 
@@ -6025,12 +6130,14 @@ def balls_make(req: BallsMakeRequest) -> dict:
         raise HTTPException(400, "unknown course")
     if req.jar and req.jar not in ball_evolution.JARS:
         raise HTTPException(400, "unknown jar")
+    if req.format and req.format not in BALLS_FORMAT_ROTATION:
+        raise HTTPException(400, "unknown format")
     waiting = sum(1 for v in _balls.videos() if v.get("status") in _BALLS_MAKING)
     count = max(1, min(int(req.count or 1), 7))
     if waiting + count > BALLS_MAX_QUEUE:
         raise HTTPException(409, f"{waiting} are already being made -- wait for some to finish first.")
     for _ in range(count):
-        _balls.new_video({"theme": req.theme, "course": req.course, "jar": req.jar})
+        _balls.new_video({"theme": req.theme, "course": req.course, "jar": req.jar, "format": req.format})
     _balls_start_worker()
     return balls_state()
 
@@ -6075,10 +6182,10 @@ class BallsScheduleRequest(BaseModel):
     now: bool = False
 
 
-@protected.post("/api/balls/videos/{vid}/schedule")
-def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
-    """Upload to the Ball Evolution channel: private with a publish time on
-    the next free day (YouTube makes it public then), or public now."""
+def _balls_upload(vid: str, slot: Optional[datetime.datetime]) -> dict:
+    """Upload to the Ball Evolution channel: private with ``publishAt`` =
+    slot (YouTube makes it public then, even while this app sleeps), or
+    public now when slot is None."""
     video = _balls_video(vid)
     path = _balls.video_dir(vid) / "video.mp4"
     if _balls_view(video)["status"] != "ready" or not path.is_file():
@@ -6091,7 +6198,6 @@ def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
     if not token:
         raise HTTPException(409, "Connect the Ball Evolution YouTube channel first (top of this page).")
     s = _balls.settings()
-    slot = None if req.now else rocket_league.next_slot(s["post_time"], list(_balls_taken(videos)))
     desc = (video.get("description") or "").strip()
     if (s.get("description") or "").strip():
         desc = (desc + "\n\n" + s["description"].strip()).strip()
@@ -6111,6 +6217,132 @@ def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
     yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
           "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
     return _balls_view(_balls.update(vid, lambda v: v.update(status="scheduled" if slot else "posted", youtube=yt)))
+
+
+@protected.post("/api/balls/videos/{vid}/schedule")
+def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
+    """Upload for the next free posting slot, or public now."""
+    video = _balls_video(vid)
+    slot = None
+    if not req.now:
+        slot = _balls_next_free_slot(_balls.videos(), _balls.settings(),
+                                     exclude=(video.get("options") or {}).get("slot"))
+    return _balls_upload(vid, slot)
+
+
+@protected.post("/api/balls/videos/{vid}/post-both")
+def balls_post_both(vid: str) -> dict:
+    """Public on YouTube now, then the same video to Instagram."""
+    view = _balls_upload(vid, None)
+    token = _instagram_stores["balls"].get_valid()
+    if token and vid not in _balls_instagram:
+        _balls_instagram.add(vid)
+        _balls.update(vid, lambda v: v.update(instagram={"status": "posting", "started_at": time.time()}))
+        threading.Thread(target=_balls_post_instagram, args=(vid, token), daemon=True).start()
+        view = _balls_view(_balls.load(vid))
+    return view
+
+
+# ---- autopilot: two videos a day, made ahead, posted at the slots -------------
+# A Railway cron service ("ball-autopilot-waker") calls /autopilot/tick at the
+# slot times: that wakes the sleeping app, which makes the coming days' videos,
+# schedules them on YouTube for their slots, and posts each one to Instagram
+# once it's public. While the app is awake a background loop ticks too.
+_balls_tick_lock = threading.Lock()
+_balls_last_tick: dict = {}
+_balls_autopilot_thread: Optional[threading.Thread] = None
+
+
+def _balls_autopilot_tick(reason: str = "loop") -> dict:
+    global _balls_last_tick
+    if not _balls_tick_lock.acquire(blocking=False):
+        return {"busy": True}
+    try:
+        s = _balls.settings()
+        if not s.get("autopilot"):
+            return {"autopilot": False}
+        tz = _balls_tz()
+        now = datetime.datetime.now(tz)
+        out = {"reason": reason, "at": now.isoformat(), "planned": 0, "scheduled": 0, "instagram": 0, "errors": []}
+        videos = _balls.videos()
+        # 1. one video per coming slot (made by the worker)
+        taken = _balls_taken_slots(videos)
+        making = sum(1 for v in videos if v.get("status") in _BALLS_MAKING)
+        for dt in _balls_slots_ahead(s, max(1, min(int(s.get("ahead_days") or 2), 3)), now):
+            if dt < now + datetime.timedelta(minutes=20) or _slot_key(dt) in taken or making >= BALLS_MAX_QUEUE:
+                continue
+            _balls.new_video({"format": _balls_format_for(dt.date()), "slot": _slot_key(dt), "auto": True})
+            taken.add(_slot_key(dt))
+            making += 1
+            out["planned"] += 1
+        if out["planned"]:
+            _balls_start_worker()
+        # 2. upload finished ones for their slot (or right away if it just passed)
+        if _youtube_token_stores[BALLS_PROFILE].is_connected():
+            for v in sorted(_balls.videos(), key=lambda v: (v.get("options") or {}).get("slot") or ""):
+                slot = (v.get("options") or {}).get("slot")
+                if not slot or v.get("youtube") or _balls_view(v)["status"] != "ready":
+                    continue
+                dt = datetime.datetime.strptime(slot, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+                when = dt if dt > now + datetime.timedelta(minutes=15) else None
+                if when is None and now - dt > datetime.timedelta(hours=3):
+                    continue        # long missed: leave it for a manual post
+                try:
+                    _balls_upload(v["id"], when)
+                    out["scheduled"] += 1
+                except HTTPException as e:
+                    if e.status_code == 409 and "uploads today" in str(e.detail):
+                        out["quota_wait"] = True    # normal: the rest go up after YouTube's day resets
+                        break
+                    out["errors"].append(f"{slot}: {e.detail}")
+        # 3. Instagram, once the YouTube video is public
+        ig = _instagram_stores["balls"].get_valid() if s.get("auto_instagram") else None
+        if ig:
+            for v in _balls.videos():
+                yt = v.get("youtube") or {}
+                ts = yt.get("publish_at_ts") or 0
+                if (not ts or ts > time.time() or time.time() - ts > 12 * 3600 or v.get("instagram")
+                        or v["id"] in _balls_instagram or not (_balls.video_dir(v["id"]) / "video.mp4").is_file()):
+                    continue
+                _balls_instagram.add(v["id"])
+                _balls.update(v["id"], lambda x: x.update(instagram={"status": "posting", "started_at": time.time()}))
+                threading.Thread(target=_balls_post_instagram, args=(v["id"], ig), daemon=True).start()
+                out["instagram"] += 1
+        _balls_last_tick = out
+        if out["errors"]:
+            print(f"[autopilot] {out}")
+        return out
+    finally:
+        _balls_tick_lock.release()
+
+
+def _balls_start_autopilot_loop() -> None:
+    """While the app is awake, tick every 10 minutes (cheap when idle)."""
+    global _balls_autopilot_thread
+    if _balls_autopilot_thread is not None and _balls_autopilot_thread.is_alive():
+        return
+
+    def loop():
+        while True:
+            try:
+                _balls_autopilot_tick("loop")
+            except Exception:
+                traceback.print_exc()
+            time.sleep(600)
+    _balls_autopilot_thread = threading.Thread(target=loop, name="ball-autopilot", daemon=True)
+    _balls_autopilot_thread.start()
+
+
+# Public on purpose (no app password): the cron waker calls it. The key is
+# the AUTOPILOT_KEY variable; without it set, this route doesn't exist.
+@app.get("/autopilot/tick")
+def autopilot_tick(key: str = "") -> dict:
+    expected = os.environ.get("AUTOPILOT_KEY") or ""
+    if not expected or not secrets.compare_digest(key, expected):
+        raise HTTPException(404, "not found")
+    _balls_start_autopilot_loop()
+    threading.Thread(target=_balls_autopilot_tick, args=("waker",), daemon=True).start()
+    return {"ok": True}
 
 
 _balls_instagram: set = set()     # videos being posted to Instagram right now
@@ -6161,16 +6393,27 @@ def balls_instagram(vid: str) -> dict:
 
 @protected.delete("/api/balls/videos/{vid}")
 def balls_delete(vid: str) -> dict:
-    _balls_video(vid)
+    video = _balls_video(vid)
     proc = _balls_active.get(vid)
     if proc is not None and proc.poll() is None:
         _balls_cancelled.add(vid)
         proc.kill()
-    _balls.delete(vid)
+    if video.get("youtube"):
+        # It's on YouTube: hide it but keep its record, so its slot stays
+        # taken (the autopilot won't post a second video then) and it still
+        # counts toward today's uploads.
+        (_balls.video_dir(vid) / "video.mp4").unlink(missing_ok=True)
+        _balls.update(vid, lambda v: v.update(hidden=True))
+    else:
+        _balls.delete(vid)
     return balls_state()
 
 
 class BallsSettings(BaseModel):
+    autopilot: Optional[bool] = None
+    slots: Optional[List[str]] = None
+    auto_instagram: Optional[bool] = None
+    ahead_days: Optional[int] = None
     post_time: Optional[str] = None
     watermark: Optional[str] = None
     description: Optional[str] = None
@@ -6192,7 +6435,22 @@ def balls_settings(req: BallsSettings) -> dict:
         if req.bed not in ball_evolution.Voice.BED_OPTIONS:
             raise HTTPException(400, "unknown background sound")
         data["bed"] = req.bed
-    return _balls.save_settings(data)
+    if req.slots is not None:
+        slots = [t for t in req.slots if t]
+        if not slots or len(slots) > 4 or not all(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t) for t in slots):
+            raise HTTPException(400, "Use 1-4 times like 08:00.")
+        data["slots"] = sorted(set(slots))
+    if req.autopilot is not None:
+        data["autopilot"] = bool(req.autopilot)
+    if req.auto_instagram is not None:
+        data["auto_instagram"] = bool(req.auto_instagram)
+    if req.ahead_days is not None:
+        data["ahead_days"] = max(1, min(int(req.ahead_days), 3))
+    out = _balls.save_settings(data)
+    if out.get("autopilot"):
+        _balls_start_autopilot_loop()
+        threading.Thread(target=_balls_autopilot_tick, args=("settings",), daemon=True).start()
+    return out
 
 app.include_router(protected)
 
@@ -10813,6 +11071,16 @@ __CSS__
   .chip { font-size: 0.74rem; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; color: var(--muted); }
   .st { font-size: 0.84rem; margin-top: 8px; }
   .st.ok { color: var(--ok); } .st.bad { color: var(--danger); } .st.wait { color: var(--warn); }
+  .toggle { display: flex; gap: 10px; align-items: center; margin-top: 10px; font-weight: 600; }
+  .toggle input { width: auto; margin: 0; transform: scale(1.3); }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 0.9rem; }
+  .check input { width: auto; margin: 0; }
+  .plan { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .plan div { display: flex; gap: 10px; padding: 8px 12px; font-size: 0.84rem; border-top: 1px solid var(--border); align-items: baseline; }
+  .plan div:first-child { border-top: none; }
+  .plan .when { flex: none; width: 104px; font-weight: 600; }
+  .plan .what { flex: 1; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+  .day.half { border-color: var(--warn); color: var(--warn); }
   @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .vcard { flex-direction: column; } .vcard .vid { width: 100%; }
     .vcard video { max-height: 460px; } .vcard .ph { max-height: 260px; aspect-ratio: auto; height: 160px; } }
 </style>
@@ -10822,16 +11090,17 @@ __CSS__
 __NAV_LINKS__
 <div class="card">
   <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
-  <p class="subtitle">Satisfying physics Shorts for their own channel. One ball drops, gold pegs multiply it, and matching ones merge into something bigger until the last one appears. Every video gets a different theme, course, jar and music, and the page never repeats a combination.</p>
+  <p class="subtitle">Satisfying physics Shorts for their own channel, in three kinds that take turns day by day: 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more) and ✨ Touch &amp; multiply (two balls touch, a new one pops out). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
   <div id="conn" class="status"></div>
   <div id="igconn" class="status" style="margin-top:8px"></div>
 
   <div class="section">
     <h3>🎬 Make videos</h3>
     <div class="row2">
+      <div><label for="m-format">Kind</label><select id="m-format"></select></div>
       <div><label for="m-theme">Theme</label><select id="m-theme"></select></div>
-      <div><label for="m-course">Course</label><select id="m-course"></select></div>
-      <div><label for="m-jar">Jar</label><select id="m-jar"></select></div>
+      <div class="evolve-only"><label for="m-course">Course</label><select id="m-course"></select></div>
+      <div class="evolve-only"><label for="m-jar">Jar</label><select id="m-jar"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
@@ -10841,10 +11110,16 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>📅 Posting</h3>
+    <label class="toggle"><input id="ap-on" type="checkbox"> 🤖 Autopilot: make and post them on its own</label>
+    <div class="hint" id="ap-hint"></div>
     <div class="row2">
-      <div><label for="s-time">Every day at (SA time)</label><input id="s-time" type="time"></div>
+      <div><label for="ap-t1">Post at (SA time)</label><input id="ap-t1" type="time"></div>
+      <div><label for="ap-t2">and at</label><input id="ap-t2" type="time"></div>
       <div><label for="s-mark">Name on the videos</label><input id="s-mark" maxlength="40" placeholder="@yourchannel"></div>
     </div>
+    <label class="check"><input id="ap-ig" type="checkbox"> 📸 Also post each one to Instagram when it goes public</label>
+    <div class="plan" id="ap-plan"></div>
+    <div class="status bad" id="ap-warn" style="display:none;margin-top:10px"></div>
     <details><summary>Added under every description</summary><textarea id="s-desc" rows="3" placeholder="e.g. New one every day!"></textarea></details>
     <div class="days" id="days"></div>
     <div class="hint" id="quota"></div>
@@ -10873,6 +11148,8 @@ const sa = (d, o) => new Date(d).toLocaleString(undefined, { timeZone: TZ, ...o 
 const MAKING = ['queued', 'picking', 'rendering'];
 const GROUPS = { todo: ['queued', 'picking', 'rendering', 'ready', 'uploading', 'error'], scheduled: ['scheduled'], posted: ['posted'] };
 let S = null, tab = 'todo', poll = null, filled = false;
+const fmtLabel = (k) => ((S.options.formats || []).find(f => f.key === k) || { label: k }).label;
+const slotText = (iso) => sa(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 
 async function load() {
   S = await api('/api/balls');
@@ -10885,12 +11162,15 @@ function fillOptions() {
   if (filled) return;
   filled = true;
   const opt = (sel, v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
+  opt($('m-format'), '', `📆 Today's kind (${fmtLabel(S.autopilot.today)})`);
+  for (const f of S.options.formats) opt($('m-format'), f.key, f.label);
   opt($('m-theme'), '', '🔀 Auto');
   for (const t of S.options.themes) opt($('m-theme'), t.key, t.label);
   opt($('m-course'), '', '🔀 Auto');
   for (const c of S.options.courses) opt($('m-course'), c, c);
   opt($('m-jar'), '', '🔀 Auto');
   for (const j of S.options.jars) opt($('m-jar'), j, j);
+  $('m-format').dispatchEvent(new Event('change'));
 }
 function render() {
   fillOptions();
@@ -10923,7 +11203,7 @@ function render() {
   }
   renderInstagram();
   const st = S.settings;
-  if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
+  renderAutopilot();
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
   $('s-bed').value = st.bed || 'auto';
@@ -10932,28 +11212,71 @@ function render() {
   for (let i = 0; i < 14; i++) {
     const d = new Date(today.getTime() + i * 86400000);
     const iso = d.toLocaleDateString('en-CA', { timeZone: TZ });
-    const on = !!S.schedule[iso];
-    const box = el('div', 'day' + (on ? ' on' : ' free'));
+    const n = S.schedule[iso] || 0, want = S.autopilot.slots.length;
+    const box = el('div', 'day' + (n >= want ? ' on' : n ? ' half' : ' free'));
     box.appendChild(el('b', '', sa(d, { weekday: 'short' })));
     box.appendChild(document.createTextNode(sa(d, { day: 'numeric', month: 'short' })));
-    box.appendChild(el('div', '', on ? '✅' : '—'));
+    box.appendChild(el('div', '', n ? `${n >= want ? '✅' : '◐'} ${n}/${want}` : '—'));
     days.appendChild(box);
   }
   const left = Math.max(0, S.uploads_per_day - S.uploads_today);
-  $('quota').textContent = (S.next_slot ? `Next free day: ${sa(S.next_slot, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}. ` : '')
-    + `You can upload ${left} more today (YouTube's daily upload limit is shared with your other channels). The name goes on videos made from now on. Storage used: ${S.storage_mb} MB.`;
+  $('quota').textContent = (S.next_slot ? `Next free time: ${sa(S.next_slot, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}. ` : '')
+    + `You can upload ${left} more today (YouTube's upload limit is shared with your other channels; its day starts at 09:00 or 10:00 SA time). The name goes on videos made from now on. Storage used: ${S.storage_mb} MB.`;
   renderVideos();
 }
-for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-desc', 'description'], ['s-bed', 'bed']]) {
-  $(id).addEventListener('change', async () => {
-    try { S.settings = await api('/api/balls/settings', jsonOpts('PUT', { [key]: $(id).value })); load(); } catch (e) { alert(e.message); }
-  });
+async function saveSettings(body) {
+  try { S.settings = await api('/api/balls/settings', jsonOpts('PUT', body)); } catch (e) { alert(e.message); }
+  load().catch(() => {});
+}
+for (const [id, key] of [['s-mark', 'watermark'], ['s-desc', 'description'], ['s-bed', 'bed']])
+  $(id).addEventListener('change', () => saveSettings({ [key]: $(id).value }));
+for (const id of ['ap-t1', 'ap-t2'])
+  $(id).addEventListener('change', () => saveSettings({ slots: [$('ap-t1').value, $('ap-t2').value].filter(Boolean) }));
+$('ap-ig').addEventListener('change', () => saveSettings({ auto_instagram: $('ap-ig').checked }));
+$('ap-on').addEventListener('change', () => {
+  const on = $('ap-on').checked;
+  if (on && !S.connected) { alert('Connect the YouTube channel first (top of this page).'); $('ap-on').checked = false; return; }
+  saveSettings({ autopilot: on });
+});
+$('m-format').addEventListener('change', () => {
+  const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
+  for (const e of document.querySelectorAll('.evolve-only')) e.style.display = ev ? '' : 'none';
+});
+function renderAutopilot() {
+  const ap = S.autopilot, st = S.settings;
+  $('ap-on').checked = ap.on;
+  const [t1, t2] = ap.slots;
+  if (document.activeElement !== $('ap-t1')) $('ap-t1').value = t1 || '';
+  if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
+  $('ap-ig').checked = st.auto_instagram !== false;
+  $('ap-hint').textContent = ap.on
+    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Today is ${fmtLabel(ap.today)}, tomorrow ${fmtLabel(ap.tomorrow)}. You can still change titles, delete one (another is made for that time) or post your own.`
+    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, taking turns: ${S.options.formats.map(f => f.label).join(' → ')}.`;
+  const plan = $('ap-plan'); plan.innerHTML = '';
+  plan.style.display = ap.on ? '' : 'none';
+  const word = { queued: '⏳ waiting to be made', picking: '🧪 being made', rendering: '🎬 being made', ready: '✅ made, uploads soon',
+    uploading: '⏳ uploading', scheduled: '📅 scheduled on YouTube', posted: '✅ posted', error: '⚠️ failed' };
+  for (const u of ap.upcoming) {
+    const row = el('div');
+    row.appendChild(el('span', 'when', slotText(u.at)));
+    row.appendChild(el('span', 'what', `${fmtLabel(u.format)} · ${u.video ? (word[u.status] || u.status) + (u.title ? ' · ' + u.title : '') : 'planned'}`));
+    plan.appendChild(row);
+  }
+  const warn = $('ap-warn');
+  const msgs = [];
+  if (ap.on && !S.connected) msgs.push('⚠️ The YouTube channel isn’t connected, so nothing can be uploaded.');
+  if (ap.on && !ap.waker) msgs.push('⚠️ The wake-up timer isn’t set up yet (AUTOPILOT_KEY on Railway), so the autopilot only runs while this app is awake.');
+  if (ap.on && st.auto_instagram !== false && !(S.instagram || {}).connected) msgs.push('📸 Instagram isn’t connected, so videos go to YouTube only.');
+  for (const e of ((ap.last_tick || {}).errors || [])) msgs.push('⚠️ ' + e);
+  warn.style.display = msgs.length ? '' : 'none';
+  warn.textContent = msgs.join(' ');
 }
 $('make').onclick = async () => {
   const b = $('make'); b.disabled = true;
   try {
-    await api('/api/balls/make', jsonOpts('POST', { theme: $('m-theme').value || null, course: $('m-course').value || null,
-      jar: $('m-jar').value || null, count: parseInt($('m-count').value, 10) }));
+    const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
+    await api('/api/balls/make', jsonOpts('POST', { format: $('m-format').value || null, theme: $('m-theme').value || null,
+      course: ev ? $('m-course').value || null : null, jar: ev ? $('m-jar').value || null : null, count: parseInt($('m-count').value, 10) }));
     tab = 'todo';
     await load();
   } catch (e) { alert(e.message); }
@@ -10993,7 +11316,7 @@ function renderVideos() {
   const n = Math.min(ready.length, left);
   const sb = $('sched-all');
   sb.style.display = tab === 'todo' && ready.length > 1 && S.connected ? 'inline-block' : 'none';
-  sb.textContent = `📅 Schedule ${n} ready video${n === 1 ? '' : 's'} (one a day)`;
+  sb.textContent = `📅 Schedule ${n} ready video${n === 1 ? '' : 's'} (next free times)`;
   sb.disabled = !n;
   const box = $('videos'); box.innerHTML = '';
   const list = S.videos.filter(v => GROUPS[tab].includes(v.status));
@@ -11037,7 +11360,8 @@ function card(v) {
   else if (v.status === 'picking') msg = ['wait', `🧪 Testing runs for one that reaches the end at a good pace… (${v.tried || 0} tried)`];
   else if (v.status === 'rendering') msg = ['wait', `🎬 Making the video… ${Math.round((v.progress || 0) * 100)}%`];
   else if (v.status === 'uploading') msg = ['wait', '⏳ Uploading…'];
-  else if (v.status === 'ready') msg = ['ok', `✅ Ready. Schedule it for ${S.next_slot ? sa(S.next_slot, { weekday: 'short', day: 'numeric', month: 'short' }) : 'the next free day'}.`];
+  else if (v.status === 'ready' && (v.options || {}).slot && S.autopilot.on) msg = ['ok', `✅ Ready. 🤖 The autopilot uploads it for ${slotText((v.options || {}).slot + ':00+02:00')}.`];
+  else if (v.status === 'ready') msg = ['ok', `✅ Ready. Schedule it for ${S.next_slot ? slotText(S.next_slot) : 'the next free time'}.`];
   else if (v.status === 'scheduled') msg = ['ok', `📅 Goes public ${sa(yt.publish_at, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}.`];
   else if (v.status === 'posted') msg = ['ok', '✅ Posted.'];
   else msg = ['bad', '⚠️ ' + (v.error || 'Something went wrong.')];
@@ -11061,7 +11385,13 @@ function card(v) {
   const btn = (label, cls, fn, dis) => { const b = el('button', cls, label); b.type = 'button'; b.disabled = !!dis; b.onclick = fn; acts.appendChild(b); return b; };
   if (v.status === 'ready') {
     btn('📅 Schedule', '', () => schedule(v, false), !S.connected);
-    btn('🚀 Post now', 'secondary', () => { if (confirm('Post it publicly right now instead of on its day?')) schedule(v, true); }, !S.connected);
+    if ((S.instagram || {}).connected && !ig.status)
+      btn('🚀 Post now to YouTube + Instagram', 'secondary', async () => {
+        if (!confirm('Post it publicly on YouTube and Instagram right now?')) return;
+        try { await api(`/api/balls/videos/${v.id}/post-both`, { method: 'POST' }); } catch (e) { alert(e.message); }
+        load();
+      }, !S.connected);
+    else btn('🚀 Post now', 'secondary', () => { if (confirm('Post it publicly right now instead of on its day?')) schedule(v, true); }, !S.connected);
   }
   if (v.status === 'error') btn('↻ Try again', '', async () => { try { await api(`/api/balls/videos/${v.id}/retry`, { method: 'POST' }); } catch (e) { alert(e.message); } load(); });
   if (v.has_video && !making && (S.instagram || {}).connected && !['posting', 'posted'].includes(ig.status))
@@ -11072,7 +11402,7 @@ function card(v) {
     });
   if (v.has_video) btn('⬇ Download', 'secondary', () => { location.href = `/api/balls/videos/${v.id}/video?download=true`; });
   const del = btn(making ? '✖ Cancel' : '🗑 Delete', 'danger-link', async () => {
-    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone).' : making ? 'Stop making this one?' : 'Delete this video?')) return;
+    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone), and its time stays taken.' : making ? 'Stop making this one?' : 'Delete this video?')) return;
     try { await api('/api/balls/videos/' + v.id, { method: 'DELETE' }); } catch (e) { alert(e.message); }
     load();
   }, v.status === 'uploading');
