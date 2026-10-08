@@ -49,7 +49,10 @@ def build_authorize_url(redirect_uri: str, state: str) -> str:
         # Force Google to hand back a refresh_token every time, not just on
         # the very first consent -- reconnecting after a revoke/expiry
         # needs a new one, and without this it silently omits it.
-        "prompt": "consent",
+        # select_account: always show Google's account picker, so the
+        # right account (or a channel's brand account) gets connected
+        # instead of whichever one the browser is signed into.
+        "prompt": "consent select_account",
         "state": state,
     }
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"

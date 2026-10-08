@@ -558,6 +558,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   videos" (watermark) is drawn bottom-right on videos made after it's set.
   Uploads are `selfDeclaredMadeForKids: False` like every upload here;
   Dean was told to decide whether this channel is "made for kids".
+- First real upload (Oct 2026) failed with "connection expired" while the
+  page said connected: `upload_video` turned every 401 into that message.
+  Now `_unauthorized_message` reads YouTube's reason (`youtubeSignupRequired`
+  = the Google account has no channel, e.g. the channel is a brand account
+  and the personal account got picked). The YouTube login now uses
+  `prompt=consent select_account` (always shows the account picker), the
+  callback stores the connected channel (`token["channel"]`, `{"none":
+  true}` without one), and /ball-evolution shows its name with Reconnect /
+  Disconnect links.
 - **Autopilot (Oct 2026):** Dean wants the channel fully automated: 2
   videos a day at 08:00 and 15:00 SA time, YouTube + Instagram, the kind
   rotating by day (`BALLS_FORMAT_ROTATION` evolve -> escape -> touch,

@@ -2671,6 +2671,13 @@ def youtube_callback(code: str = "", state: str = "", error: str = "") -> Redire
         raise HTTPException(400, "invalid or expired OAuth login attempt -- try connecting again")
     profile = _oauth_account(issued[1])
     token = youtube_oauth.exchange_code(code, _youtube_redirect_uri())
+    # Note which channel got connected (1 quota unit), so a page can show
+    # it -- and say so when the Google account has no channel at all.
+    try:
+        own = youtube_analytics.get_own_channel(token["access_token"])
+        token["channel"] = own or {"none": True}
+    except Exception:
+        pass
     _youtube_token_stores[profile].save(token)
     if profile in EXTRA_YOUTUBE_ACCOUNTS:
         return RedirectResponse(f"{EXTRA_YOUTUBE_ACCOUNTS[profile]['page_path']}?youtube_connected=1")
@@ -6099,6 +6106,7 @@ def balls_state() -> dict:
             "schedule": taken,
             "next_slot": slot, "uploads_today": _balls_uploads_today(videos),
             "uploads_per_day": BALLS_UPLOADS_PER_DAY, "connected": _youtube_token_stores[BALLS_PROFILE].is_connected(),
+            "youtube_channel": (_youtube_token_stores[BALLS_PROFILE].load() or {}).get("channel"),
             "storage_mb": round(used / 1e6),
             "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
             "autopilot": autopilot,
@@ -11168,7 +11176,25 @@ function render() {
   fillOptions();
   const conn = $('conn');
   conn.innerHTML = '';
-  if (S.connected) { conn.className = 'status ok'; conn.textContent = '✅ The Ball Evolution YouTube channel is connected: videos upload there.'; }
+  const ytLinks = () => {
+    conn.appendChild(document.createTextNode(' '));
+    const r = el('a', '', '🔄 Reconnect'); r.href = '/auth/youtube/login?profile=balls'; r.target = '_blank'; conn.appendChild(r);
+    conn.appendChild(document.createTextNode(' · '));
+    const d = el('a', '', 'Disconnect'); d.href = '#';
+    d.onclick = async (e) => { e.preventDefault(); if (!confirm('Disconnect this YouTube channel?')) return;
+      try { await api('/api/youtube/disconnect?profile=balls', { method: 'POST' }); } catch (err) { alert(err.message); } load(); };
+    conn.appendChild(d);
+  };
+  const ch = S.youtube_channel || {};
+  if (S.connected && ch.none) {
+    conn.className = 'status';
+    conn.appendChild(document.createTextNode('⚠️ YouTube is connected to a Google account that has no YouTube channel, so uploads fail. Reconnect and pick the account (or the channel’s brand account) that owns the channel.'));
+    ytLinks();
+  } else if (S.connected) {
+    conn.className = 'status ok';
+    conn.appendChild(document.createTextNode(ch.title ? `✅ YouTube connected to “${ch.title}”: videos upload there.` : '✅ The Ball Evolution YouTube channel is connected: videos upload there.'));
+    ytLinks();
+  }
   else {
     conn.className = 'status';
     conn.appendChild(document.createTextNode('Connect the Ball Evolution channel so the app can upload to it. Sign in with the Google account that owns it (and pick the channel if Google asks). '));

@@ -55,6 +55,21 @@ def _with_shorts_tag(description: str, max_length: int = _YOUTUBE_DESCRIPTION_MA
     return description[: max_length - len(suffix)] + suffix
 
 
+def _unauthorized_message(resp) -> str:
+    """YouTube's 401 says why: most often the connected Google account has
+    no YouTube channel (youtubeSignupRequired), not an expired login."""
+    try:
+        err = resp.json().get("error") or {}
+    except ValueError:
+        err = {}
+    reasons = {e.get("reason") for e in err.get("errors") or [] if isinstance(e, dict)}
+    if "youtubeSignupRequired" in reasons:
+        return ("The connected Google account has no YouTube channel. Reconnect and pick the account (or the "
+                "channel's brand account) that owns the channel -- or create the channel first.")
+    detail = f" (YouTube said: {err.get('message')})" if err.get("message") else ""
+    return "YouTube didn't accept the connection -- reconnect the channel and try again." + detail
+
+
 def upload_video(
     access_token: str,
     video_path: Path,
@@ -127,7 +142,7 @@ def upload_video(
         raise UploadError(f"Could not reach YouTube to start the upload: {e}") from e
 
     if init_resp.status_code == 401:
-        raise UploadError("Your YouTube connection has expired -- disconnect and reconnect it on the analytics page.")
+        raise UploadError(_unauthorized_message(init_resp))
     if init_resp.status_code == 403:
         raise UploadError(
             "YouTube refused the upload -- either your connection was granted before upload access was "
