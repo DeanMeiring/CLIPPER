@@ -6017,6 +6017,19 @@ def _balls_make(vid: str) -> None:
             proc.kill()
 
 
+def _balls_resume() -> None:
+    """Start the worker for queued videos, and queue again from scratch any
+    a restart (a deploy, Railway waking the app) cut off mid-way."""
+    resume = False
+    for v in _balls.videos():
+        if v.get("status") in ("picking", "rendering") and v["id"] not in _balls_active:
+            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None))
+        if v.get("status") == "queued":
+            resume = True
+    if resume:
+        _balls_start_worker()
+
+
 def _balls_view(v: dict) -> dict:
     c = dict(v)
     yt = c.get("youtube") or {}
@@ -6126,19 +6139,11 @@ def _balls_uploads_today(videos: List[dict]) -> int:
 
 @protected.get("/api/balls")
 def balls_state() -> dict:
-    videos = _balls.videos()
-    resume = False
-    for v in videos:
+    for v in _balls.videos():
         yt = v.get("youtube") or {}
         if yt.get("publish_at_ts") and yt["publish_at_ts"] < time.time() - BALLS_KEEP_DAYS * 86400:
             (_balls.video_dir(v["id"]) / "video.mp4").unlink(missing_ok=True)
-        if v.get("status") in ("picking", "rendering") and v["id"] not in _balls_active:
-            # the server restarted mid-way: make it again from the start
-            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None))
-        if v.get("status") == "queued":
-            resume = True
-    if resume:
-        _balls_start_worker()
+    _balls_resume()
     videos = _balls.videos()
     taken = _balls_taken(videos)
     s = _balls.settings()
@@ -6331,6 +6336,7 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         s = _balls.settings()
         if not s.get("autopilot"):
             return {"autopilot": False}
+        _balls_resume()
         tz = _balls_tz()
         now = datetime.datetime.now(tz)
         out = {"reason": reason, "at": now.isoformat(), "planned": 0, "scheduled": 0, "instagram": 0, "errors": []}
@@ -6401,6 +6407,21 @@ def _balls_start_autopilot_loop() -> None:
             time.sleep(600)
     _balls_autopilot_thread = threading.Thread(target=loop, name="ball-autopilot", daemon=True)
     _balls_autopilot_thread.start()
+
+
+def _balls_autopilot_on_start() -> None:
+    """After a restart (a deploy, or Railway waking the app for any
+    request) pick the autopilot back up without waiting for the page or
+    the next wake-up call."""
+    time.sleep(15)
+    try:
+        if _balls.settings().get("autopilot"):
+            _balls_start_autopilot_loop()
+    except Exception:
+        traceback.print_exc()
+
+
+threading.Thread(target=_balls_autopilot_on_start, name="ball-autopilot-start", daemon=True).start()
 
 
 # Public on purpose (no app password): the cron waker calls it. The key is
