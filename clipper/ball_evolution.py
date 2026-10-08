@@ -539,12 +539,17 @@ def is_good(recipe: dict, r: dict) -> bool:
 
 
 def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=print) -> dict:
-    """Simulate seeds of this recipe in parallel; return it with a good seed."""
-    workers = workers or max(1, os.cpu_count() or 2)
+    """Simulate seeds of this recipe in parallel; return it with a good seed
+    (and ``expected_end``, when the last item appears)."""
+    import multiprocessing
+
+    workers = workers or max(1, min(4, os.cpu_count() or 2))
     lo, hi = good_end(recipe)
     good = []
     start = recipe["seed"]
-    with ProcessPoolExecutor(workers) as pool:
+    # "spawn", not fork: forking a process that runs threads (the web app)
+    # can deadlock the child.
+    with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
         for b0 in range(start, start + tries, workers):
             batch = [dict(recipe, seed=s) for s in range(b0, min(b0 + workers, start + tries))]
             for rec, r in zip(batch, pool.map(simulate, batch)):
@@ -559,7 +564,7 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
         raise RuntimeError(f"no good run for {recipe['theme']}/{recipe['course']}/{recipe['jar']} "
                            f"in seeds {start}..{start + tries - 1}")
     best = min(good, key=lambda r: abs(r["done_at"] - (lo + hi) / 2))
-    return dict(recipe, seed=best["seed"])
+    return dict(recipe, seed=best["seed"], expected_end=best["done_at"])
 
 
 # ---- drawing -------------------------------------------------------------
@@ -697,6 +702,10 @@ class Painter:
         unit = THEMES[self.recipe["theme"]]["unit"]
         d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} dropped", font=self.f_small,
                fill=(220, 230, 255, 255))
+        mark = (self.recipe.get("watermark") or "").strip()
+        if mark:
+            d.text((JAR_R - d.textlength(mark, font=self.f_small), JAR_BOT + 18), mark,
+                   font=self.f_small, fill=(255, 255, 255, 150))
 
         if sim.banner and sim.done_at is None and sim.t - sim.banner[1] < 1.6:
             age = sim.t - sim.banner[1]
@@ -851,9 +860,29 @@ def mix_audio(sim: Sim) -> np.ndarray:
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
 
 
+# ---- publish text --------------------------------------------------------------
+
+def emoji_char(code: str) -> str:
+    return "".join(chr(int(part, 16)) for part in code.split("-"))
+
+
+def publish_text(recipe: dict) -> dict:
+    """A default title and description for YouTube. The title asks the hook
+    question; nothing names the last item, so the reveal isn't spoiled."""
+    theme = THEMES[recipe["theme"]]
+    first = emoji_char(theme["chain"][0][0])
+    title = f"{recipe['hook']} {first}"
+    desc = (f"It starts with one {first}. Every gold peg sends out another, and two of the same "
+            f"merge into something bigger. Can it reach the end?\n\n"
+            f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    return {"title": title[:100], "description": desc}
+
+
 # ---- render ----------------------------------------------------------------
 
-def render(recipe: dict, out_path: str | os.PathLike, log=print) -> dict:
+def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) -> dict:
+    """Draw and encode the video. ``progress(fraction)`` is called as it
+    goes (estimated from ``expected_end`` when pick_seed set it)."""
     out_path = Path(out_path)
     video = out_path.with_suffix(".video.mp4")
     wav = out_path.with_suffix(".wav")
@@ -863,10 +892,15 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print) -> dict:
          "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "medium",
          "-crf", "23", "-pix_fmt", "yuv420p", str(video)],
         stdin=subprocess.PIPE)
+    total = ((recipe.get("expected_end") or SECONDS_CAP - END_HOLD) + END_HOLD) * FPS
+    frame = 0
     try:
         while not sim.finished:
             sim.step()
             proc.stdin.write(painter.frame(sim).tobytes())
+            frame += 1
+            if progress and frame % 30 == 0:
+                progress(min(0.97, frame / total))
     finally:
         proc.stdin.close()
         proc.wait()
@@ -898,14 +932,32 @@ def main(argv=None):
     ap.add_argument("--jar", choices=JARS)
     ap.add_argument("--history", help="JSON file of past recipes; avoids repeats, gets appended")
     ap.add_argument("--exact", action="store_true", help="render this seed as is, no picking")
+    ap.add_argument("--recipe", help="a full recipe as JSON (from pick_recipe); overrides the options above")
+    ap.add_argument("--progress", action="store_true",
+                    help="print machine-readable PROGRESS/RESULT lines (the web app reads them)")
     args = ap.parse_args(argv)
     seed = args.seed if args.seed is not None else random.randrange(1, 10 ** 6)
     history = _load_history(args.history)
-    recipe = pick_recipe(seed, history, args.theme, args.course, args.jar)
-    print("recipe:", recipe)
+    if args.recipe:
+        recipe = json.loads(args.recipe)
+    else:
+        recipe = pick_recipe(seed, history, args.theme, args.course, args.jar)
+    say = (lambda *a, **k: None) if args.progress else print
+    say("recipe:", recipe)
     if not args.exact:
-        recipe = pick_seed(recipe)
-    info = render(recipe, args.out)
+        tried = [0]
+
+        def log(line):
+            tried[0] += 1
+            if args.progress:
+                print(f"PROGRESS pick {tried[0]}", flush=True)
+            else:
+                print(line)
+        recipe = pick_seed(recipe, log=log)
+    report = (lambda f: print(f"PROGRESS render {f:.3f}", flush=True)) if args.progress else None
+    info = render(recipe, args.out, log=say, progress=report)
+    if args.progress:
+        print("RESULT " + json.dumps(info), flush=True)
     if args.history:
         history.append({k: info[k] for k in ("seed", "theme", "course", "jar", "key", "scale")})
         Path(args.history).write_text(json.dumps(history, indent=1))

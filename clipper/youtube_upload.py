@@ -64,9 +64,11 @@ def upload_video(
     is_short: bool = True,
     synthetic_media: bool = False,
     publish_at: Optional[str] = None,
+    category_id: str = _GAMING_CATEGORY_ID,
 ) -> str:
     """Upload video_path to the connected channel. Returns the new video's
-    id on success.
+    id on success. ``category_id`` is YouTube's category (Gaming unless a
+    caller says otherwise; Ball Evolution uses "24", Entertainment).
 
     `publish_at` (RFC 3339, UTC) schedules it: uploaded private, YouTube
     makes it public at that time on its own -- even while this app sleeps.
@@ -116,7 +118,7 @@ def upload_video(
                 # generated title/description that happens to run long
                 # would otherwise fail the whole upload on a 400 instead
                 # of just being trimmed to fit.
-                "snippet": {"title": title[:100], "description": description, "categoryId": _GAMING_CATEGORY_ID},
+                "snippet": {"title": title[:100], "description": description, "categoryId": category_id},
                 "status": status,
             },
             timeout=30,
