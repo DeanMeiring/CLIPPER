@@ -469,6 +469,30 @@ merge it yourself; merging stays Dean's call per the rule above.
   simulates seeds without drawing (~1 s each, in parallel) and keeps one
   with the unicorn at 40-62 s and no wait over 16 s between reveals
   (about 1 in 5 seeds). A 55 s video renders in ~3 min on 4 CPUs.
+- **Variety (Oct 2026):** Dean will post almost daily on a new channel and
+  asked how to make each video unique, plus sound for the balls. Every
+  video is now a *recipe* (`make_recipe` / `pick_recipe`): theme (8
+  evolution chains from the bundled emoji: animals, sports, food, space,
+  money, laughs, vehicles, weather -- each with its own colours, hooks and
+  starter item), course (`pegs`, `triangle`, `spinners` = rotating
+  kinematic bars, `ramps` = short steep deflectors over pegs, `bumpers`),
+  jar (`box`, `bowl`, `flask`), ending text, and music key/scale/tempo.
+  `--history file.json` keeps the theme off the last 3 videos and never
+  repeats a theme+course+jar combo. Ball sound: every peg hit plays a
+  marimba note by the peg's x position (left low, right high) in the
+  video's scale, so the course plays a tune; walls/ramps/spinners/bumpers
+  knock, a first landing in the jar thuds. Rate-limited per peg (0.1 s)
+  and per sound type in the mix.
+- Course tuning lessons: long full-width ramps were too slow (~16 s to
+  roll down three); balls rest forever in any gap narrower than a ball
+  (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips
+  pegs within a ball's width of a wall. 8-item chains finish faster, so
+  `good_end` is 28-52 s for them, 38-62 s for 9. Most seeds that fail do
+  so on a long wait before the last reveal (`MAX_UNLOCK_GAP` = 18 s).
+- Dean suggested famous actors or streamers as the evolving items. Told
+  him: actors no (photo copyright + right of publicity + impersonation
+  rules); streamers only with their permission (their pfps/emotes are
+  their art). Emoji themes instead.
 - Not built yet: a page on the site (render/upload to its own channel).
 
 ## Clip layout
