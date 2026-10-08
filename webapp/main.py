@@ -5782,6 +5782,7 @@ def _balls_make(vid: str) -> None:
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"))
     recipe["watermark"] = settings.get("watermark") or ""
+    recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
     tmp = out_dir / "video.part.mp4"
     cmd = [sys.executable, "-m", "clipper.ball_evolution", str(tmp), "--recipe", json.dumps(recipe), "--progress"]
@@ -6029,6 +6030,7 @@ class BallsSettings(BaseModel):
     post_time: Optional[str] = None
     watermark: Optional[str] = None
     description: Optional[str] = None
+    bed: Optional[str] = None
 
 
 @protected.put("/api/balls/settings")
@@ -6042,6 +6044,10 @@ def balls_settings(req: BallsSettings) -> dict:
         data["watermark"] = " ".join(req.watermark.split())[:40]
     if req.description is not None:
         data["description"] = req.description[:2000]
+    if req.bed is not None:
+        if req.bed not in ball_evolution.Voice.BED_OPTIONS:
+            raise HTTPException(400, "unknown background sound")
+        data["bed"] = req.bed
     return _balls.save_settings(data)
 
 app.include_router(protected)
@@ -10682,9 +10688,10 @@ __NAV_LINKS__
       <div><label for="m-course">Course</label><select id="m-course"></select></div>
       <div><label for="m-jar">Jar</label><select id="m-jar"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
+      <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
     <button id="make" type="button">🎬 Make</button>
-    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made.</div>
+    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it.</div>
   </div>
 
   <div class="section">
@@ -10754,6 +10761,7 @@ function render() {
   if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
+  $('s-bed').value = st.bed || 'auto';
   const days = $('days'); days.innerHTML = '';
   const today = new Date();
   for (let i = 0; i < 14; i++) {
@@ -10771,7 +10779,7 @@ function render() {
     + `You can upload ${left} more today (YouTube's daily upload limit is shared with your other channels). The name goes on videos made from now on. Storage used: ${S.storage_mb} MB.`;
   renderVideos();
 }
-for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-desc', 'description']]) {
+for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-desc', 'description'], ['s-bed', 'bed']]) {
   $(id).addEventListener('change', async () => {
     try { S.settings = await api('/api/balls/settings', jsonOpts('PUT', { [key]: $(id).value })); load(); } catch (e) { alert(e.message); }
   });

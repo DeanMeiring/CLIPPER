@@ -757,10 +757,13 @@ class Voice:
     loop) "horrible" and asked for "more white noise"."""
 
     BEDS = ("rain", "air", "hush")
+    BED_OPTIONS = ("auto",) + BEDS + ("off",)   # recipe["bed"]; "off" = only the balls' own sounds
 
     def __init__(self, recipe: dict):
         pick = random.Random(f"bed-{recipe.get('seed')}-{recipe.get('key')}-{recipe.get('scale')}")
         self.bed_kind = pick.choice(self.BEDS)
+        if recipe.get("bed") in self.BEDS + ("off",):
+            self.bed_kind = recipe["bed"]
         self.tone = pick.uniform(0.85, 1.15)     # shifts every sound's pitch a little per video
         self._cache: dict = {}
         self._n = 0
@@ -832,6 +835,8 @@ class Voice:
         """The bed: steady soft noise under everything (kept at the name the
         mix calls)."""
         n = int(SR * seconds)
+        if self.bed_kind == "off":
+            return np.zeros(n, dtype=np.float32)
         t = np.arange(n) / SR
         if self.bed_kind == "rain":
             bed = _noise(n, 400, 9000, 900, pink=0.5)

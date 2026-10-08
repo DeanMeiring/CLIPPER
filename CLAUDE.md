@@ -490,7 +490,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   the last item, all over a quiet noise bed (rain / air / hush, picked per
   video). No music, no melodies. The recipe's key/scale only seed the bed
   choice and a small per-video pitch shift now. Don't bring tonal music
-  back without asking him.
+  back without asking him. Then he asked for an option to drop the noise
+  bed and keep only the balls' sounds: the page's "Background sound"
+  setting (`settings["bed"]`: auto / rain / air / hush / off, default
+  auto) goes into each recipe as `recipe["bed"]`; "off" makes the bed
+  silent.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips
