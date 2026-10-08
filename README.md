@@ -214,6 +214,7 @@ clipper/                    # pipeline + CLI, importable on its own
   longform_video.py          # long-form: rendering (Pillow frames into ffmpeg)
   visual_sources.py          # long-form: free visuals (emoji, stock, CC0 photos, X posts)
   voice_clone.py             # long-form: your cloned voice (Pocket TTS)
+  ball_evolution.py          # physics Short: bees multiply and merge up to a unicorn
   assets/                    # bundled emoji (Fluent Emoji 3D, MIT) and fonts (OFL)
 webapp/
   main.py                    # FastAPI app: job queue, API routes, HTML pages
