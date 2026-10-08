@@ -509,6 +509,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   `pick_recipe` scores candidates: theme not in the last ~20, new
   theme+course+jar combo, and course/skin/backdrop/sound different from
   the previous video. 30 picks in a row gave 30 different themes.
+- **Circle formats (Oct 2026):** Dean asked for two more video types,
+  rotated by day with the evolve one. `clipper/ball_circles.py`
+  (`recipe["format"]`: `escape` / `touch`; `ball_evolution._parts`
+  dispatches simulation + painter, so picking, rendering and audio are
+  shared). `escape`: a spinning ring (2.5-3.2 rad/s) with a gap (0.75-0.9
+  rad), gravity 700, elastic balls; each ball that gets out spawns two in
+  the middle; full = 0.42 x (ring/ball radius)^2 = 145 balls; at full the
+  ring stops with its gap at the top and the count holds. `touch`: closed
+  ring, zero gravity, speeds held at 280-650 px/s with a tiny random turn
+  each step (without it two balls can loop forever and never meet); two
+  touching balls spawn one between them, then rest 1.2 s; full = 173.
+  Theme chain = milestones on a log scale up to full (new balls come out
+  as the next item; ladder + "NEW:" banner). Tuning lessons: escape was
+  ~65 s with a slow spin / small gap; now 35-45 s; touch 26-38 s.
+  `good_end` for both is 25-60 s.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips

@@ -99,7 +99,10 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 # ---- recipes -----------------------------------------------------------
 
-def make_recipe(seed: int, theme=None, course=None, jar=None) -> dict:
+FORMATS = ("evolve", "escape", "touch")      # escape/touch: clipper/ball_circles.py
+
+
+def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     """Everything that makes one video different, decided up front."""
     rng = random.Random(f"recipe-{seed}")
     theme = theme or rng.choice(sorted(THEMES))
@@ -113,6 +116,7 @@ def make_recipe(seed: int, theme=None, course=None, jar=None) -> dict:
         "key": rng.choice(sorted(KEYS)), "scale": scale,
         "bpm": rng.choice([88, 96, 100, 108]),
         "skin": rng.choice(SKINS), "backdrop": rng.choice(BACKDROPS), "sound": rng.choice(SOUNDS),
+        "format": fmt or "evolve",
     }
 
 
@@ -123,20 +127,24 @@ def _load_history(path) -> list:
         return []
 
 
-def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None) -> dict:
+def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None, fmt=None) -> dict:
     """A recipe that looks and sounds different from what was posted lately:
     its theme isn't one of the last ~20, its theme+course+jar combination is
     new, and its course, ball style, background and sound differ from the
     last video's -- as far as the candidates allow (best score wins)."""
     window = min(20, max(3, len(THEMES) // 2))
     recent = {h.get("theme") for h in history[-window:]}
-    combos = {(h.get("theme"), h.get("course"), h.get("jar")) for h in history}
+    def combo(h):
+        if (h.get("format") or "evolve") == "evolve":
+            return ("evolve", h.get("theme"), h.get("course"), h.get("jar"))
+        return (h.get("format"), h.get("theme"), h.get("skin"))
+    combos = {combo(h) for h in history}
     last = history[-1] if history else {}
     best, best_score = None, -1
     for k in range(300):
-        r = make_recipe(seed * 1000 + k, theme, course, jar)
+        r = make_recipe(seed * 1000 + k, theme, course, jar, fmt)
         r["seed"] = seed
-        score = (4 * ((r["theme"], r["course"], r["jar"]) not in combos)
+        score = (4 * (combo(r) not in combos)
                  + 4 * (bool(theme) or r["theme"] not in recent)
                  + sum(r.get(f) != last.get(f) for f in ("course", "skin", "backdrop", "sound")))
         if score > best_score:
@@ -477,14 +485,24 @@ class Sim:
 
 # ---- picking a good run --------------------------------------------------
 
+def _parts(recipe: dict):
+    """The simulation and painter classes for the recipe's format."""
+    if recipe.get("format") in ("escape", "touch"):
+        from clipper import ball_circles
+        return ball_circles.CircleSim, ball_circles.CirclePainter
+    return Sim, Painter
+
+
 def good_end(recipe: dict) -> tuple:
+    if recipe.get("format") in ("escape", "touch"):
+        return (25.0, 60.0)
     n = len(THEMES[recipe["theme"]]["chain"])
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
 
 def simulate(recipe: dict) -> dict:
     """Physics only, no drawing: how this recipe+seed plays out."""
-    sim = Sim(recipe)
+    sim = _parts(recipe)[0](recipe)
     lo, hi = good_end(recipe)
     while not sim.finished and sim.done_at is None and sim.t < hi + 1:
         sim.step()
@@ -686,12 +704,23 @@ class Painter:
             e[3] -= 0.06
         sim.effects[:] = [e for e in sim.effects if e[3] > 0]
 
-        def ctext(y, s, f, fill=(255, 255, 255, 255)):
-            w = d.textlength(s, font=f)
-            d.text(((W - w) / 2 + 3, y + 3), s, font=f, fill=(0, 0, 0, 150))
-            d.text(((W - w) / 2, y), s, font=f, fill=fill)
+        self.header(im, d, sim)
+        unit = THEMES[self.recipe["theme"]]["unit"]
+        d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} dropped", font=self.f_small,
+               fill=(220, 230, 255, 255))
+        self.watermark(d, JAR_R, JAR_BOT + 18)
+        self.overlays(im, d, sim)
+        return im
 
-        ctext(30, self.recipe["hook"], self.f_hook)
+    # Shared by every Ball Evolution format (see ball_circles.CirclePainter).
+    def ctext(self, d, y, s, f, fill=(255, 255, 255, 255)):
+        w = d.textlength(s, font=f)
+        d.text(((W - w) / 2 + 3, y + 3), s, font=f, fill=(0, 0, 0, 150))
+        d.text(((W - w) / 2, y), s, font=f, fill=fill)
+
+    def header(self, im, d, sim):
+        """The hook line and the ladder that reveals each item."""
+        self.ctext(d, 30, self.recipe["hook"], self.f_hook)
         n, cell, ic_s, top = len(self.chain), self.cell, self.icon, 128
         x0 = (W - cell * n) / 2
         for i in range(n):
@@ -712,31 +741,30 @@ class Painter:
                        fill=(255, 255, 255, 130))
             sim.reveal_flash[i] *= 0.93
 
-        unit = THEMES[self.recipe["theme"]]["unit"]
-        d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} dropped", font=self.f_small,
-               fill=(220, 230, 255, 255))
+    def watermark(self, d, right, y):
         mark = (self.recipe.get("watermark") or "").strip()
         if mark:
-            d.text((JAR_R - d.textlength(mark, font=self.f_small), JAR_BOT + 18), mark,
+            d.text((right - d.textlength(mark, font=self.f_small), y), mark,
                    font=self.f_small, fill=(255, 255, 255, 150))
 
+    def overlays(self, im, d, sim, item_y=740, text_y=1000):
+        """The "NEW: ...!" banner, and the last item + ending line at the end."""
         if sim.banner and sim.done_at is None and sim.t - sim.banner[1] < 1.6:
             age = sim.t - sim.banner[1]
             a = min(1.0, age / 0.15) * min(1.0, (1.6 - age) / 0.3)
             bw = d.textlength(sim.banner[0], font=self.f_banner) + 60
             d.rounded_rectangle(((W - bw) / 2, 236, (W + bw) / 2, 316), 40,
                                 fill=(20, 14, 40, int(220 * a)))
-            ctext(240, sim.banner[0], self.f_banner, (255, 225, 110, int(255 * a)))
+            self.ctext(d, 240, sim.banner[0], self.f_banner, (255, 225, 110, int(255 * a)))
         if sim.done_at is not None:
             age = sim.t - sim.done_at
             s = int(260 * min(1.0, age / 0.5))
             if s > 4:
                 big = self.emoji[-1].resize((s, s), Image.LANCZOS)
-                im.paste(big, (int(W / 2 - s / 2), int(740 - s / 2)), big)
+                im.paste(big, (int(W / 2 - s / 2), int(item_y - s / 2)), big)
             ending = self.recipe["ending"]
             f = self.f_big if d.textlength(ending, font=self.f_big) < W - 80 else _font(100)
-            ctext(1000, ending, f, (255, 225, 120, int(255 * min(1.0, age / 0.4))))
-        return im
+            self.ctext(d, text_y, ending, f, (255, 225, 120, int(255 * min(1.0, age / 0.4))))
 
 
 # ---- audio (all generated) -----------------------------------------------
@@ -962,7 +990,8 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     out_path = Path(out_path)
     video = out_path.with_suffix(".video.mp4")
     wav = out_path.with_suffix(".wav")
-    sim, painter = Sim(recipe), Painter(recipe)
+    sim_cls, painter_cls = _parts(recipe)
+    sim, painter = sim_cls(recipe), painter_cls(recipe)
     proc = subprocess.Popen(
         [_ffmpeg(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "medium",
@@ -1006,6 +1035,7 @@ def main(argv=None):
     ap.add_argument("--theme", choices=sorted(THEMES))
     ap.add_argument("--course", choices=COURSES)
     ap.add_argument("--jar", choices=JARS)
+    ap.add_argument("--format", choices=FORMATS, default="evolve")
     ap.add_argument("--history", help="JSON file of past recipes; avoids repeats, gets appended")
     ap.add_argument("--exact", action="store_true", help="render this seed as is, no picking")
     ap.add_argument("--recipe", help="a full recipe as JSON (from pick_recipe); overrides the options above")
@@ -1017,7 +1047,7 @@ def main(argv=None):
     if args.recipe:
         recipe = json.loads(args.recipe)
     else:
-        recipe = pick_recipe(seed, history, args.theme, args.course, args.jar)
+        recipe = pick_recipe(seed, history, args.theme, args.course, args.jar, args.format)
     say = (lambda *a, **k: None) if args.progress else print
     say("recipe:", recipe)
     if not args.exact:
@@ -1035,7 +1065,7 @@ def main(argv=None):
     if args.progress:
         print("RESULT " + json.dumps(info), flush=True)
     if args.history:
-        history.append({k: info[k] for k in ("seed", "theme", "course", "jar", "key", "scale")})
+        history.append({k: info[k] for k in ("seed", "theme", "course", "jar", "key", "scale", "format", "skin", "backdrop", "sound")})
         Path(args.history).write_text(json.dumps(history, indent=1))
 
 
