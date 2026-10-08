@@ -1,17 +1,23 @@
-"""Post Reels to an Instagram professional account (Instagram API with
-Instagram Login -- no Facebook Page needed).
+"""Post Reels to an Instagram professional account.
 
-Setup (once, in the Meta developer dashboard): an app with the Instagram
-API use case, Business Login's redirect URL set to
-``https://<RAILWAY_PUBLIC_DOMAIN>/auth/instagram/callback``, the Instagram
-account added as an Instagram Tester (accepted in the Instagram app), and
-INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET set on Railway. Standard Access is
-enough for accounts that have a role on the app, so there's no App Review.
+Two ways to connect, picked by INSTAGRAM_LOGIN (default "facebook"):
 
-Login: the authorize page gives a code -> a short-lived token -> a 60-day
-token, kept in a JSON file per account and refreshed when it's over a day
-old and has under 20 days left (Instagram only refreshes tokens at least
-24 hours old that haven't expired).
+* "facebook" -- Instagram API with Facebook Login: the Instagram account is
+  linked to a Facebook Page; Connect signs in with Facebook (the app's
+  admin, so no tester invite) and keeps the Page's token for the linked
+  Instagram account. A Page token made from a long-lived user token
+  doesn't expire. Meta only offered this route on Dean's apps.
+* "instagram" -- Instagram API with Instagram Login (no Page): code ->
+  short-lived token -> 60-day token, refreshed when it's over a day old
+  and has under 20 days left.
+
+Setup: INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET (the Meta app's App ID and
+secret for "facebook", the Instagram app ID and secret for "instagram"),
+the redirect URL ``https://<RAILWAY_PUBLIC_DOMAIN>/auth/instagram/callback``
+registered in the app, and for "facebook" optionally INSTAGRAM_FB_CONFIG_ID
+(a Facebook Login for Business configuration; without it the login asks
+for the permissions by name). Accounts with a role on the app need no App
+Review.
 
 Publishing a Reel: Instagram downloads the video itself, so it has to be at
 a public URL; create a container (media_type=REELS), wait until its
@@ -33,7 +39,14 @@ TOKEN_URL = "https://api.instagram.com/oauth/access_token"
 GRAPH = "https://graph.instagram.com"
 API_VERSION = "v25.0"
 SCOPES = "instagram_business_basic,instagram_business_content_publish"
+FB_DIALOG = "https://www.facebook.com/{v}/dialog/oauth"
+FB_GRAPH = "https://graph.facebook.com"
+FB_SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement,business_management"
 CAPTION_MAX = 2200
+
+
+def login_mode() -> str:
+    return "instagram" if os.environ.get("INSTAGRAM_LOGIN", "").strip().lower() == "instagram" else "facebook"
 
 
 class InstagramError(Exception):
@@ -45,6 +58,15 @@ def is_configured() -> bool:
 
 
 def authorize_url(redirect_uri: str, state: str) -> str:
+    if login_mode() == "facebook":
+        params = {"client_id": os.environ["INSTAGRAM_APP_ID"], "redirect_uri": redirect_uri,
+                  "response_type": "code", "state": state}
+        config = os.environ.get("INSTAGRAM_FB_CONFIG_ID", "").strip()
+        if config:
+            params["config_id"] = config        # Facebook Login for Business configuration
+        else:
+            params["scope"] = FB_SCOPES
+        return FB_DIALOG.format(v=API_VERSION) + "?" + urlencode(params)
     return AUTHORIZE_URL + "?" + urlencode({
         "client_id": os.environ["INSTAGRAM_APP_ID"], "redirect_uri": redirect_uri,
         "response_type": "code", "scope": SCOPES, "state": state,
@@ -68,9 +90,39 @@ def _check(resp) -> dict:
     return data
 
 
+def _exchange_code_facebook(code: str, redirect_uri: str) -> dict:
+    """Facebook Login: code -> user token -> long-lived user token -> the
+    Page token of the first Page with a linked Instagram account."""
+    import requests
+
+    app = {"client_id": os.environ["INSTAGRAM_APP_ID"], "client_secret": os.environ["INSTAGRAM_APP_SECRET"]}
+    base = f"{FB_GRAPH}/{API_VERSION}"
+    short = _check(requests.get(f"{base}/oauth/access_token", params={
+        **app, "redirect_uri": redirect_uri, "code": code}, timeout=30))["access_token"]
+    long = _check(requests.get(f"{base}/oauth/access_token", params={
+        **app, "grant_type": "fb_exchange_token", "fb_exchange_token": short}, timeout=30))["access_token"]
+    pages = _check(requests.get(f"{base}/me/accounts", params={
+        "fields": "id,name,access_token,instagram_business_account{id,username}",
+        "access_token": long, "limit": 100}, timeout=30)).get("data") or []
+    linked = [p for p in pages if p.get("instagram_business_account")]
+    if not linked:
+        names = ", ".join(p.get("name", "?") for p in pages) or "none"
+        raise InstagramError("None of your Facebook Pages has an Instagram professional account linked "
+                             f"(Pages the app can see: {names}). Link the Instagram account to a Page "
+                             "(Page settings -> Linked accounts -> Instagram) and connect again.")
+    page = linked[0]
+    ig = page["instagram_business_account"]
+    now = time.time()
+    return {"mode": "facebook", "graph": FB_GRAPH, "access_token": page["access_token"],
+            "obtained_at": now, "expires_at": now + 3650 * 86400,     # Page tokens don't expire
+            "ig_id": str(ig["id"]), "username": ig.get("username"), "page": page.get("name")}
+
+
 def exchange_code(code: str, redirect_uri: str) -> dict:
-    """The authorize page's code -> a 60-day token plus the account's id
+    """The login's code -> a stored token plus the Instagram account's id
     and username."""
+    if login_mode() == "facebook":
+        return _exchange_code_facebook(code, redirect_uri)
     import requests
 
     r = requests.post(TOKEN_URL, data={
@@ -125,6 +177,8 @@ class TokenStore:
         now = time.time()
         if not data or data.get("expires_at", 0) < now:
             return None
+        if data.get("mode") == "facebook":
+            return data             # Page tokens don't need refreshing
         if now - data.get("obtained_at", now) > 86400 and data["expires_at"] - now < 20 * 86400:
             try:
                 r = _check(requests.get(f"{GRAPH}/refresh_access_token", params={
@@ -154,14 +208,15 @@ def publish_reel(token: dict, video_url: str, caption: str, log=None, poll: floa
     log = log or (lambda *_: None)
     auth = {"access_token": token["access_token"]}
     ig = token["ig_id"]
-    r = requests.post(f"{GRAPH}/{API_VERSION}/{ig}/media", data={
+    host = token.get("graph") or GRAPH      # graph.facebook.com for Facebook Login
+    r = requests.post(f"{host}/{API_VERSION}/{ig}/media", data={
         "media_type": "REELS", "video_url": video_url, "caption": caption, "share_to_feed": "true", **auth},
         timeout=60)
     container = _check(r)["id"]
     log("container", container)
     deadline = time.time() + timeout
     while True:
-        st = _check(requests.get(f"{GRAPH}/{API_VERSION}/{container}",
+        st = _check(requests.get(f"{host}/{API_VERSION}/{container}",
                                  params={"fields": "status_code,status", **auth}, timeout=30))
         code = st.get("status_code")
         log("status", code)
@@ -172,11 +227,11 @@ def publish_reel(token: dict, video_url: str, caption: str, log=None, poll: floa
         if time.time() > deadline:
             raise InstagramError("Instagram took too long to process the video -- try again later.")
         time.sleep(poll)
-    media_id = _check(requests.post(f"{GRAPH}/{API_VERSION}/{ig}/media_publish",
+    media_id = _check(requests.post(f"{host}/{API_VERSION}/{ig}/media_publish",
                                     data={"creation_id": container, **auth}, timeout=60))["id"]
     permalink = None
     try:
-        permalink = _check(requests.get(f"{GRAPH}/{API_VERSION}/{media_id}",
+        permalink = _check(requests.get(f"{host}/{API_VERSION}/{media_id}",
                                         params={"fields": "permalink", **auth}, timeout=30)).get("permalink")
     except InstagramError:
         pass

@@ -351,7 +351,9 @@ or a local `.env`), never hardcoded.
 | `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) | long-form AI voice | Hugging Face token from an account that accepted the terms at huggingface.co/kyutai/pocket-tts |
 | `PEXELS_API_KEY` / `PIXABAY_API_KEY` | long-form stock video | free keys; without them stock video is skipped |
 | `CLIPPER_FFMPEG` | — | ffmpeg binary for long-form rendering (optional; default `ffmpeg`) |
-| `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` | Ball Evolution → Instagram | Meta app (Instagram API with Instagram Login); without them the Instagram buttons don't show |
+| `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` | Ball Evolution → Instagram | the Meta app's App ID and secret (App settings → Basic); without them the Instagram buttons don't show |
+| `INSTAGRAM_FB_CONFIG_ID` | Instagram connect | optional Facebook Login for Business configuration ID; without it the login asks for the permissions by name |
+| `INSTAGRAM_LOGIN` | Instagram connect | `facebook` (default: Instagram linked to a Facebook Page) or `instagram` (Instagram Login, no Page; uses the Instagram app ID/secret) |
 
 ### Channel profiles
 

@@ -2724,7 +2724,9 @@ def instagram_callback(code: str = "", state: str = "", error: str = "",
         token = instagram.exchange_code(code.split("#")[0], _instagram_redirect_uri())
     except Exception as e:
         print(f"[instagram] connect failed: {e}")
-        return RedirectResponse(f"{page}?instagram_error=exchange_failed")
+        why = str(e) if isinstance(e, instagram.InstagramError) else "exchange_failed"
+        from urllib.parse import quote
+        return RedirectResponse(f"{page}?instagram_error={quote(why[:300])}")
     _instagram_stores[issued[1]].save(token)
     return RedirectResponse(f"{page}?instagram_connected=1")
 
@@ -11070,7 +11072,7 @@ $('sched-all').onclick = async () => {
   load();
 };
 const params = new URLSearchParams(location.search);
-if (params.has('instagram_error')) alert('Connecting Instagram didn’t work (' + params.get('instagram_error') + '). Check the setup steps and try again.');
+if (params.has('instagram_error')) alert('Connecting Instagram didn’t work: ' + params.get('instagram_error'));
 if (params.has('youtube_connected') || params.has('instagram_connected') || params.has('instagram_error')) history.replaceState(null, '', '/ball-evolution');
 load().catch(e => alert(e.message));
 </script>
