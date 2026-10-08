@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .reframe import CropWindow, Layout, LetterboxLayout, MultiCamSplitLayout, SplitLayout
+from .reframe import CardLayout, CropWindow, Layout, LetterboxLayout, MultiCamSplitLayout, SplitLayout
 
 
 def _escape_for_filter(path: Path) -> str:
@@ -16,6 +16,17 @@ def _escape_for_filter(path: Path) -> str:
     s = str(path).replace("\\", "/")
     s = s.replace(":", "\\:")
     return s
+
+
+def ass_filter(ass_path: Path) -> str:
+    """The ass= filter for a clip's caption file. A card .ass
+    (captions.build_card_ass) also gets the bundled fonts dir for its Inter
+    header text; every other file is burned exactly as before."""
+    f = f"ass='{_escape_for_filter(ass_path)}'"
+    if ass_path.name.endswith(".card.ass"):
+        from .captions import CARD_FONTS_DIR
+        f = f"ass='{_escape_for_filter(ass_path)}':fontsdir='{_escape_for_filter(CARD_FONTS_DIR)}'"
+    return f
 
 
 def _letterbox_scale_pad(w: int, h: int) -> str:
@@ -48,7 +59,7 @@ def render_clip(
     which burns them in after its own cuts."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     duration = max(0.1, end - start)
-    burn = f"ass='{_escape_for_filter(ass_path)}'" if ass_path else "null"
+    burn = ass_filter(ass_path) if ass_path else "null"
 
     if isinstance(layout, MultiCamSplitLayout):
         top = layout.top
@@ -85,6 +96,26 @@ def render_clip(
             f"{_letterbox_scale_pad(out_w, layout.bottom_out_h)}[bottom];"
             f"[top][bottom]vstack=inputs=2[stacked];"
             f"[stacked]{burn}[outv]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}",
+            "-i", str(source_video),
+            "-t", f"{duration:.3f}",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    elif isinstance(layout, CardLayout):
+        # The whole frame, full width, on a white canvas at the card's
+        # video position; the header/text/captions come from the .ass.
+        # pad (not a color source + overlay) keeps the source's frame rate.
+        filter_complex = (
+            f"[0:v]scale={out_w}:{layout.video_h},setsar=1,"
+            f"pad={out_w}:{out_h}:0:{layout.video_y}:color=white,{burn}[outv]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -307,7 +338,7 @@ def apply_edits(base: Path, plan, ass_path: Path, output_path: Path, out_w: int 
         (work / "list.txt").write_text("\n".join(listing) + "\n", encoding="utf-8")
         _run_ffmpeg([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(work / "list.txt"),
-            "-vf", f"ass='{_escape_for_filter(ass_path)}'",
+            "-vf", ass_filter(ass_path),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", _EDIT_THREADS, "-r", fps,
             *(["-c:a", "aac", "-b:a", "160k"] if audio else ["-an"]),
             "-movflags", "+faststart",

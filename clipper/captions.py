@@ -381,3 +381,123 @@ def build_ass(
         ))
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path
+
+
+# ---- card style ------------------------------------------------------------
+# Dean liked how some clip channels frame each video as a social post: a
+# white card with the channel's picture, name and handle, the hook as the
+# post text (the whole video, not just the first seconds), then the whole
+# stream frame, with the spoken captions over the bottom of the video. The
+# card .ass is made FROM the clip's normal .ass (its caption lines keep
+# their timing), so any clip -- old ones too -- can switch either way.
+# Inter (bundled, OFL) is only passed to libass for these files (see
+# render.ass_filter): never registered system-wide, so the normal captions'
+# font fallback can't change.
+CARD_FONTS_DIR = Path(__file__).parent / "assets" / "fonts"
+CARD_HANDLE = os.environ.get("CLIPPER_BRAND_HANDLE", "@caughtonstream24")
+_CARD_MARGIN_X = 60
+_CARD_PFP = 120
+_CARD_TEXT_PX = 58
+_CARD_TEXT_MAX_LINES = 4
+_CARD_CAP_PX = 64
+_CARD_CAP_OUTLINE = 6
+
+
+def _card_text_lines(text: str, px: int, width: int) -> List[str]:
+    from PIL import ImageFont
+
+    font = ImageFont.truetype(str(CARD_FONTS_DIR / "Inter-Regular.ttf"), px)
+    lines: List[str] = []
+    cur = ""
+    for word in text.split():
+        trial = f"{cur} {word}".strip()
+        if not cur or font.getlength(trial) <= width:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def card_geometry(hook_text: str, video_h: int, header: bool = True,
+                  play_res: Tuple[int, int] = _BASE_PLAY_RES) -> dict:
+    """Where the card's parts go: the header (picture + name), the post
+    text lines, and the video's top edge. The block is centred a little
+    above the middle, clear of the Shorts title/buttons along the bottom."""
+    w, h = play_res
+    px = _CARD_TEXT_PX
+    lines = _card_text_lines(hook_text, px, w - 2 * _CARD_MARGIN_X) if hook_text else []
+    while len(lines) > 3 and px > 44:
+        px -= 4
+        lines = _card_text_lines(hook_text, px, w - 2 * _CARD_MARGIN_X)
+    lines = lines[:_CARD_TEXT_MAX_LINES]
+    line_h = round(px * 1.22)
+    header_h = _CARD_PFP + 34 if header else 0
+    text_h = len(lines) * line_h + 38 if lines else 0
+    block = header_h + text_h + video_h
+    top = max(120, (h - block) // 2 - 90)
+    return {"top": top, "text_y": top + header_h, "text_px": px, "line_h": line_h, "lines": lines,
+            "video_y": top + header_h + text_h, "video_h": video_h}
+
+
+_CARD_STYLES = (
+    "Style: CardName,Inter,48,&H00141414,&H00141414,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n"
+    "Style: CardHandle,Inter,40,&H00777777,&H00777777,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n"
+    "Style: CardText,Inter,{text_px},&H00141414,&H00141414,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n"
+    "Style: CardCap,Arial Black,{cap_px},&H00FFFFFF,&H0000D7FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,"
+    "{cap_outline},2,2,40,40,0,1\n"
+)
+_DIALOGUE_RE = re.compile(r"^Dialogue: (\d+),([^,]*),([^,]*),(Caption|CaptionPop),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),(.*)$")
+
+
+def build_card_ass(
+    normal_ass: Path, output_path: Path, video_h: int, hook_text: Optional[str] = None,
+    brand: bool = True, brand_name: Optional[str] = None, handle: Optional[str] = None,
+    mascot_accent: Optional[str] = None,
+) -> dict:
+    """Write the card version of a clip's captions to output_path and
+    return its geometry (card_geometry), whose video_y the render needs.
+    Only the spoken caption lines are taken from normal_ass; the hook box,
+    corner mascot and name stamp are replaced by the card's own header."""
+    hook = clean_hook_text(hook_text)
+    geo = card_geometry(hook, video_h, header=brand)
+    w = _BASE_PLAY_RES[0]
+    end = _fmt_ts(_BRAND_END)
+    header = _ass_header()
+    header = header.replace("\n\n[Events]", "\n" + _CARD_STYLES.format(
+        text_px=geo["text_px"], cap_px=_CARD_CAP_PX, cap_outline=_CARD_CAP_OUTLINE).rstrip("\n") + "\n\n[Events]")
+    lines = [header]
+    cap_y = geo["video_y"] + video_h - 36
+    for raw in normal_ass.read_text(encoding="utf-8").splitlines():
+        m = _DIALOGUE_RE.match(raw)
+        if not m:
+            continue
+        layer, start, stop, text = m.group(1), m.group(2), m.group(3), m.group(10)
+        lines.append(f"Dialogue: {layer},{start},{stop},CardCap,,0,0,0,,{{\\an2\\pos({w // 2},{cap_y})}}{text}")
+    if brand:
+        top = geo["top"]
+        cx, cy = _CARD_MARGIN_X + _CARD_PFP / 2, top + _CARD_PFP / 2
+        for layer, colour, extra, shape in _mascot_layers(mascot_accent or _MASCOT_ACCENT_DEFAULT):
+            lines.append(
+                f"Dialogue: {20 + layer},{_fmt_ts(0)},{end},Mascot,,0,0,0,,"
+                f"{{\\an5\\pos({_num(cx)},{_num(cy)})\\bord0\\shad0{extra}\\1c&H{colour}&"
+                f"\\fscx{_CARD_PFP}\\fscy{_CARD_PFP}\\p1}}{_SQUARE}{shape}{{\\p0}}"
+            )
+        nx = _CARD_MARGIN_X + _CARD_PFP + 26
+        name = _escape_ass_text(clean_hook_text(brand_name if brand_name is not None else BRAND_NAME))
+        handle = _escape_ass_text((handle if handle is not None else CARD_HANDLE).strip())
+        if name:
+            lines.append(f"Dialogue: 5,{_fmt_ts(0)},{end},CardName,,0,0,0,,{{\\pos({nx},{top + 10})}}{name}")
+        if handle:
+            lines.append(f"Dialogue: 5,{_fmt_ts(0)},{end},CardHandle,,0,0,0,,{{\\pos({nx},{top + 68})}}{handle}")
+    for i, text in enumerate(geo["lines"]):
+        lines.append(f"Dialogue: 5,{_fmt_ts(0)},{end},CardText,,0,0,0,,"
+                     f"{{\\pos({_CARD_MARGIN_X},{geo['text_y'] + i * geo['line_h']})}}{_escape_ass_text(text)}")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return geo
+
+
+def card_ass_path(normal_ass: Path) -> Path:
+    return normal_ass.with_name(normal_ass.stem + ".card.ass")
