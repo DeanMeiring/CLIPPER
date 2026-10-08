@@ -495,6 +495,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   setting (`settings["bed"]`: auto / rain / air / hush / off, default
   auto) goes into each recipe as `recipe["bed"]`; "off" makes the bed
   silent.
+- **More variety (Oct 2026):** Dean will run the channel fully automated
+  (2 videos a day) and asked for "at least 50 different" themes plus
+  different ball sounds. `clipper/ball_themes.py` holds 57 chains
+  (8-9 emoji each, own hooks + counter word), built from the Fluent Emoji
+  3D set: 265 more emoji were copied in from the same npm package
+  (`@lobehub/fluent-emoji-3d`, MIT, ~6 KB each; `code_for` finds a file
+  with or without fe0f). Themes without `bg` get one from their last
+  item's colour (`_auto_bg`). Each recipe also picks `skin` (bubble /
+  glass / plain / neon), `backdrop` (gradient / glow / stars / grid /
+  dots) and `sound` (marble / glass / wood / plastic / rubber / water /
+  metal / pop: short percussive hits from `_pack_hit`, no melody).
+  `pick_recipe` scores candidates: theme not in the last ~20, new
+  theme+course+jar combo, and course/skin/backdrop/sound different from
+  the previous video. 30 picks in a row gave 30 different themes.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips

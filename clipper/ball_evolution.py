@@ -45,6 +45,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from clipper import ball_themes
+
 W, H, FPS, SR = 1080, 1920, 60, 44100
 ASSETS = Path(__file__).parent / "assets"
 
@@ -65,65 +67,18 @@ END_HOLD = 4.0
 MAX_UNLOCK_GAP = 18.0
 
 # ---- themes: (emoji file, name) small to big ---------------------------
-THEMES = {
-    "animals": {
-        "chain": [("1f41d", "Bee"), ("1f400", "Mouse"), ("1f438", "Frog"),
-                  ("1f414", "Chicken"), ("1f431", "Cat"), ("1f436", "Dog"),
-                  ("1f43c", "Panda"), ("1f981", "Lion"), ("1f984", "Unicorn")],
-        "unit": "bees", "bg": ((14, 12, 30), (34, 18, 52)),
-        "hooks": ["Can a bee become the last animal?", "Can it make the last one?"],
-    },
-    "sports": {
-        "chain": [("26be", "Baseball"), ("1f3be", "Tennis ball"), ("1f3d0", "Volleyball"),
-                  ("26bd", "Football"), ("1f3c0", "Basketball"), ("1f3c8", "Rugby ball"),
-                  ("1f3b3", "Bowling"), ("1f947", "Gold medal"), ("1f3c6", "Trophy")],
-        "unit": "baseballs", "bg": ((8, 26, 20), (14, 52, 36)),
-        "hooks": ["Can a baseball win the trophy?", "Will it reach the last ball?"],
-    },
-    "food": {
-        "chain": [("1f36a", "Cookie"), ("1f369", "Donut"), ("1f37f", "Popcorn"),
-                  ("1f35f", "Fries"), ("1f32d", "Hot dog"), ("1f354", "Burger"),
-                  ("1f355", "Pizza"), ("1f382", "Cake")],
-        "unit": "cookies", "bg": ((36, 14, 12), (64, 28, 20)),
-        "hooks": ["Can cookies become the final food?", "What's the last food?"],
-    },
-    "space": {
-        "chain": [("2728", "Stardust"), ("2b50", "Star"), ("1f31f", "Bright star"),
-                  ("1f319", "Moon"), ("1f30d", "Earth"), ("2600-fe0f", "Sun"),
-                  ("1f680", "Rocket"), ("1f6f8", "UFO"), ("1f47d", "Alien")],
-        "unit": "sparks", "bg": ((4, 6, 22), (16, 20, 58)),
-        "hooks": ["Can stardust make the last one?", "What's at the end of space?"],
-    },
-    "money": {
-        "chain": [("1fa99", "Coin"), ("1f4b5", "Cash"), ("1f4b8", "Flying cash"),
-                  ("1f4b3", "Card"), ("1f4b0", "Money bag"), ("1f48e", "Diamond"),
-                  ("1f451", "Crown"), ("1f911", "Rich")],
-        "unit": "coins", "bg": ((6, 22, 14), (22, 44, 22)),
-        "hooks": ["Can one coin make you rich?", "Coin to... what?"],
-    },
-    "laughs": {
-        "chain": [("1f610", "Meh"), ("1f642", "Smile"), ("1f60a", "Happy"),
-                  ("1f604", "Grin"), ("1f606", "Laugh"), ("1f602", "Crying laughing"),
-                  ("1f923", "Rolling"), ("1f929", "Starstruck"), ("1f973", "Party")],
-        "unit": "faces", "bg": ((10, 24, 34), (16, 44, 60)),
-        "hooks": ["Can a meh face become the happiest?", "How happy can it get?"],
-    },
-    "vehicles": {
-        "chain": [("1f697", "Car"), ("1f693", "Police car"), ("1f68c", "Bus"),
-                  ("1f682", "Train"), ("1f3ce-fe0f", "Race car"), ("2708-fe0f", "Plane"),
-                  ("1f680", "Rocket"), ("1f6f8", "UFO")],
-        "unit": "cars", "bg": ((16, 18, 28), (34, 38, 56)),
-        "hooks": ["Can a car become the fastest thing?", "Car to... what?"],
-    },
-    "weather": {
-        "chain": [("1f4a7", "Drop"), ("1f4a6", "Splash"), ("1f327-fe0f", "Rain"),
-                  ("26c8-fe0f", "Storm"), ("26a1", "Lightning"), ("1f32a-fe0f", "Tornado"),
-                  ("1f30a", "Wave"), ("1f308", "Rainbow"), ("2600-fe0f", "Sun")],
-        "unit": "drops", "bg": ((6, 16, 34), (12, 34, 64)),
-        "hooks": ["Can one drop make the sun?", "What's after the storm?"],
-    },
-}
+# The evolution chains live in clipper/ball_themes.py (57 of them). The
+# first eight keep the background colours their videos were made with;
+# the rest get one from their own emoji (see Painter).
+_LEGACY_BG = {'animals': ((14, 12, 30), (34, 18, 52)), 'sports': ((8, 26, 20), (14, 52, 36)), 'food': ((36, 14, 12), (64, 28, 20)), 'space': ((4, 6, 22), (16, 20, 58)), 'money': ((6, 22, 14), (22, 44, 22)), 'laughs': ((10, 24, 34), (16, 44, 60)), 'vehicles': ((16, 18, 28), (34, 38, 56)), 'weather': ((6, 16, 34), (12, 34, 64))}
+THEMES = ball_themes.build()
+for _k, _bg in _LEGACY_BG.items():
+    if _k in THEMES:
+        THEMES[_k]["bg"] = _bg
 COURSES = ["pegs", "triangle", "spinners", "ramps", "bumpers"]
+SKINS = ["bubble", "glass", "plain", "neon"]                 # how each item is drawn
+BACKDROPS = ["gradient", "glow", "stars", "grid", "dots"]    # behind the machine
+SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 JARS = ["box", "bowl", "flask"]
 ENDINGS = ["EVOLVED!", "FINAL FORM!", "MAXED OUT!"]
 
@@ -157,6 +112,7 @@ def make_recipe(seed: int, theme=None, course=None, jar=None) -> dict:
         "ending": rng.choice(ENDINGS),
         "key": rng.choice(sorted(KEYS)), "scale": scale,
         "bpm": rng.choice([88, 96, 100, 108]),
+        "skin": rng.choice(SKINS), "backdrop": rng.choice(BACKDROPS), "sound": rng.choice(SOUNDS),
     }
 
 
@@ -168,18 +124,25 @@ def _load_history(path) -> list:
 
 
 def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None) -> dict:
-    """A recipe whose theme wasn't used in the last 3 videos and whose
-    theme+course+jar combination hasn't been used at all, where possible."""
-    recent = [h.get("theme") for h in history[-3:]]
+    """A recipe that looks and sounds different from what was posted lately:
+    its theme isn't one of the last ~20, its theme+course+jar combination is
+    new, and its course, ball style, background and sound differ from the
+    last video's -- as far as the candidates allow (best score wins)."""
+    window = min(20, max(3, len(THEMES) // 2))
+    recent = {h.get("theme") for h in history[-window:]}
     combos = {(h.get("theme"), h.get("course"), h.get("jar")) for h in history}
-    best = None
-    for k in range(200):
+    last = history[-1] if history else {}
+    best, best_score = None, -1
+    for k in range(300):
         r = make_recipe(seed * 1000 + k, theme, course, jar)
         r["seed"] = seed
-        fresh = (r["theme"], r["course"], r["jar"]) not in combos
-        if fresh and (theme or r["theme"] not in recent):
-            return r
-        best = best or r
+        score = (4 * ((r["theme"], r["course"], r["jar"]) not in combos)
+                 + 4 * (bool(theme) or r["theme"] not in recent)
+                 + sum(r.get(f) != last.get(f) for f in ("course", "skin", "backdrop", "sound")))
+        if score > best_score:
+            best, best_score = r, score
+        if score == 12:
+            break
     return best
 
 
@@ -575,18 +538,55 @@ def _tint(im: Image.Image) -> tuple:
     return tuple(int(v) for v in (rgb * 0.55 + 255 * 0.45))
 
 
+def _auto_bg(colour: tuple) -> tuple:
+    """A dark two-tone background tinted by the theme's last item."""
+    c = np.array(colour, dtype=float)
+    return (tuple(int(v) for v in c * 0.08 + 8), tuple(int(v) for v in c * 0.2 + 12))
+
+
+def _backdrop(bg: Image.Image, kind: str, colour: tuple, seed: int) -> Image.Image:
+    """Decorates the plain gradient: a glow, stars, a grid or dots."""
+    if kind == "gradient":
+        return bg
+    rng = random.Random(f"backdrop-{seed}")
+    layer = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    if kind == "glow":
+        for i in range(24, 0, -1):
+            r = 60 + i * 40
+            d.ellipse((W / 2 - r, 1100 - r, W / 2 + r, 1100 + r), fill=tuple(colour) + (int(7 * (24 - i) / 24) + 2,))
+    elif kind == "stars":
+        for _ in range(260):
+            x, y, r = rng.uniform(0, W), rng.uniform(0, H), rng.choice([1, 1, 2, 2, 3])
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, rng.randint(40, 150)))
+    elif kind == "grid":
+        for x in range(0, W, 60):
+            d.line([(x, 0), (x, H)], fill=(255, 255, 255, 14), width=2)
+        for y in range(0, H, 60):
+            d.line([(0, y), (W, y)], fill=(255, 255, 255, 14), width=2)
+    elif kind == "dots":
+        for y in range(30, H, 70):
+            for x in range(30 + (35 if (y // 70) % 2 else 0), W, 70):
+                d.ellipse((x - 4, y - 4, x + 4, y + 4), fill=tuple(colour) + (40,))
+    out = bg.convert("RGBA")
+    out.alpha_composite(layer)
+    return out.convert("RGB")
+
+
 class Painter:
     def __init__(self, recipe: dict):
         theme = THEMES[recipe["theme"]]
         self.recipe = recipe
         self.chain = theme["chain"]
-        top, bot = theme["bg"]
-        g = np.linspace(0, 1, H)[:, None]
-        rows = (np.array(top) * (1 - g) + np.array(bot) * g).astype(np.uint8)
-        self.bg = Image.fromarray(np.repeat(rows[:, None, :], W, axis=1), "RGB")
+        self.skin = recipe.get("skin") or "bubble"
         self.emoji = [Image.open(ASSETS / "emoji" / f"{c}.webp").convert("RGBA")
                       for c, _ in self.chain]
         self.colours = [_tint(e) for e in self.emoji]
+        top, bot = theme.get("bg") or _auto_bg(self.colours[-1])
+        g = np.linspace(0, 1, H)[:, None]
+        rows = (np.array(top) * (1 - g) + np.array(bot) * g).astype(np.uint8)
+        self.bg = _backdrop(Image.fromarray(np.repeat(rows[:, None, :], W, axis=1), "RGB"),
+                            recipe.get("backdrop") or "gradient", self.colours[-1], recipe.get("seed") or 0)
         cell = min(104, (W - 40) // len(self.chain))
         self.cell, self.icon = cell, int(cell * 0.75)
         self.icons = [e.resize((self.icon, self.icon), Image.LANCZOS) for e in self.emoji]
@@ -609,15 +609,26 @@ class Painter:
             d = ImageDraw.Draw(im)
             c, R = s / 2, r * ss
             col = self.colours[tier]
-            d.ellipse((c - R, c - R, c + R, c + R), fill=col + (235,))
-            d.ellipse((c - R, c - R, c + R, c + R),
-                      outline=tuple(int(v * 0.6) for v in col) + (255,), width=ss * 2)
             e = int(R * 1.45)
+            if self.skin == "bubble":
+                d.ellipse((c - R, c - R, c + R, c + R), fill=col + (235,))
+                d.ellipse((c - R, c - R, c + R, c + R),
+                          outline=tuple(int(v * 0.6) for v in col) + (255,), width=ss * 2)
+            elif self.skin == "glass":
+                d.ellipse((c - R, c - R, c + R, c + R), fill=col + (70,))
+                d.ellipse((c - R, c - R, c + R, c + R), outline=(255, 255, 255, 200), width=ss * 2)
+                e = int(R * 1.3)
+            elif self.skin == "neon":
+                d.ellipse((c - R, c - R, c + R, c + R), fill=(24, 22, 36, 235))
+                d.ellipse((c - R, c - R, c + R, c + R), outline=col + (255,), width=ss * 3)
+                e = int(R * 1.3)
+            else:                                      # plain: just the emoji
+                e = int(R * 2.0)
             im.alpha_composite(self.emoji[tier].resize((e, e), Image.LANCZOS),
                                (int(c - e / 2), int(c - e / 2)))
             # the shine goes on its own layer: drawn straight onto im it
             # would replace the pixels and leave a see-through grey spot
-            hr = R * 0.25
+            hr = R * 0.25 if self.skin != "plain" else 0
             shine = Image.new("RGBA", (s, s), (0, 0, 0, 0))
             ImageDraw.Draw(shine).ellipse((c - R * 0.5 - hr, c - R * 0.55 - hr, c - R * 0.5 + hr,
                                            c - R * 0.55 + hr), fill=(255, 255, 255, 90))
@@ -750,6 +761,52 @@ def _burst(dur, lo, hi, decay, vol, seed, attack=0.002, pink=0.0) -> np.ndarray:
     return (_noise(n, lo, hi, seed, pink) * env * vol).astype(np.float32)
 
 
+def _ring(freqs, amps, dur, decay, vol, attack=0.001) -> np.ndarray:
+    t = np.arange(int(SR * dur)) / SR
+    w = sum(a * np.sin(2 * np.pi * f * t) for f, a in zip(freqs, amps))
+    return (w * np.exp(-t * decay) * np.minimum(1, t / attack) * vol).astype(np.float32)
+
+
+def _add(*parts) -> np.ndarray:
+    """Sum sound clips of different lengths (padded to the longest)."""
+    out = np.zeros(max(len(p) for p in parts), dtype=np.float32)
+    for p in parts:
+        out[:len(p)] += p
+    return out
+
+
+def _pack_hit(pack: str, pos: float, take: int, tone: float) -> np.ndarray:
+    """One bounce in a sound pack. pos 0..1 (left..right) nudges the pitch;
+    take varies the noise so repeats don't sound identical. All short and
+    percussive -- no melody (Dean found the tonal version horrible)."""
+    seed = (SOUNDS.index(pack) if pack in SOUNDS else 0, int(pos * 9), take)
+    j = 1 + (take - 1) * 0.03                      # tiny per-take pitch jitter
+    if pack == "glass":      # a bright clink: inharmonic partials, quick ring
+        f = (2600 + 1600 * pos) * tone * j
+        return _add(_ring((f, f * 2.76, f * 5.4), (1, 0.4, 0.15), 0.18, 32, 0.07), _burst(0.01, 4000, 9000, 400, 0.05, seed))
+    if pack == "wood":       # a dry tok
+        f = (550 + 400 * pos) * tone * j
+        return _add(_ring((f, f * 2.3), (1, 0.3), 0.08, 70, 0.14), _burst(0.03, 600, 1800, 140, 0.10, seed))
+    if pack == "plastic":    # a tiny click
+        return _burst(0.025, (1800 + 1500 * pos) * tone, 6000, 260, 0.20, seed)
+    if pack == "rubber":     # a soft bonk with a little pitch drop
+        t = np.arange(int(SR * 0.12)) / SR
+        f = (170 + 140 * pos) * tone * j * (1 + 0.5 * np.exp(-t * 60))
+        return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 32) * 0.22).astype(np.float32)
+    if pack == "water":      # a bloop: pitch rising fast
+        t = np.arange(int(SR * 0.09)) / SR
+        f = (320 + 260 * pos) * tone * j * (1 + 1.6 * (1 - np.exp(-t * 45)))
+        return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 34) * np.minimum(1, t / 0.004) * 0.16).astype(np.float32)
+    if pack == "metal":      # a light ting
+        f = (950 + 900 * pos) * tone * j
+        return _ring((f, f * 1.48, f * 2.83, f * 4.1), (1, 0.6, 0.35, 0.2), 0.3, 18, 0.06)
+    if pack == "pop":        # a bubble pop
+        f = (650 + 500 * pos) * tone * j
+        return _add(_ring((f,), (1,), 0.05, 90, 0.12), _burst(0.03, 1000, 4000, 180, 0.10, seed))
+    lo = (1400 + 220 * pos * 9) * tone           # marble: the original noise tap
+    return _burst(0.05, lo, lo * 2.3, 150, 0.22, seed)
+
+
 class Voice:
     """The video's sounds: soft, noise-based ASMR taps, puffs and whooshes
     over a quiet bed of noise (rain, air or hush, picked per video).
@@ -765,6 +822,7 @@ class Voice:
         if recipe.get("bed") in self.BEDS + ("off",):
             self.bed_kind = recipe["bed"]
         self.tone = pick.uniform(0.85, 1.15)     # shifts every sound's pitch a little per video
+        self.sound = recipe.get("sound") if recipe.get("sound") in SOUNDS else "marble"
         self._cache: dict = {}
         self._n = 0
 
@@ -774,13 +832,13 @@ class Voice:
         return self._cache[key]
 
     def tick(self, peg_note: int) -> np.ndarray:
-        """A marble tapping a peg: a short bright click, a little higher
-        toward the right. Three takes per peg so repeats don't sound copied."""
+        """A ball hitting a peg, in the video's sound pack (``recipe["sound"]``),
+        a little higher toward the right. Three takes per peg so repeats
+        don't sound copied."""
         self._n += 1
         take = self._n % 3
-        lo = (1400 + peg_note * 220) * self.tone
-        return self._get(("tick", peg_note, take),
-                         lambda: _burst(0.05, lo, lo * 2.3, 150, 0.22, (peg_note, take)))
+        pos = peg_note / 9.0                       # 0 left .. 1 right
+        return self._get(("tick", peg_note, take), lambda: _pack_hit(self.sound, pos, take, self.tone))
 
     def knock(self, part: str) -> np.ndarray:
         lo, hi, decay, vol = {"spinner": (700, 1900, 120, 0.16), "bumper": (240, 900, 70, 0.2),
