@@ -14,8 +14,9 @@ same video twice (YouTube won't monetize template-looking repeats):
 * course -- how the drop is built: peg grid, triangle, spinners, ramps,
   bumpers (layout details also vary with the seed)
 * jar -- box, bowl or flask
-* sound -- every bounce plays a note (the course is an instrument),
-  in a key and scale picked per video, over a music loop in that key
+* sound -- soft noise-based ASMR: every bounce a marble-like tap, merges
+  a puff that deepens with size, reveals a whoosh, over a quiet bed of
+  noise (rain, air or hush, picked per video)
 
 Everything on screen and every sound is made here (bundled MIT emoji, OFL
 fonts, generated audio), so there is nothing to license or get claimed.
@@ -128,9 +129,6 @@ ENDINGS = ["EVOLVED!", "FINAL FORM!", "MAXED OUT!"]
 
 KEYS = {"C": 261.63, "D": 293.66, "Eb": 311.13, "F": 349.23, "G": 392.00, "A": 220.00 * 2}
 SCALES = {"major": (0, 2, 4, 7, 9), "minor": (0, 3, 5, 7, 10), "dreamy": (0, 2, 4, 7, 11)}
-PROGRESSIONS = {"major": [(0, 4, 7), (-3, 0, 4), (-7, -3, 0), (-5, -1, 2)],
-                "minor": [(0, 3, 7), (-4, 0, 3), (-2, 2, 5), (-5, -2, 2)],
-                "dreamy": [(0, 4, 7), (-7, -3, 0), (-3, 0, 4), (-5, -1, 2)]}
 
 
 def _ffmpeg() -> str:
@@ -617,9 +615,13 @@ class Painter:
             e = int(R * 1.45)
             im.alpha_composite(self.emoji[tier].resize((e, e), Image.LANCZOS),
                                (int(c - e / 2), int(c - e / 2)))
+            # the shine goes on its own layer: drawn straight onto im it
+            # would replace the pixels and leave a see-through grey spot
             hr = R * 0.25
-            d.ellipse((c - R * 0.5 - hr, c - R * 0.55 - hr, c - R * 0.5 + hr, c - R * 0.55 + hr),
-                      fill=(255, 255, 255, 90))
+            shine = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+            ImageDraw.Draw(shine).ellipse((c - R * 0.5 - hr, c - R * 0.55 - hr, c - R * 0.5 + hr,
+                                           c - R * 0.55 + hr), fill=(255, 255, 255, 90))
+            im.alpha_composite(shine)
             self.sprites[key] = im.resize((s // ss, s // ss), Image.LANCZOS)
         return self.sprites[key]
 
@@ -728,25 +730,40 @@ class Painter:
 
 # ---- audio (all generated) -----------------------------------------------
 
-def _tone(freq, dur, decay, vol, harm=(1.0, 0.3, 0.1)):
-    t = np.arange(int(SR * dur)) / SR
-    w = sum(a * np.sin(2 * np.pi * freq * (i + 1) * t) for i, a in enumerate(harm))
-    return (w * np.exp(-t * decay) * np.minimum(1, t / 0.004) * vol).astype(np.float32)
+def _noise(n: int, lo: float, hi: float, seed, pink: float = 0.0) -> np.ndarray:
+    """White noise band-limited to lo..hi Hz (soft edges), optionally tilted
+    toward pink (pink=0.5) or brown (1.0). Normalised to peak 1."""
+    x = np.random.default_rng(seed).standard_normal(n)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    f[0] = 1.0
+    mask = 1 / (1 + (lo / f) ** 4) / (1 + (f / hi) ** 4)
+    if pink:
+        mask = mask * (f / 1000.0) ** (-pink)
+    y = np.fft.irfft(np.fft.rfft(x) * mask, n)
+    return (y / max(1e-9, float(np.max(np.abs(y))))).astype(np.float32)
+
+
+def _burst(dur, lo, hi, decay, vol, seed, attack=0.002, pink=0.0) -> np.ndarray:
+    n = int(SR * dur)
+    t = np.arange(n) / SR
+    env = np.minimum(1, t / attack) * np.exp(-t * decay)
+    return (_noise(n, lo, hi, seed, pink) * env * vol).astype(np.float32)
 
 
 class Voice:
-    """The video's instruments, all tuned to its key and scale."""
+    """The video's sounds: soft, noise-based ASMR taps, puffs and whooshes
+    over a quiet bed of noise (rain, air or hush, picked per video).
+    Dean found the first musical version (marimba notes, chimes, a music
+    loop) "horrible" and asked for "more white noise"."""
+
+    BEDS = ("rain", "air", "hush")
 
     def __init__(self, recipe: dict):
-        self.root = KEYS[recipe["key"]]
-        self.steps = SCALES[recipe["scale"]]
-        self.progression = PROGRESSIONS[recipe["scale"]]
-        self.bpm = recipe["bpm"]
+        pick = random.Random(f"bed-{recipe.get('seed')}-{recipe.get('key')}-{recipe.get('scale')}")
+        self.bed_kind = pick.choice(self.BEDS)
+        self.tone = pick.uniform(0.85, 1.15)     # shifts every sound's pitch a little per video
         self._cache: dict = {}
-
-    def note(self, degree: int, octave: int = 0) -> float:
-        o, k = divmod(degree, len(self.steps))
-        return self.root * 2 ** (octave + o + self.steps[k] / 12)
+        self._n = 0
 
     def _get(self, key, make):
         if key not in self._cache:
@@ -754,84 +771,83 @@ class Voice:
         return self._cache[key]
 
     def tick(self, peg_note: int) -> np.ndarray:
-        """Marimba-ish note per peg: the course plays a tune as things bounce."""
-        return self._get(("tick", peg_note), lambda: _tone(
-            self.note(peg_note, 1), 0.32, 16, 0.10, harm=(1, 0.0, 0.0, 0.25)))
+        """A marble tapping a peg: a short bright click, a little higher
+        toward the right. Three takes per peg so repeats don't sound copied."""
+        self._n += 1
+        take = self._n % 3
+        lo = (1400 + peg_note * 220) * self.tone
+        return self._get(("tick", peg_note, take),
+                         lambda: _burst(0.05, lo, lo * 2.3, 150, 0.22, (peg_note, take)))
 
     def knock(self, part: str) -> np.ndarray:
-        f = {"spinner": 520, "bumper": 300, "ramp": 700}.get(part, 900)
-
-        def make():
-            t = np.arange(int(SR * 0.07)) / SR
-            noise = np.random.default_rng(len(part)).standard_normal(len(t)) * 0.3
-            return ((np.sin(2 * np.pi * f * t) + noise) * np.exp(-t * 70) * 0.07).astype(np.float32)
-        return self._get(("knock", part), make)
+        lo, hi, decay, vol = {"spinner": (700, 1900, 120, 0.16), "bumper": (240, 900, 70, 0.2),
+                              "ramp": (1100, 2800, 170, 0.12)}.get(part, (1300, 3200, 200, 0.10))
+        return self._get(("knock", part), lambda: _burst(0.07, lo * self.tone, hi * self.tone, decay, vol, len(part)))
 
     def thud(self) -> np.ndarray:
-        def make():
-            t = np.arange(int(SR * 0.08)) / SR
-            return (np.sin(2 * np.pi * 150 * t) * np.exp(-t * 55) * 0.08).astype(np.float32)
-        return self._get("thud", make)
+        return self._get("thud", lambda: _burst(0.12, 60, 420, 45, 0.28, 7, attack=0.004, pink=0.5))
 
     def pling(self, k: int) -> np.ndarray:
-        d = min(14, int(math.log2(max(1, k)) * 1.3))
-        return self._get(("pling", d), lambda: _tone(self.note(d, 1), 0.55, 7, 0.08,
-                                                     harm=(1, 0.35, 0.12)))
+        """A multiply: a faint airy "tsk"."""
+        return self._get("pling", lambda: _burst(0.06, 5000, 11000, 90, 0.06, 11))
 
     def pop(self, tier: int) -> np.ndarray:
+        """A merge: a soft puff, deeper and longer for bigger items, with a
+        low thump under the big ones."""
         def make():
-            t = np.arange(int(SR * 0.5)) / SR
-            f0 = self.note(10 - tier, 0)
-            sweep = f0 * (1 + 0.6 * np.exp(-t * 40))
-            body = np.sin(2 * np.pi * np.cumsum(sweep) / SR) * np.exp(-t * (14 - tier)) * (0.22 + 0.03 * tier)
-            click = np.random.default_rng(tier).standard_normal(len(t)) * np.exp(-t * 300) * 0.08
-            return (body + click).astype(np.float32)
+            c = 3000 / (1.35 ** tier) * self.tone
+            dur = 0.12 + 0.03 * tier
+            out = _burst(dur, c * 0.5, c * 1.8, 40 - 3 * tier, 0.3 + 0.03 * tier, 100 + tier, attack=0.004, pink=0.3)
+            if tier >= 3:
+                thump = _burst(dur, 40, 160, 22, 0.25 + 0.03 * tier, 200 + tier, attack=0.003)
+                out = out + thump[:len(out)]
+            return out
         return self._get(("pop", tier), make)
 
+    def _whoosh(self, dur, rise, vol, seed, lo=300, hi=6000) -> np.ndarray:
+        n = int(SR * dur)
+        t = np.arange(n) / SR
+        env = np.where(t < rise, (t / rise) ** 2, np.exp(-(t - rise) * 9))
+        return (_noise(n, lo, hi, seed, pink=0.5) * env * vol).astype(np.float32)
+
     def chime(self, tier: int) -> np.ndarray:
+        """A new item revealed: a whoosh that lands on a soft thump."""
         def make():
-            out = np.zeros(int(SR * 1.2), dtype=np.float32)
-            for i, deg in enumerate((0, 2, 4, 5)):
-                n = _tone(self.note(deg + tier % 3, 1), 0.9, 5, 0.15)
-                o = int(i * 0.08 * SR)
-                out[o:o + len(n)] += n[:len(out) - o]
-            return out
+            w = self._whoosh(0.8, 0.55, 0.28, 300 + tier)
+            thump = _burst(0.2, 40, 220, 18, 0.3, 400 + tier, attack=0.003)
+            o = int(0.55 * SR)
+            w[o:o + len(thump)] += thump[:len(w) - o]
+            return w
         return self._get(("chime", tier), make)
 
     def fanfare(self) -> np.ndarray:
-        out = np.zeros(int(SR * 3.0), dtype=np.float32)
-        for i, deg in enumerate((0, 2, 4, 5)):
-            n = _tone(self.note(deg, 1), 2.6, 1.6, 0.14, harm=(1, 0.5, 0.25, 0.1))
-            o = int(i * 0.11 * SR)
-            out[o:o + len(n)] += n[:len(out) - o]
-        return out
+        """The last item: a long whoosh, a deep boom and an airy tail."""
+        w = self._whoosh(3.2, 0.9, 0.4, 500, lo=150, hi=7000)
+        boom = _burst(1.2, 30, 180, 4, 0.45, 501, attack=0.004)
+        o = int(0.9 * SR)
+        w[o:o + len(boom)] += boom[:len(w) - o]
+        return w
 
     def music(self, seconds: float) -> np.ndarray:
-        """Soft four-chord loop in the video's key: pad, arpeggio, kick."""
-        out = np.zeros(int(SR * seconds), dtype=np.float32)
-        beat = 60 / self.bpm
-        bar = beat * 4
-        tb = np.arange(int(SR * bar)) / SR
-        tk = np.arange(int(SR * 0.18)) / SR
-        kick = (np.sin(2 * np.pi * (55 + 90 * np.exp(-tk * 30)) * tk) * np.exp(-tk * 18) * 0.10).astype(np.float32)
-
-        def add(at, w):
-            seg = out[at:at + len(w)]
-            seg += w[:len(seg)]
-
-        k = 0
-        while k * bar < seconds:
-            ch = [self.root * 2 ** (s / 12) for s in self.progression[k % 4]]
-            start = int(k * bar * SR)
-            pad = sum(np.sin(2 * np.pi * f * tb) + 0.3 * np.sin(2 * np.pi * f * 2.005 * tb) for f in ch)
-            add(start, (pad * np.minimum(1, tb / 0.4) * np.minimum(1, (bar - tb) / 0.4) * 0.022).astype(np.float32))
-            for s in range(8):
-                add(start + int(s * beat / 2 * SR),
-                    _tone(ch[s % 3] * (2 if s % 4 == 3 else 1) * 2, 0.35, 9, 0.03, harm=(1, 0.2)))
-            for b in range(4):
-                add(start + int(b * beat * SR), kick)
-            k += 1
-        return out
+        """The bed: steady soft noise under everything (kept at the name the
+        mix calls)."""
+        n = int(SR * seconds)
+        t = np.arange(n) / SR
+        if self.bed_kind == "rain":
+            bed = _noise(n, 400, 9000, 900, pink=0.5)
+            drops = np.zeros(n, dtype=np.float32)
+            rng = np.random.default_rng(901)
+            tick = _burst(0.02, 2500, 7000, 260, 1.0, 902)
+            for at in rng.integers(0, max(1, n - len(tick)), int(seconds * 25)):
+                drops[at:at + len(tick)] += tick * rng.uniform(0.15, 0.5)
+            bed = bed * 0.8 + drops * 0.5
+        elif self.bed_kind == "air":
+            bed = _noise(n, 80, 2500, 910, pink=1.0) * (0.75 + 0.25 * np.sin(2 * np.pi * 0.07 * t))
+        else:
+            bed = _noise(n, 200, 5000, 920, pink=0.5)
+        rms = float(np.sqrt(np.mean(bed ** 2))) or 1.0
+        fade = np.minimum(1, t / 0.6) * np.minimum(1, (seconds - t) / 1.0)
+        return (bed / rms * 0.06 * fade).astype(np.float32)
 
 
 def mix_audio(sim: Sim) -> np.ndarray:
@@ -841,7 +857,7 @@ def mix_audio(sim: Sim) -> np.ndarray:
     last = {"tick": -1.0, "knock": -1.0, "thud": -1.0, "note": -1.0, "pop": -1.0}
     gaps = {"tick": 0.035, "knock": 0.05, "thud": 0.06, "note": 0.06, "pop": 0.03}
     for et, kind, val, vol in sim.events:
-        if kind in gaps:                  # keep a flood musical, not noise
+        if kind in gaps:                  # a flood stays a soft patter, not a roar
             if et - last[kind] < gaps[kind] and not (kind == "pop" and val >= 3):
                 continue
             last[kind] = et
@@ -852,11 +868,8 @@ def mix_audio(sim: Sim) -> np.ndarray:
         seg = fx[i:i + len(w)]
         seg += w[:len(seg)] * (0.35 + 0.65 * vol)
     fx = np.tanh(fx * 1.4) * 0.85
-    music = v.music(sim.t + 1)[:n]
-    if sim.done_at is not None:           # music dips under the fanfare
-        s0 = int(sim.done_at * SR)
-        music[s0:] *= np.maximum(0.25, 1 - (np.arange(n - s0) / SR)).astype(np.float32)
-    mix = fx + music * 0.9
+    bed = v.music(sim.t + 1)[:n]
+    mix = fx + bed
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
 
 

@@ -457,8 +457,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   frog > chicken > cat > dog > panda > lion > unicorn (bundled Fluent
   Emoji, not Cow Evolution's art). A ladder at the top reveals each animal;
   it ends on "EVOLVED!" at the unicorn. All audio is generated in numpy
-  (music loop, pling per multiply, pop per merge that deepens with size,
-  unlock chime, fanfare), so nothing can be claimed.
+  (see "Noise audio" below), so nothing can be claimed.
 - Physics is pymunk (added to requirements; `pip --dry-run --report`
   showed no other package version change, only cffi/pycparser added).
   Fixes from the prototype: a wider neck plus "the hole waits while 90
@@ -478,11 +477,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   kinematic bars, `ramps` = short steep deflectors over pegs, `bumpers`),
   jar (`box`, `bowl`, `flask`), ending text, and music key/scale/tempo.
   `--history file.json` keeps the theme off the last 3 videos and never
-  repeats a theme+course+jar combo. Ball sound: every peg hit plays a
-  marimba note by the peg's x position (left low, right high) in the
-  video's scale, so the course plays a tune; walls/ramps/spinners/bumpers
-  knock, a first landing in the jar thuds. Rate-limited per peg (0.1 s)
-  and per sound type in the mix.
+  repeats a theme+course+jar combo. Ball sound: every peg hit makes a
+  sound, walls/ramps/spinners/bumpers knock, a first landing in the jar
+  thuds. Rate-limited per peg (0.1 s) and per sound type in the mix.
+- **Noise audio (Oct 2026):** Dean found the musical audio (marimba notes
+  per peg, chimes, fanfare, a four-chord music loop) "horrible" and asked
+  for "more white noise". Now every sound is band-limited noise
+  (`_noise`/`_burst`, FFT-shaped, numpy only): marble-like taps per peg
+  (a bit brighter to the right, 3 takes each), knocks, a soft puff per
+  merge that deepens with size (+ a low thump from the 4th item up), a
+  whoosh landing on a thump for each reveal, a long whoosh + deep boom for
+  the last item, all over a quiet noise bed (rain / air / hush, picked per
+  video). No music, no melodies. The recipe's key/scale only seed the bed
+  choice and a small per-video pitch shift now. Don't bring tonal music
+  back without asking him.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips
