@@ -556,6 +556,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   /api/balls/videos/{id}/instagram`. Needs `INSTAGRAM_APP_ID` /
   `INSTAGRAM_APP_SECRET`. Own accounts need no App Review: the Instagram
   account is added as an Instagram Tester (accepted in the Instagram app).
+- **Facebook Login route (Oct 2026):** on both of Dean's Meta apps the
+  Instagram use case only offered "API setup with Facebook login" (no
+  Instagram-login setup, nothing under "Add more to this use case"), so
+  `INSTAGRAM_LOGIN` defaults to `facebook`: facebook.com dialog (scopes
+  `instagram_basic, instagram_content_publish, pages_show_list,
+  pages_read_engagement, business_management`, or `config_id` from
+  `INSTAGRAM_FB_CONFIG_ID`) -> user token -> `fb_exchange_token` long-lived
+  -> `/me/accounts` with `instagram_business_account` -> the first Page
+  with a linked Instagram account; its Page token (doesn't expire) is
+  stored with `graph: graph.facebook.com` and used for /media and
+  media_publish. @dropvolve must be linked to a Facebook Page. The
+  redirect URL goes in Facebook Login for Business -> Settings -> Valid
+  OAuth Redirect URIs; App ID/secret from App settings -> Basic. Dean is
+  the app admin, so no tester invite. `INSTAGRAM_LOGIN=instagram` keeps
+  the Instagram Login route.
 - Instagram's API can't schedule a post, and the Railway app sleeps, so
   posting is "📸 Post to Instagram" now, not on the YouTube schedule.
   Meta's hosts are blocked in the sandbox: tested with a fake `requests`.
