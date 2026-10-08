@@ -32,6 +32,11 @@ a long-form documentary series tool.
   split with a box-picker (once per job is enough: "apply to the other
   clips"), or you can untick "IRL layout" to have facecams auto-detected
   (OpenCV face detection with a Claude-vision check).
+- **Card style by default** — the whole-scene clips sit on a white card
+  like a social post: the channel's picture, name and handle, the hook as
+  the post text, then the video with captions over its bottom edge. Any
+  clip can be switched to the plain full-screen look and back (🪪 button),
+  or untick "Card style" for a job. `CLIPPER_BRAND_HANDLE` sets the handle.
 - **Karaoke-style burned-in captions** — word-by-word highlighted captions
   (ffmpeg/libass), plus a hook line at the top for the first 3 seconds, the
   channel mascot and name, and quiet pauses cut out.

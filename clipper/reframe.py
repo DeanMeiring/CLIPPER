@@ -86,7 +86,19 @@ class LetterboxLayout:
     way every other Layout does."""
 
 
-Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout, LetterboxLayout]
+@dataclass
+class CardLayout:
+    """The whole source frame, full width, on a white "post card" (Dean
+    liked the look of clip channels that frame the video like a social
+    post: profile picture, channel name and handle, the hook as the post
+    text, then the video). video_y/video_h place the frame on the 1080x1920
+    canvas; the header and captions are drawn by the clip's card .ass
+    (captions.build_card_ass), which decides the same geometry."""
+    video_y: int
+    video_h: int
+
+
+Layout = Union[CropWindow, SplitLayout, MultiCamSplitLayout, LetterboxLayout, CardLayout]
 
 # Detected overlay clusters beyond this are almost always detector noise
 # (Haar false-positives), not a real 4+-way co-stream -- and even a genuine

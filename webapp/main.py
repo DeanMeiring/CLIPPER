@@ -22,7 +22,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -30,7 +30,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass, clean_hook_text, hook_line_ass
+from clipper.captions import build_ass, build_card_ass, card_ass_path, clean_hook_text, hook_line_ass
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper import hook_line
 from clipper import documentary
@@ -54,6 +54,7 @@ from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessi
 from clipper.loud_moments import find_loud_moments
 from clipper.reframe import (
     MAX_COCAM_TILES,
+    CardLayout,
     LetterboxLayout,
     MultiCamSplitLayout,
     SplitLayout,
@@ -105,6 +106,8 @@ CHANNEL_PROFILES: dict = {
         "twitch_env": "TRENDING_TWITCH_LOGINS",
         "brand_name": os.environ.get("CLIPPER_BRAND_NAME", "Caught On Stream"),
         "mascot_accent": "00CCFF",
+        # Under the name on card-style clips (captions.build_card_ass).
+        "handle": os.environ.get("CLIPPER_BRAND_HANDLE", "@caughtonstream24"),
         "token_file": "_youtube_oauth_token.json",
         "page_path": "/",
         # Language Claude writes clip titles/hook text/descriptions in --
@@ -285,6 +288,10 @@ class JobRequest(BaseModel):
     # of auto-detecting a facecam. Any clip can still be switched to a
     # facecam split afterwards with the manual box-picker.
     irl_layout: bool = True
+    # Whole-scene clips as a white "post card" (channel picture, name and
+    # handle, the hook as the post text, then the video; see
+    # captions.build_card_ass). Any clip can be switched back by hand.
+    card_style: bool = True
     # Which tracked-streamer list / YouTube account / on-clip brand this job
     # belongs to (see CHANNEL_PROFILES). Defaults to the original channel so
     # every existing client that doesn't send this keeps working unchanged.
@@ -476,7 +483,7 @@ def _run_job(job_id: str) -> None:
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     profile = _profile_or_default(req.channel_profile)
     _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
-         channel_profile=profile, irl_layout=req.irl_layout)
+         channel_profile=profile, irl_layout=req.irl_layout, card_style=req.card_style)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -582,7 +589,7 @@ def _run_job(job_id: str) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, render_base, [],
         hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
-        channel_profile=profile, irl_layout=req.irl_layout,
+        channel_profile=profile, irl_layout=req.irl_layout, card_style=req.card_style,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
@@ -714,7 +721,7 @@ def _plan_edit(video_path: Path, pick, clip_words: List[Word], pacing: bool, tea
 def _render_all(
     job_id: str, out_dir: Path, render_items: list, render_base: float, clips_meta: list,
     hook_text: bool = True, pacing: bool = True, teaser: bool = False, branding: bool = True,
-    channel_profile: str = DEFAULT_CHANNEL_PROFILE, irl_layout: bool = True,
+    channel_profile: str = DEFAULT_CHANNEL_PROFILE, irl_layout: bool = True, card_style: bool = False,
 ) -> list:
     """Render each (video_path, words, pick) item to clip_{n}.mp4, appending
     to clips_meta (already containing any earlier clips) and updating job
@@ -725,7 +732,8 @@ def _render_all(
     control the edits in clipper/edit_plan.py; branding adds the channel
     mascot and name stamp -- channel_profile picks *which* channel's name/
     mascot colour (see CHANNEL_PROFILES). irl_layout renders every clip
-    as the whole scene; off, each clip's facecam is auto-detected."""
+    as the whole scene; off, each clip's facecam is auto-detected.
+    card_style turns a whole-scene clip into a post card (_card_layout)."""
     render_span = 1.0 - render_base
     start_index = len(clips_meta)
     profile_cfg = CHANNEL_PROFILES.get(channel_profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
@@ -753,8 +761,13 @@ def _render_all(
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
         build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
                   brand_name=brand_name, mascot_accent=mascot_accent)
+        render_ass = ass_path
+        if card_style and isinstance(layout, LetterboxLayout):
+            card = _card_layout(video_path, ass_path, burned_hook, branding, channel_profile)
+            if card is not None:
+                layout, render_ass = card, card_ass_path(ass_path)
         try:
-            _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path, plan=plan)
+            _render_atomic(video_path, pick.start, pick.end, layout, render_ass, out_path, plan=plan)
         except RuntimeError as e:
             if plan is None:
                 raise
@@ -765,7 +778,9 @@ def _render_all(
             caption_words, caption_start, out_duration = clip_words, pick.start, pick.end - pick.start
             build_ass(caption_words, caption_start, ass_path, hook_text=burned_hook, punchy=True, brand=branding,
                       brand_name=brand_name, mascot_accent=mascot_accent)
-            _render_atomic(video_path, pick.start, pick.end, layout, ass_path, out_path)
+            if isinstance(layout, CardLayout):
+                layout = _card_layout(video_path, ass_path, burned_hook, branding, channel_profile)
+            _render_atomic(video_path, pick.start, pick.end, layout, render_ass, out_path)
 
         facecam_uncertain = False
         source_frame_name = None
@@ -822,7 +837,12 @@ def _render_all(
                     fallback_layout = (
                         LetterboxLayout() if is_wide_scene else center_crop_layout(video_path, target_w=1080, target_h=1920)
                     )
-                    _render_atomic(video_path, pick.start, pick.end, fallback_layout, ass_path, out_path, plan=plan)
+                    fallback_ass = ass_path
+                    if card_style and is_wide_scene:
+                        card = _card_layout(video_path, ass_path, burned_hook, branding, channel_profile)
+                        if card is not None:
+                            fallback_layout, fallback_ass = card, card_ass_path(ass_path)
+                    _render_atomic(video_path, pick.start, pick.end, fallback_layout, fallback_ass, out_path, plan=plan)
                     final_layout = fallback_layout
                 except Exception as e:
                     print(f"[render] fallback re-render also failed, keeping the original render: {e}", flush=True)
@@ -892,7 +912,8 @@ def _render_all(
             # Rendered as the whole scene -- by default, or because a wide
             # multi-person shot was detected. The UI offers "switch to
             # facecam" for these.
-            "is_irl_scene": isinstance(final_layout, LetterboxLayout),
+            "is_irl_scene": isinstance(final_layout, (LetterboxLayout, CardLayout)),
+            "is_card": isinstance(final_layout, CardLayout),
             # The frame the manual box-picker draws on. Always saved now
             # (see above) so any clip's facecam can be overridden by hand,
             # not just ones the pipeline itself flagged as uncertain.
@@ -910,7 +931,36 @@ def _layout_name(layout) -> str:
         return "split"
     if isinstance(layout, LetterboxLayout):
         return "letterbox"
+    if isinstance(layout, CardLayout):
+        return "card"
     return "crop"
+
+
+def _source_size(video_path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        return (w, h) if w > 0 and h > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _card_layout(video_path: Path, ass_path: Path, hook: str, branding: bool,
+                 channel_profile: str = DEFAULT_CHANNEL_PROFILE) -> Optional[CardLayout]:
+    """Write the clip's card .ass (from its normal .ass) and return the
+    CardLayout to render it with -- or None for a source that isn't wide
+    (a vertical video fills the screen already; it stays letterboxed)."""
+    size = _source_size(video_path)
+    if not size or size[0] < size[1]:
+        return None
+    video_h = max(2, int(round(1080 * size[1] / size[0] / 2)) * 2)
+    cfg = CHANNEL_PROFILES.get(channel_profile) or CHANNEL_PROFILES[DEFAULT_CHANNEL_PROFILE]
+    geo = build_card_ass(ass_path, card_ass_path(ass_path), video_h, hook_text=hook, brand=branding,
+                         brand_name=cfg["brand_name"], handle=cfg.get("handle"), mascot_accent=cfg["mascot_accent"])
+    return CardLayout(video_y=geo["video_y"], video_h=video_h)
 
 
 def _registry_id(job_id: str, clip: dict) -> str:
@@ -1332,6 +1382,9 @@ def _run_regenerate(job_id: str, req: dict) -> None:
         # Older jobs predate the flag; their new clips follow the current
         # default rather than the old auto-detected facecam behaviour.
         irl_layout = job.get("irl_layout", True)
+        # Jobs from before card style get it on their new clips too (Dean
+        # chose it as the look for everything).
+        card_style = job.get("card_style", True)
         # reset_used ("start fresh") deliberately ignores which windows/
         # ranges earlier clips came from when SELECTING this batch, so it
         # can freely re-pick from the whole candidate pool -- the tradeoff
@@ -1418,7 +1471,7 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     clips_meta = _render_all(
         job_id, out_dir, render_items, 0.15, existing_clips,
         hook_text=hook_text, pacing=pacing, teaser=teaser, branding=branding,
-        channel_profile=channel_profile, irl_layout=irl_layout,
+        channel_profile=channel_profile, irl_layout=irl_layout, card_style=card_style,
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
@@ -1476,6 +1529,7 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
                     c["facecam_manual"] = True
                     c["facecam_boxes"] = [list(b) for b in boxes]
                     c["is_irl_scene"] = False
+                    c["is_card"] = False
         _persist(job_id)
 
     _progress(job_id, 1.0)
@@ -1506,12 +1560,16 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
     with jobs_lock:
         by_file = {c.get("file"): c for c in (jobs[job_id].get("clips") or [])}
 
+    want_card = bool(req.get("card"))
+    with jobs_lock:
+        profile = jobs[job_id].get("channel_profile", DEFAULT_CHANNEL_PROFILE)
+    what = "a card" if want_card else "an IRL scene"
     updated, failed = [], []
     for i, filename in enumerate(filenames):
         cancel()
         clip = by_file.get(filename)
         label = (clip or {}).get("title") or filename
-        _set(job_id, state="rendering", message=f'Re-rendering as an IRL scene: "{label}"')
+        _set(job_id, state="rendering", message=f'Re-rendering as {what}: "{label}"')
         _progress(job_id, i / max(len(filenames), 1))
         try:
             if clip is None:
@@ -1524,14 +1582,21 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
             ass_path = out_dir / f"_{Path(filename).stem}.ass"
             if not ass_path.exists():
                 raise RuntimeError("its caption file is missing")
-            _render_atomic(video_path, clip["start"], clip["end"], LetterboxLayout(), ass_path, out_dir / filename,
+            layout, render_ass = LetterboxLayout(), ass_path
+            if want_card:
+                layout = _card_layout(video_path, ass_path, clip.get("hook_text") or "",
+                                      clip.get("branding", True), profile)
+                if layout is None:
+                    raise RuntimeError("its source is a vertical video -- it already fills the screen")
+                render_ass = card_ass_path(ass_path)
+            _render_atomic(video_path, clip["start"], clip["end"], layout, render_ass, out_dir / filename,
                            plan=EditPlan.from_dict(clip.get("edit_plan")))
         except Exception as e:  # noqa: BLE001 - one clip failing shouldn't lose the rest of the batch
             print(f"[render] manual IRL re-render of {filename} failed: {e}", flush=True)
             failed.append(f"{filename}: {e}")
             continue
         updated.append(filename)
-        clip_registry.update_fields(_clip_registry_path, _registry_id(job_id, clip), layout="letterbox")
+        clip_registry.update_fields(_clip_registry_path, _registry_id(job_id, clip), layout=_layout_name(layout))
         with jobs_lock:
             for c in jobs[job_id].get("clips") or []:
                 if c.get("file") == filename:
@@ -1539,13 +1604,14 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
                     c["facecam_trusted"] = False
                     c["facecam_manual"] = False
                     c["is_irl_scene"] = True
+                    c["is_card"] = want_card
         _persist(job_id)
 
     _progress(job_id, 1.0)
     if not updated:
-        _set(job_id, state="error", error="Couldn't re-render as an IRL scene -- " + "; ".join(failed))
+        _set(job_id, state="error", error=f"Couldn't re-render as {what} -- " + "; ".join(failed))
         return
-    message = f"Done -- {len(updated)} clip(s) re-rendered as an IRL scene."
+    message = f"Done -- {len(updated)} clip(s) re-rendered as {what}."
     if failed:
         message += " Skipped " + "; ".join(failed)
     _set(job_id, state="done", message=message)
@@ -1879,7 +1945,7 @@ def set_facecam_boxes(job_id: str, filename: str, req: FacecamBoxesRequest) -> d
 
 
 @protected.post("/api/jobs/{job_id}/clips/{filename}/mark-irl")
-def mark_clip_irl(job_id: str, filename: str) -> dict:
+def mark_clip_irl(job_id: str, filename: str, card: Optional[bool] = None) -> dict:
     """Re-render one clip as a plain letterboxed wide shot -- the override
     for when auto-detection (see reframe.compute_layout,
     facecam_vision.detect_wide_scene) still thought there was a facecam
@@ -1887,7 +1953,9 @@ def mark_clip_irl(job_id: str, filename: str) -> dict:
     misread. No boxes needed, unlike facecam-boxes -- there's nothing to
     draw a box around. Only ever targets the one clip clicked: unlike
     facecam placement, "this is IRL" doesn't generalize to other clips in
-    the same job the way one fixed camera layout does."""
+    the same job the way one fixed camera layout does. card: as a post
+    card (true) or the plain whole scene (false); unset follows the job's
+    card style setting -- also how a clip is switched between those two."""
     if Path(filename).name != filename:
         raise HTTPException(400, "bad filename")
     with jobs_lock:
@@ -1904,9 +1972,11 @@ def mark_clip_irl(job_id: str, filename: str) -> dict:
         raw_dir = BASE_DIR / job_id / "_source"
         if not (raw_dir / clip["source_video"]).exists():
             raise HTTPException(409, "the downloaded source is gone -- resubmit the URL instead")
-        job["pending_manual_letterbox"] = {"filenames": [filename]}
+        if card is None:
+            card = bool(job.get("card_style", True))
+        job["pending_manual_letterbox"] = {"filenames": [filename], "card": card}
         job["state"] = "queued"
-        job["message"] = "Queued -- re-rendering as an IRL scene"
+        job["message"] = "Queued -- re-rendering as a card" if card else "Queued -- re-rendering as an IRL scene"
         job["progress"] = 0.0
         job["error"] = None
         cancel_events[job_id] = threading.Event()
@@ -6796,6 +6866,11 @@ __NAV_LINKS__
 </div>
 
 <div class="checkbox-row">
+  <input id="card_style" type="checkbox" checked>
+  <label for="card_style">Card style<div class="hint">Puts the whole-scene clips on a white card like a post: your picture, channel name and handle, the hook text on top, then the video. Any clip can be switched back with its 🪪 button.</div></label>
+</div>
+
+<div class="checkbox-row">
   <input id="hook_text" type="checkbox" checked>
   <label for="hook_text">Hook text on screen<div class="hint">Puts a short line at the top of each clip for its first 3 seconds, saying why to keep watching. That's when viewers decide whether to swipe away.</div></label>
 </div>
@@ -7468,6 +7543,7 @@ async function submitJob() {
     teaser: document.getElementById('teaser').checked,
     branding: document.getElementById('branding').checked,
     irl_layout: document.getElementById('irl_layout').checked,
+    card_style: document.getElementById('card_style').checked,
     channel_profile: currentProfile,
   };
   const resp = await fetch('/api/jobs', {
@@ -8332,6 +8408,31 @@ async function poll(jobId) {
           : (c.facecam_manual || c.facecam_trusted) ? '🎯 Adjust facecam' : '🎯 Add facecam';
         fixBtn.addEventListener('click', () => openFacecamModal(jobId, c, facecamOthersMissing(job, c)));
         secondaryRow.appendChild(fixBtn);
+
+        if (c.is_irl_scene && c.source_video) {
+          // Switch a whole-scene clip between the post card and the plain
+          // full-screen look (same captions, re-rendered).
+          const cardBtn = document.createElement('button');
+          cardBtn.type = 'button';
+          cardBtn.textContent = c.is_card ? '🪪 Switch to old look' : '🪪 Switch to card style';
+          cardBtn.addEventListener('click', async () => {
+            cardBtn.disabled = true;
+            cardBtn.textContent = 'Starting...';
+            try {
+              const r = await fetch(`/api/jobs/${jobId}/clips/${c.file}/mark-irl?card=${c.is_card ? 'false' : 'true'}`, { method: 'POST' });
+              if (!r.ok) {
+                const data = await r.json().catch(() => ({}));
+                alert(data.detail || 'Could not start the re-render.');
+                return;
+              }
+              loadJobsList();
+              attachToJob(jobId);
+            } finally {
+              cardBtn.disabled = false;
+            }
+          });
+          secondaryRow.appendChild(cardBtn);
+        }
       }
 
       const delClipBtn = document.createElement('button');

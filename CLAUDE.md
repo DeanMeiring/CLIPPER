@@ -644,6 +644,25 @@ merge it yourself; merging stays Dean's call per the rule above.
   "Switch to facecam" button opens the manual box-picker, and "apply to
   the other clips" converts a whole job. Unticking "IRL layout" brings back
   automatic facecam detection (`compute_layout`). Dean chose this default.
+- **Card style (Oct 2026, default):** Dean liked the "Cheerful Videos"
+  look and asked for it on every clip, switchable by hand. A whole-scene
+  clip renders as `reframe.CardLayout(video_y, video_h)`: white 1080x1920,
+  the mascot as the profile picture, channel name + handle (profile
+  `handle`, `CLIPPER_BRAND_HANDLE`, default "@caughtonstream24"), the hook
+  as the post text for the whole clip (Inter, wrapped by measuring with
+  Pillow, shrinks past 3 lines), then the whole frame at full width, the
+  spoken captions over its bottom edge. No blue verified tick (claiming
+  verification you don't have reads as misleading); Dean was told.
+  `captions.build_card_ass` makes `_clip_NN.card.ass` FROM the clip's
+  normal `_clip_NN.ass` (its caption lines keep their timing), so the
+  normal file is untouched and facecam re-renders keep using it; any clip,
+  old ones too, can switch. Render: `scale` + `pad` (keeps the source fps),
+  `render.ass_filter` adds the bundled fonts dir only for `.card.ass`
+  files, so normal clips burn exactly as before. `JobRequest.card_style`
+  (default on; old jobs' new clips get it too) applies wherever the
+  letterbox would be used, vertical sources stay letterboxed. Per clip:
+  "🪪 Switch to old look / card style" = `POST .../mark-irl?card=`
+  (no flag follows the job). Registry layout name "card".
 
 ## Gotchas
 
