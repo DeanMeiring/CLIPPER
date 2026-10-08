@@ -591,6 +591,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   stays taken and the autopilot doesn't post a second one there. "🚀 Post
   now to YouTube + Instagram" (`POST .../post-both`) shows when Instagram
   is connected.
+  Restarts (a deploy, Railway waking the app) used to leave the autopilot
+  idle until the page was opened: now a startup thread restarts the loop
+  when autopilot is on, and every tick runs `_balls_resume` (requeues a
+  video a restart cut off mid-make, starts the worker for queued ones).
 
 ## Instagram posting (Oct 2026)
 
