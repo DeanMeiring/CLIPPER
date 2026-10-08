@@ -216,6 +216,7 @@ clipper/                    # pipeline + CLI, importable on its own
   voice_clone.py             # long-form: your cloned voice (Pocket TTS)
   ball_evolution.py          # physics Shorts: things multiply and merge up an evolution chain
   ball_channel.py            # the Ball Evolution page's videos and settings on disk
+  instagram.py               # post Reels to an Instagram professional account
   assets/                    # bundled emoji (Fluent Emoji 3D, MIT) and fonts (OFL)
 webapp/
   main.py                    # FastAPI app: job queue, API routes, HTML pages
@@ -350,6 +351,7 @@ or a local `.env`), never hardcoded.
 | `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) | long-form AI voice | Hugging Face token from an account that accepted the terms at huggingface.co/kyutai/pocket-tts |
 | `PEXELS_API_KEY` / `PIXABAY_API_KEY` | long-form stock video | free keys; without them stock video is skipped |
 | `CLIPPER_FFMPEG` | — | ffmpeg binary for long-form rendering (optional; default `ffmpeg`) |
+| `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` | Ball Evolution → Instagram | Meta app (Instagram API with Instagram Login); without them the Instagram buttons don't show |
 
 ### Channel profiles
 
