@@ -26,6 +26,7 @@ DEFAULT_SETTINGS = {
     "post_time": "17:00",
     "watermark": "",
     "description": "",
+    "bed": "auto",          # background sound: auto / rain / air / hush / off
 }
 
 
