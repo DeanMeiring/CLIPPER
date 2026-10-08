@@ -48,6 +48,7 @@ from clipper import ranking
 from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_evolution
+from clipper import instagram
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -153,6 +154,15 @@ EXTRA_YOUTUBE_ACCOUNTS: dict = {
 }
 for _acct, _cfg in EXTRA_YOUTUBE_ACCOUNTS.items():
     _youtube_token_stores[_acct] = youtube_oauth.TokenStore(BASE_DIR / _cfg["token_file"])
+
+# Instagram accounts the app can post Reels to (clipper/instagram.py), each
+# with its own token file and the page its Connect button returns to.
+INSTAGRAM_ACCOUNTS: dict = {
+    "balls": {"label": "Ball Evolution", "page_path": "/ball-evolution"},
+}
+_instagram_stores: dict = {acct: instagram.TokenStore(BASE_DIR / f"_instagram_token_{acct}.json")
+                           for acct in INSTAGRAM_ACCOUNTS}
+_instagram_oauth_states: dict = {}
 
 
 def _oauth_account(profile: Optional[str]) -> str:
@@ -2677,6 +2687,80 @@ def youtube_callback(code: str = "", state: str = "", error: str = "") -> Redire
 def youtube_disconnect(profile: str = DEFAULT_CHANNEL_PROFILE) -> dict:
     _youtube_token_stores[_oauth_account(profile)].clear()
     return {"ok": True}
+
+
+def _instagram_redirect_uri() -> str:
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        raise HTTPException(400, "RAILWAY_PUBLIC_DOMAIN isn't set -- can't build the Instagram redirect URL")
+    return f"https://{domain}/auth/instagram/callback"
+
+
+@protected.get("/auth/instagram/login")
+def instagram_login(account: str) -> RedirectResponse:
+    if account not in INSTAGRAM_ACCOUNTS:
+        raise HTTPException(404, "unknown Instagram account")
+    if not instagram.is_configured():
+        raise HTTPException(400, "INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET aren't set on Railway yet.")
+    state = secrets.token_urlsafe(24)
+    cutoff = time.time() - 600
+    for s_, (issued_at, _a) in list(_instagram_oauth_states.items()):
+        if issued_at < cutoff:
+            _instagram_oauth_states.pop(s_, None)
+    _instagram_oauth_states[state] = (time.time(), account)
+    return RedirectResponse(instagram.authorize_url(_instagram_redirect_uri(), state))
+
+
+@protected.get("/auth/instagram/callback")
+def instagram_callback(code: str = "", state: str = "", error: str = "",
+                       error_description: str = "") -> RedirectResponse:
+    issued = _instagram_oauth_states.pop(state, None)
+    if issued is None or time.time() - issued[0] > 600:
+        raise HTTPException(400, "invalid or expired Instagram login attempt -- try connecting again")
+    page = INSTAGRAM_ACCOUNTS[issued[1]]["page_path"]
+    if error or not code:
+        return RedirectResponse(f"{page}?instagram_error={error or 'no_code'}")
+    try:
+        token = instagram.exchange_code(code.split("#")[0], _instagram_redirect_uri())
+    except Exception as e:
+        print(f"[instagram] connect failed: {e}")
+        return RedirectResponse(f"{page}?instagram_error=exchange_failed")
+    _instagram_stores[issued[1]].save(token)
+    return RedirectResponse(f"{page}?instagram_connected=1")
+
+
+@protected.post("/api/instagram/disconnect")
+def instagram_disconnect(account: str) -> dict:
+    if account not in INSTAGRAM_ACCOUNTS:
+        raise HTTPException(404, "unknown Instagram account")
+    _instagram_stores[account].clear()
+    return {"ok": True}
+
+
+# Instagram downloads a Reel's video itself, from a public URL. Each post
+# gets a random one-off link (no app password) that works for an hour.
+_instagram_media_links: dict = {}   # token -> (path, expires_at)
+
+
+def _instagram_public_url(path: Path) -> str:
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        raise HTTPException(400, "RAILWAY_PUBLIC_DOMAIN isn't set -- Instagram needs a public link to the video")
+    now = time.time()
+    for t, (_p, exp) in list(_instagram_media_links.items()):
+        if exp < now:
+            _instagram_media_links.pop(t, None)
+    token = secrets.token_urlsafe(24)
+    _instagram_media_links[token] = (path, now + 3600)
+    return f"https://{domain}/ig-media/{token}.mp4"
+
+
+@app.get("/ig-media/{token}.mp4")
+def instagram_media(token: str) -> FileResponse:
+    link = _instagram_media_links.get(token)
+    if not link or link[1] < time.time() or not link[0].is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(link[0], media_type="video/mp4")
 
 
 def _gather_channel_insights_data() -> dict:
@@ -5851,6 +5935,9 @@ def _balls_view(v: dict) -> dict:
         c["status"] = "posted"
     if c.get("status") == "uploading" and c["id"] not in _balls_uploading:
         c["status"] = "ready"   # the server restarted mid-upload
+    ig = c.get("instagram") or {}
+    if ig.get("status") == "posting" and c["id"] not in _balls_instagram:
+        c["instagram"] = {"status": "error", "error": "The server restarted while posting -- try again."}
     try:
         c["has_video"] = (_balls.video_dir(c["id"]) / "video.mp4").is_file()
     except KeyError:
@@ -5909,6 +5996,7 @@ def balls_state() -> dict:
             "next_slot": slot, "uploads_today": _balls_uploads_today(videos),
             "uploads_per_day": BALLS_UPLOADS_PER_DAY, "connected": _youtube_token_stores[BALLS_PROFILE].is_connected(),
             "storage_mb": round(used / 1e6),
+            "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
             "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS}}
 
 
@@ -6013,6 +6101,52 @@ def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
     yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
           "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
     return _balls_view(_balls.update(vid, lambda v: v.update(status="scheduled" if slot else "posted", youtube=yt)))
+
+
+_balls_instagram: set = set()     # videos being posted to Instagram right now
+
+
+def _balls_post_instagram(vid: str, token: dict) -> None:
+    try:
+        video = _balls.load(vid)
+        s = _balls.settings()
+        desc = (video.get("description") or "").strip()
+        if (s.get("description") or "").strip():
+            desc = (desc + "\n\n" + s["description"].strip()).strip()
+        url = _instagram_public_url(_balls.video_dir(vid) / "video.mp4")
+        res = instagram.publish_reel(token, url, instagram.caption_for(video.get("title") or "", desc))
+        _balls.update(vid, lambda v: v.update(instagram={"status": "posted", "posted_at": time.time(), **res}))
+    except Exception as e:
+        msg = str(e) if isinstance(e, (instagram.InstagramError, HTTPException)) else "Posting to Instagram failed."
+        if isinstance(e, HTTPException):
+            msg = e.detail
+        print(f"[instagram] post {vid} failed: {e}")
+        try:
+            _balls.update(vid, lambda v: v.update(instagram={"status": "error", "error": msg}))
+        except (KeyError, OSError, ValueError):
+            pass
+    finally:
+        _balls_instagram.discard(vid)
+
+
+@protected.post("/api/balls/videos/{vid}/instagram")
+def balls_instagram(vid: str) -> dict:
+    """Post the video to the connected Instagram account as a Reel, now.
+    Runs in the background: Instagram takes a minute or two to process it."""
+    video = _balls_video(vid)
+    if not (_balls.video_dir(vid) / "video.mp4").is_file():
+        raise HTTPException(409, "That video's file is gone (deleted a few days after it went public).")
+    if vid in _balls_instagram:
+        raise HTTPException(409, "It's already being posted.")
+    if (video.get("instagram") or {}).get("status") == "posted":
+        raise HTTPException(409, "It's already on Instagram.")
+    token = _instagram_stores["balls"].get_valid()
+    if not token:
+        raise HTTPException(409, "Connect Instagram first (top of this page).")
+    _balls_instagram.add(vid)
+    _balls.update(vid, lambda v: v.update(instagram={"status": "posting", "started_at": time.time()}))
+    threading.Thread(target=_balls_post_instagram, args=(vid, token), daemon=True).start()
+    return _balls_view(_balls.load(vid))
 
 
 @protected.delete("/api/balls/videos/{vid}")
@@ -10680,6 +10814,7 @@ __NAV_LINKS__
   <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
   <p class="subtitle">Satisfying physics Shorts for their own channel. One ball drops, gold pegs multiply it, and matching ones merge into something bigger until the last one appears. Every video gets a different theme, course, jar and music, and the page never repeats a combination.</p>
   <div id="conn" class="status"></div>
+  <div id="igconn" class="status" style="margin-top:8px"></div>
 
   <div class="section">
     <h3>🎬 Make videos</h3>
@@ -10733,7 +10868,8 @@ async function load() {
   S = await api('/api/balls');
   render();
   clearTimeout(poll);
-  if (S.videos.some(v => MAKING.includes(v.status))) poll = setTimeout(() => load().catch(() => {}), 3000);
+  if (S.videos.some(v => MAKING.includes(v.status) || (v.instagram || {}).status === 'posting'))
+    poll = setTimeout(() => load().catch(() => {}), 3000);
 }
 function fillOptions() {
   if (filled) return;
@@ -10757,6 +10893,7 @@ function render() {
     const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=balls'; a.target = '_blank'; conn.appendChild(a);
     conn.appendChild(el('div', 'hint', 'If Google says the app is blocked or not verified, add that Google account as a test user in Google Cloud (OAuth consent screen → Test users), like your other accounts.'));
   }
+  renderInstagram();
   const st = S.settings;
   if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
@@ -10796,6 +10933,25 @@ $('make').onclick = async () => {
 };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load().catch(() => {}); });
 
+function renderInstagram() {
+  const box = $('igconn'), ig = S.instagram || {};
+  box.innerHTML = '';
+  if (ig.connected) {
+    box.className = 'status ok';
+    box.appendChild(document.createTextNode(`📸 Instagram connected${ig.username ? ' (@' + ig.username + ')' : ''}: videos can be posted there as Reels. `));
+    const d = el('a', '', 'Disconnect'); d.href = '#';
+    d.onclick = async (e) => { e.preventDefault(); if (!confirm('Disconnect Instagram?')) return;
+      try { await api('/api/instagram/disconnect?account=balls', { method: 'POST' }); } catch (err) { alert(err.message); } load(); };
+    box.appendChild(d);
+  } else if (!ig.configured) {
+    box.className = 'status';
+    box.textContent = '📸 Instagram isn’t set up yet: add INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET on Railway (see the setup steps), then a Connect button shows here.';
+  } else {
+    box.className = 'status';
+    box.appendChild(document.createTextNode(ig.expired ? '📸 The Instagram connection expired (it lasts 60 days unless used). ' : '📸 Connect the channel’s Instagram (a professional account) to post videos there as Reels. '));
+    const a = el('a', '', '🔗 Connect Instagram'); a.href = '/auth/instagram/login?account=balls'; a.target = '_blank'; box.appendChild(a);
+  }
+}
 function renderVideos() {
   const tabs = $('tabs'); tabs.innerHTML = '';
   for (const [k, label] of [['todo', 'To post'], ['scheduled', 'Scheduled'], ['posted', 'Posted']]) {
@@ -10860,6 +11016,14 @@ function card(v) {
   const sl = el('div', 'st ' + msg[0], msg[1]);
   if (yt.url) { sl.appendChild(document.createTextNode(' ')); const a = el('a', '', 'Open on YouTube'); a.href = yt.url; a.target = '_blank'; sl.appendChild(a); }
   f.appendChild(sl);
+  const ig = v.instagram || {};
+  if (ig.status) {
+    const im = ig.status === 'posting' ? ['wait', '📸 Posting to Instagram… (Instagram takes a minute or two)']
+      : ig.status === 'posted' ? ['ok', '📸 On Instagram.'] : ['bad', '📸 Instagram: ' + (ig.error || 'failed')];
+    const il = el('div', 'st ' + im[0], im[1]);
+    if (ig.permalink) { il.appendChild(document.createTextNode(' ')); const a = el('a', '', 'Open on Instagram'); a.href = ig.permalink; a.target = '_blank'; il.appendChild(a); }
+    f.appendChild(il);
+  }
   if (making) {
     const bar = el('div', 'bar'), fill = el('div');
     fill.style.width = (v.status === 'rendering' ? Math.round((v.progress || 0) * 100) : v.status === 'picking' ? 3 : 0) + '%';
@@ -10872,6 +11036,12 @@ function card(v) {
     btn('🚀 Post now', 'secondary', () => { if (confirm('Post it publicly right now instead of on its day?')) schedule(v, true); }, !S.connected);
   }
   if (v.status === 'error') btn('↻ Try again', '', async () => { try { await api(`/api/balls/videos/${v.id}/retry`, { method: 'POST' }); } catch (e) { alert(e.message); } load(); });
+  if (v.has_video && !making && (S.instagram || {}).connected && !['posting', 'posted'].includes(ig.status))
+    btn(ig.status === 'error' ? '📸 Try Instagram again' : '📸 Post to Instagram', 'secondary', async () => {
+      if (!confirm('Post this to Instagram as a Reel now?')) return;
+      try { await api(`/api/balls/videos/${v.id}/instagram`, { method: 'POST' }); } catch (e) { alert(e.message); }
+      load();
+    });
   if (v.has_video) btn('⬇ Download', 'secondary', () => { location.href = `/api/balls/videos/${v.id}/video?download=true`; });
   const del = btn(making ? '✖ Cancel' : '🗑 Delete', 'danger-link', async () => {
     if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone).' : making ? 'Stop making this one?' : 'Delete this video?')) return;
@@ -10900,7 +11070,8 @@ $('sched-all').onclick = async () => {
   load();
 };
 const params = new URLSearchParams(location.search);
-if (params.has('youtube_connected')) history.replaceState(null, '', '/ball-evolution');
+if (params.has('instagram_error')) alert('Connecting Instagram didn’t work (' + params.get('instagram_error') + '). Check the setup steps and try again.');
+if (params.has('youtube_connected') || params.has('instagram_connected') || params.has('instagram_error')) history.replaceState(null, '', '/ball-evolution');
 load().catch(e => alert(e.message));
 </script>
 </body>

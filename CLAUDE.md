@@ -530,6 +530,36 @@ merge it yourself; merging stays Dean's call per the rule above.
   Uploads are `selfDeclaredMadeForKids: False` like every upload here;
   Dean was told to decide whether this channel is "made for kids".
 
+## Instagram posting (Oct 2026)
+
+- Dean pasted Meta's Content Publishing docs and asked to set it up, for
+  the Ball Evolution channel ("Dropvolve", the name/pfp/banner/bio were
+  made for him in the sandbox) first. `clipper/instagram.py` uses the
+  Instagram API with Instagram Login (no Facebook Page): authorize at
+  instagram.com/oauth/authorize (scopes `instagram_business_basic,
+  instagram_business_content_publish`, `force_reauth`), code -> short
+  token (api.instagram.com/oauth/access_token, response wrapped in
+  `data[]`) -> 60-day token (`ig_exchange_token`) + `/me` user_id/username,
+  stored in `BASE_DIR/_instagram_token_<account>.json`, refreshed
+  (`ig_refresh_token`) once over a day old with < 20 days left.
+- Posting a Reel: Instagram downloads the video itself, so the app serves
+  it at a public one-off link `/ig-media/<token>.mp4` (no app password,
+  random token, 1 hour, in memory). Container (`media_type=REELS`,
+  `share_to_feed`) -> poll `status_code` every 10 s until FINISHED (10 min
+  cap) -> `media_publish` -> permalink. Runs in a background thread; the
+  video's json gets `instagram: {status: posting|posted|error, ...}`.
+  Caption = YouTube title + description, "#Shorts" removed.
+- `INSTAGRAM_ACCOUNTS` in `webapp/main.py` holds just "balls"; routes
+  `/auth/instagram/login?account=`, `/auth/instagram/callback` (redirect
+  URL to register in the Meta app: `https://<RAILWAY_PUBLIC_DOMAIN>/auth/
+  instagram/callback`), `POST /api/instagram/disconnect`, `POST
+  /api/balls/videos/{id}/instagram`. Needs `INSTAGRAM_APP_ID` /
+  `INSTAGRAM_APP_SECRET`. Own accounts need no App Review: the Instagram
+  account is added as an Instagram Tester (accepted in the Instagram app).
+- Instagram's API can't schedule a post, and the Railway app sleeps, so
+  posting is "📸 Post to Instagram" now, not on the YouTube schedule.
+  Meta's hosts are blocked in the sandbox: tested with a fake `requests`.
+
 ## Clip layout
 
 - Clips render in the IRL layout by default (`reframe.LetterboxLayout`,
