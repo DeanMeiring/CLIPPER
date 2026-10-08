@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -45,6 +46,8 @@ from clipper import longform_promo
 from clipper import longform_thumbnail
 from clipper import ranking
 from clipper import rocket_league
+from clipper import ball_channel
+from clipper import ball_evolution
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
 from clipper.loud_moments import find_loud_moments
@@ -144,6 +147,9 @@ EXTRA_YOUTUBE_ACCOUNTS: dict = {
     explainer.PROFILE: {"label": explainer.CHANNEL, "token_file": "_youtube_oauth_token_code.json",
                         "page_path": "/caught-on-code"},
     RL_PROFILE: {"label": "Rocket League", "token_file": "_youtube_oauth_token_rl.json", "page_path": "/rocket-league"},
+    # Ball Evolution physics Shorts (clipper/ball_evolution.py), /ball-evolution
+    "balls": {"label": "Ball Evolution", "token_file": "_youtube_oauth_token_balls.json",
+              "page_path": "/ball-evolution"},
 }
 for _acct, _cfg in EXTRA_YOUTUBE_ACCOUNTS.items():
     _youtube_token_stores[_acct] = youtube_oauth.TokenStore(BASE_DIR / _cfg["token_file"])
@@ -3094,6 +3100,11 @@ def rocket_league_page() -> str:
     return RL_HTML.replace("__NAV_LINKS__", _nav_links("/rocket-league"))
 
 
+@protected.get("/ball-evolution", response_class=HTMLResponse)
+def ball_evolution_page() -> str:
+    return BALLS_HTML.replace("__NAV_LINKS__", _nav_links("/ball-evolution"))
+
+
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
 # A bi-weekly series on the main (Caught On Stream) channel, a different
 # streamer each episode. Research -> story -> record -> render -> post.
@@ -5711,6 +5722,328 @@ def rl_settings(req: RLSettings) -> dict:
     return _rl.save_settings(data)
 
 
+
+# ---- Ball Evolution: physics Shorts for their own channel --------------------
+# clipper/ball_evolution.py makes a video from a recipe (theme, course, jar,
+# music key...); clipper/ball_channel.py keeps them in BASE_DIR/_balls/. Its
+# own YouTube account ("balls", see EXTRA_YOUTUBE_ACCOUNTS) and page. Videos
+# are made one at a time by a background worker that runs the generator as
+# a separate process (`python -m clipper.ball_evolution --progress`), so a
+# 3-5 minute render never holds the web server's GIL or threads.
+_balls = ball_channel.Store(BASE_DIR / "_balls")
+BALLS_PROFILE = "balls"
+BALLS_UPLOADS_PER_DAY = 2   # the YouTube upload quota is shared with every other channel here
+BALLS_KEEP_DAYS = 3         # a posted Short's video is kept this long, then deleted to save space
+BALLS_MAX_QUEUE = 10
+BALLS_TIMEOUT = 40 * 60     # a make that runs longer than this is stuck
+_BALLS_MAKING = ("queued", "picking", "rendering")
+_balls_worker: Optional[threading.Thread] = None
+_balls_worker_lock = threading.Lock()
+_balls_active: dict = {}    # video id -> the running generator process
+_balls_uploading: set = set()
+_balls_cancelled: set = set()
+
+
+def _balls_video(vid: str) -> dict:
+    try:
+        return _balls.load(vid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "video not found")
+
+
+def _balls_start_worker() -> None:
+    global _balls_worker
+    with _balls_worker_lock:
+        if _balls_worker is not None and _balls_worker.is_alive():
+            return
+        _balls_worker = threading.Thread(target=_balls_work, name="ball-evolution", daemon=True)
+        _balls_worker.start()
+
+
+def _balls_work() -> None:
+    while True:
+        queued = [v for v in _balls.videos() if v.get("status") == "queued"]
+        if not queued:
+            return
+        try:
+            _balls_make(queued[0]["id"])
+        except Exception:
+            traceback.print_exc()
+            try:
+                _balls.update(queued[0]["id"], lambda v: v.update(status="error", error="Something went wrong making this one."))
+            except (KeyError, OSError, ValueError):
+                pass
+
+
+def _balls_make(vid: str) -> None:
+    video = _balls.load(vid)
+    opts = video.get("options") or {}
+    settings = _balls.settings()
+    recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
+                                        opts.get("theme"), opts.get("course"), opts.get("jar"))
+    recipe["watermark"] = settings.get("watermark") or ""
+    out_dir = _balls.video_dir(vid)
+    tmp = out_dir / "video.part.mp4"
+    cmd = [sys.executable, "-m", "clipper.ball_evolution", str(tmp), "--recipe", json.dumps(recipe), "--progress"]
+    proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent.parent), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    _balls_active[vid] = proc
+    try:
+        _balls.update(vid, lambda v: v.update(status="picking", recipe=recipe, progress=0.0, tried=0,
+                                              error=None, started_at=time.time()))
+        killer = threading.Timer(BALLS_TIMEOUT, proc.kill)
+        killer.start()
+        tail: List[str] = []
+        info = None
+        last = 0.0
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                tail = (tail + [line])[-8:]
+                if line.startswith("PROGRESS pick "):
+                    n = int(line.split()[-1])
+                    _balls.update(vid, lambda v: v.update(tried=n))
+                elif line.startswith("PROGRESS render "):
+                    f = float(line.split()[-1])
+                    if f - last >= 0.02:
+                        last = f
+                        _balls.update(vid, lambda v: v.update(status="rendering", progress=f))
+                elif line.startswith("RESULT "):
+                    info = json.loads(line[len("RESULT "):])
+            proc.wait()
+        finally:
+            killer.cancel()
+        if vid in _balls_cancelled or not out_dir.is_dir():
+            return          # deleted while it was being made
+        if proc.returncode != 0 or not info or not tmp.is_file():
+            print(f"[balls] make {vid} failed ({proc.returncode}):\n" + "\n".join(tail))
+            why = next((t for t in reversed(tail) if t.startswith("RuntimeError")), "")
+            msg = ("No run of that theme/course/jar reached the end at a good pace -- try again or pick Auto."
+                   if "no good run" in why else "Making the video failed -- try again.")
+            _balls.update(vid, lambda v: v.update(status="error", error=msg))
+            tmp.unlink(missing_ok=True)
+            return
+        tmp.replace(out_dir / "video.mp4")
+        text = ball_evolution.publish_text(info)
+
+        def done(v: dict) -> None:
+            v["recipe"] = {k: info.get(k) for k in recipe} | {"seed": info.get("seed"),
+                                                             "expected_end": info.get("expected_end")}
+            v.update(status="ready", progress=1.0, made_at=time.time(), seconds=info.get("seconds"),
+                     unlocks=info.get("unlocks"), dropped=info.get("dropped"))
+            v["title"] = v.get("title") or text["title"]
+            v["description"] = v.get("description") if v.get("description") is not None else text["description"]
+        _balls.update(vid, done)
+    except (KeyError, OSError, ValueError):
+        pass                # deleted mid-way
+    finally:
+        _balls_active.pop(vid, None)
+        _balls_cancelled.discard(vid)
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _balls_view(v: dict) -> dict:
+    c = dict(v)
+    yt = c.get("youtube") or {}
+    if c.get("status") == "scheduled" and yt.get("publish_at_ts") and yt["publish_at_ts"] <= time.time():
+        c["status"] = "posted"
+    if c.get("status") == "uploading" and c["id"] not in _balls_uploading:
+        c["status"] = "ready"   # the server restarted mid-upload
+    try:
+        c["has_video"] = (_balls.video_dir(c["id"]) / "video.mp4").is_file()
+    except KeyError:
+        c["has_video"] = False
+    r = c.get("recipe") or {}
+    if r.get("theme") in ball_evolution.THEMES:
+        theme = ball_evolution.THEMES[r["theme"]]
+        c["chips"] = [f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}", r.get("course"),
+                      r.get("jar"), f"{r.get('key')} {r.get('scale')}"]
+    return c
+
+
+def _balls_taken(videos: List[dict]) -> dict:
+    from zoneinfo import ZoneInfo
+    out = {}
+    for v in videos:
+        ts = (v.get("youtube") or {}).get("publish_at_ts")
+        if ts:
+            out[datetime.datetime.fromtimestamp(ts, ZoneInfo(rocket_league.TZ)).date().isoformat()] = v["id"]
+    return out
+
+
+def _balls_uploads_today(videos: List[dict]) -> int:
+    return sum(1 for v in videos if (v.get("youtube") or {}).get("uploaded_at", 0) > time.time() - 86400)
+
+
+@protected.get("/api/balls")
+def balls_state() -> dict:
+    videos = _balls.videos()
+    resume = False
+    for v in videos:
+        yt = v.get("youtube") or {}
+        if yt.get("publish_at_ts") and yt["publish_at_ts"] < time.time() - BALLS_KEEP_DAYS * 86400:
+            (_balls.video_dir(v["id"]) / "video.mp4").unlink(missing_ok=True)
+        if v.get("status") in ("picking", "rendering") and v["id"] not in _balls_active:
+            # the server restarted mid-way: make it again from the start
+            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None))
+        if v.get("status") == "queued":
+            resume = True
+    if resume:
+        _balls_start_worker()
+    videos = _balls.videos()
+    taken = _balls_taken(videos)
+    s = _balls.settings()
+    try:
+        slot = rocket_league.next_slot(s["post_time"], list(taken)).isoformat()
+    except Exception:
+        slot = None
+    used = 0
+    root = BASE_DIR / "_balls"
+    if root.is_dir():
+        used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    themes = [{"key": k, "label": f"{ball_evolution.emoji_char(t['chain'][0][0])} {k.capitalize()}"}
+              for k, t in ball_evolution.THEMES.items()]
+    return {"settings": s, "videos": [_balls_view(v) for v in reversed(videos)], "schedule": taken,
+            "next_slot": slot, "uploads_today": _balls_uploads_today(videos),
+            "uploads_per_day": BALLS_UPLOADS_PER_DAY, "connected": _youtube_token_stores[BALLS_PROFILE].is_connected(),
+            "storage_mb": round(used / 1e6),
+            "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS}}
+
+
+class BallsMakeRequest(BaseModel):
+    theme: Optional[str] = None
+    course: Optional[str] = None
+    jar: Optional[str] = None
+    count: int = 1
+
+
+@protected.post("/api/balls/make")
+def balls_make(req: BallsMakeRequest) -> dict:
+    if req.theme and req.theme not in ball_evolution.THEMES:
+        raise HTTPException(400, "unknown theme")
+    if req.course and req.course not in ball_evolution.COURSES:
+        raise HTTPException(400, "unknown course")
+    if req.jar and req.jar not in ball_evolution.JARS:
+        raise HTTPException(400, "unknown jar")
+    waiting = sum(1 for v in _balls.videos() if v.get("status") in _BALLS_MAKING)
+    count = max(1, min(int(req.count or 1), 7))
+    if waiting + count > BALLS_MAX_QUEUE:
+        raise HTTPException(409, f"{waiting} are already being made -- wait for some to finish first.")
+    for _ in range(count):
+        _balls.new_video({"theme": req.theme, "course": req.course, "jar": req.jar})
+    _balls_start_worker()
+    return balls_state()
+
+
+class BallsEdit(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+@protected.put("/api/balls/videos/{vid}")
+def balls_edit(vid: str, req: BallsEdit) -> dict:
+    _balls_video(vid)
+
+    def edit(v: dict) -> None:
+        if req.title is not None:
+            v["title"] = " ".join(req.title.split())[:100]
+        if req.description is not None:
+            v["description"] = req.description[:4500]
+    return _balls_view(_balls.update(vid, edit))
+
+
+@protected.post("/api/balls/videos/{vid}/retry")
+def balls_retry(vid: str) -> dict:
+    v = _balls_video(vid)
+    if v.get("status") != "error":
+        raise HTTPException(409, "only a failed video can be made again")
+    _balls.update(vid, lambda x: x.update(status="queued", progress=0.0, recipe=None, error=None))
+    _balls_start_worker()
+    return balls_state()
+
+
+@protected.get("/api/balls/videos/{vid}/video")
+def balls_video_file(vid: str, download: bool = False) -> FileResponse:
+    _balls_video(vid)
+    path = _balls.video_dir(vid) / "video.mp4"
+    if not path.is_file():
+        raise HTTPException(404, "not there")
+    return FileResponse(path, media_type="video/mp4", filename=f"ball-evolution-{vid}.mp4" if download else None)
+
+
+class BallsScheduleRequest(BaseModel):
+    now: bool = False
+
+
+@protected.post("/api/balls/videos/{vid}/schedule")
+def balls_schedule(vid: str, req: BallsScheduleRequest) -> dict:
+    """Upload to the Ball Evolution channel: private with a publish time on
+    the next free day (YouTube makes it public then), or public now."""
+    video = _balls_video(vid)
+    path = _balls.video_dir(vid) / "video.mp4"
+    if _balls_view(video)["status"] != "ready" or not path.is_file():
+        raise HTTPException(409, "That video isn't ready to post.")
+    videos = _balls.videos()
+    if _balls_uploads_today(videos) >= BALLS_UPLOADS_PER_DAY:
+        raise HTTPException(409, f"That's {BALLS_UPLOADS_PER_DAY} uploads today -- YouTube's daily upload limit is "
+                                 "shared with your other channels. Schedule the next one tomorrow.")
+    token = _youtube_token_stores[BALLS_PROFILE].get_valid_access_token()
+    if not token:
+        raise HTTPException(409, "Connect the Ball Evolution YouTube channel first (top of this page).")
+    s = _balls.settings()
+    slot = None if req.now else rocket_league.next_slot(s["post_time"], list(_balls_taken(videos)))
+    desc = (video.get("description") or "").strip()
+    if (s.get("description") or "").strip():
+        desc = (desc + "\n\n" + s["description"].strip()).strip()
+    title = (video.get("title") or "").strip() or "Ball Evolution"
+    _balls_uploading.add(vid)
+    _balls.update(vid, lambda v: v.update(status="uploading"))
+    try:
+        video_id = youtube_upload.upload_video(
+            token, path, title=title[:100], description=desc, privacy_status="public", is_short=True,
+            publish_at=slot.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if slot else None,
+            category_id="24")
+    except (youtube_upload.UploadError, ValueError) as e:
+        _balls.update(vid, lambda v: v.update(status="ready"))
+        raise HTTPException(502, str(e)) from e
+    finally:
+        _balls_uploading.discard(vid)
+    yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
+          "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
+    return _balls_view(_balls.update(vid, lambda v: v.update(status="scheduled" if slot else "posted", youtube=yt)))
+
+
+@protected.delete("/api/balls/videos/{vid}")
+def balls_delete(vid: str) -> dict:
+    _balls_video(vid)
+    proc = _balls_active.get(vid)
+    if proc is not None and proc.poll() is None:
+        _balls_cancelled.add(vid)
+        proc.kill()
+    _balls.delete(vid)
+    return balls_state()
+
+
+class BallsSettings(BaseModel):
+    post_time: Optional[str] = None
+    watermark: Optional[str] = None
+    description: Optional[str] = None
+
+
+@protected.put("/api/balls/settings")
+def balls_settings(req: BallsSettings) -> dict:
+    data = {}
+    if req.post_time is not None:
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", req.post_time):
+            raise HTTPException(400, "Use a time like 17:00.")
+        data["post_time"] = req.post_time
+    if req.watermark is not None:
+        data["watermark"] = " ".join(req.watermark.split())[:40]
+    if req.description is not None:
+        data["description"] = req.description[:2000]
+    return _balls.save_settings(data)
+
 app.include_router(protected)
 
 
@@ -5958,6 +6291,7 @@ __NAV_LINKS__
 <a class="longform-link" href="/long-form"><span>🎬 Go to long-form videos</span><span>→</span></a>
 <a class="longform-link" href="/caught-on-code"><span>💻 Go to Caught On Code</span><span>→</span></a>
 <a class="longform-link" href="/rocket-league"><span>🚗 Go to my Rocket League channel</span><span>→</span></a>
+<a class="longform-link" href="/ball-evolution"><span>🫧 Go to Ball Evolution</span><span>→</span></a>
 
 <div id="profile-row">
   <div class="hint" id="profile-youtube-status" style="margin-top:0"></div>
@@ -10292,6 +10626,273 @@ $('sched-all').onclick = async () => {
 };
 const params = new URLSearchParams(location.search);
 if (params.has('youtube_connected')) history.replaceState(null, '', '/rocket-league');
+load().catch(e => alert(e.message));
+</script>
+</body>
+</html>
+""".replace("__CSS__", _SIMPLE_PAGE_CSS)
+
+BALLS_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clipper — Ball Evolution</title>
+<style>
+__CSS__
+  .row2 { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row2 > div { flex: 1 1 150px; }
+  .days { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 8px; margin-top: 8px; }
+  .day { flex: none; width: 74px; border: 1px solid var(--border); border-radius: 10px; padding: 6px; text-align: center; font-size: 0.74rem; color: var(--muted); }
+  .day b { display: block; font-size: 0.86rem; color: var(--text); }
+  .day.on { border-color: var(--ok); color: var(--ok); }
+  .day.free { border-style: dashed; }
+  .bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0; transition: width 0.4s; }
+  .tabs { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .tabs button { margin-top: 0; padding: 7px 14px; }
+  .tabs button.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; }
+  .vcard { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin-top: 12px; display: flex; gap: 14px; }
+  .vcard .vid { flex: none; width: 170px; }
+  .vcard video { width: 100%; border-radius: 10px; background: #000; display: block; max-height: 300px; }
+  .vcard .ph { width: 100%; aspect-ratio: 9 / 16; border-radius: 10px; background: var(--bg); display: flex; align-items: center;
+    justify-content: center; font-size: 2.2rem; }
+  .vcard .form { flex: 1; min-width: 0; }
+  .vcard .form label:first-child { margin-top: 0; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chip { font-size: 0.74rem; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; color: var(--muted); }
+  .st { font-size: 0.84rem; margin-top: 8px; }
+  .st.ok { color: var(--ok); } .st.bad { color: var(--danger); } .st.wait { color: var(--warn); }
+  @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .vcard { flex-direction: column; } .vcard .vid { width: 100%; }
+    .vcard video { max-height: 460px; } .vcard .ph { max-height: 260px; aspect-ratio: auto; height: 160px; } }
+</style>
+</head>
+<body>
+<div class="page">
+__NAV_LINKS__
+<div class="card">
+  <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
+  <p class="subtitle">Satisfying physics Shorts for their own channel. One ball drops, gold pegs multiply it, and matching ones merge into something bigger until the last one appears. Every video gets a different theme, course, jar and music, and the page never repeats a combination.</p>
+  <div id="conn" class="status"></div>
+
+  <div class="section">
+    <h3>🎬 Make videos</h3>
+    <div class="row2">
+      <div><label for="m-theme">Theme</label><select id="m-theme"></select></div>
+      <div><label for="m-course">Course</label><select id="m-course"></select></div>
+      <div><label for="m-jar">Jar</label><select id="m-jar"></select></div>
+      <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
+    </div>
+    <button id="make" type="button">🎬 Make</button>
+    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made.</div>
+  </div>
+
+  <div class="section">
+    <h3>📅 Posting</h3>
+    <div class="row2">
+      <div><label for="s-time">Every day at (SA time)</label><input id="s-time" type="time"></div>
+      <div><label for="s-mark">Name on the videos</label><input id="s-mark" maxlength="40" placeholder="@yourchannel"></div>
+    </div>
+    <details><summary>Added under every description</summary><textarea id="s-desc" rows="3" placeholder="e.g. New one every day!"></textarea></details>
+    <div class="days" id="days"></div>
+    <div class="hint" id="quota"></div>
+  </div>
+
+  <div class="section">
+    <h3>🎞 Your videos</h3>
+    <div class="tabs" id="tabs"></div>
+    <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
+    <div id="videos"></div>
+  </div>
+</div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.detail || `Request failed (${r.status})`);
+  return out;
+}
+const jsonOpts = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+const TZ = 'Africa/Johannesburg';
+const sa = (d, o) => new Date(d).toLocaleString(undefined, { timeZone: TZ, ...o });
+const MAKING = ['queued', 'picking', 'rendering'];
+const GROUPS = { todo: ['queued', 'picking', 'rendering', 'ready', 'uploading', 'error'], scheduled: ['scheduled'], posted: ['posted'] };
+let S = null, tab = 'todo', poll = null, filled = false;
+
+async function load() {
+  S = await api('/api/balls');
+  render();
+  clearTimeout(poll);
+  if (S.videos.some(v => MAKING.includes(v.status))) poll = setTimeout(() => load().catch(() => {}), 3000);
+}
+function fillOptions() {
+  if (filled) return;
+  filled = true;
+  const opt = (sel, v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
+  opt($('m-theme'), '', '🔀 Auto');
+  for (const t of S.options.themes) opt($('m-theme'), t.key, t.label);
+  opt($('m-course'), '', '🔀 Auto');
+  for (const c of S.options.courses) opt($('m-course'), c, c);
+  opt($('m-jar'), '', '🔀 Auto');
+  for (const j of S.options.jars) opt($('m-jar'), j, j);
+}
+function render() {
+  fillOptions();
+  const conn = $('conn');
+  conn.innerHTML = '';
+  if (S.connected) { conn.className = 'status ok'; conn.textContent = '✅ The Ball Evolution YouTube channel is connected: videos upload there.'; }
+  else {
+    conn.className = 'status';
+    conn.appendChild(document.createTextNode('Connect the Ball Evolution channel so the app can upload to it. Sign in with the Google account that owns it (and pick the channel if Google asks). '));
+    const a = el('a', '', '🔗 Connect it'); a.href = '/auth/youtube/login?profile=balls'; a.target = '_blank'; conn.appendChild(a);
+    conn.appendChild(el('div', 'hint', 'If Google says the app is blocked or not verified, add that Google account as a test user in Google Cloud (OAuth consent screen → Test users), like your other accounts.'));
+  }
+  const st = S.settings;
+  if (document.activeElement !== $('s-time')) $('s-time').value = st.post_time;
+  if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
+  if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
+  const days = $('days'); days.innerHTML = '';
+  const today = new Date();
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(today.getTime() + i * 86400000);
+    const iso = d.toLocaleDateString('en-CA', { timeZone: TZ });
+    const on = !!S.schedule[iso];
+    const box = el('div', 'day' + (on ? ' on' : ' free'));
+    box.appendChild(el('b', '', sa(d, { weekday: 'short' })));
+    box.appendChild(document.createTextNode(sa(d, { day: 'numeric', month: 'short' })));
+    box.appendChild(el('div', '', on ? '✅' : '—'));
+    days.appendChild(box);
+  }
+  const left = Math.max(0, S.uploads_per_day - S.uploads_today);
+  $('quota').textContent = (S.next_slot ? `Next free day: ${sa(S.next_slot, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}. ` : '')
+    + `You can upload ${left} more today (YouTube's daily upload limit is shared with your other channels). The name goes on videos made from now on. Storage used: ${S.storage_mb} MB.`;
+  renderVideos();
+}
+for (const [id, key] of [['s-time', 'post_time'], ['s-mark', 'watermark'], ['s-desc', 'description']]) {
+  $(id).addEventListener('change', async () => {
+    try { S.settings = await api('/api/balls/settings', jsonOpts('PUT', { [key]: $(id).value })); load(); } catch (e) { alert(e.message); }
+  });
+}
+$('make').onclick = async () => {
+  const b = $('make'); b.disabled = true;
+  try {
+    await api('/api/balls/make', jsonOpts('POST', { theme: $('m-theme').value || null, course: $('m-course').value || null,
+      jar: $('m-jar').value || null, count: parseInt($('m-count').value, 10) }));
+    tab = 'todo';
+    await load();
+  } catch (e) { alert(e.message); }
+  b.disabled = false;
+};
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load().catch(() => {}); });
+
+function renderVideos() {
+  const tabs = $('tabs'); tabs.innerHTML = '';
+  for (const [k, label] of [['todo', 'To post'], ['scheduled', 'Scheduled'], ['posted', 'Posted']]) {
+    const n = S.videos.filter(v => GROUPS[k].includes(v.status)).length;
+    const b = el('button', 'secondary' + (tab === k ? ' on' : ''), `${label} (${n})`); b.type = 'button';
+    b.onclick = () => { tab = k; renderVideos(); };
+    tabs.appendChild(b);
+  }
+  const ready = S.videos.filter(v => v.status === 'ready');
+  const left = Math.max(0, S.uploads_per_day - S.uploads_today);
+  const n = Math.min(ready.length, left);
+  const sb = $('sched-all');
+  sb.style.display = tab === 'todo' && ready.length > 1 && S.connected ? 'inline-block' : 'none';
+  sb.textContent = `📅 Schedule ${n} ready video${n === 1 ? '' : 's'} (one a day)`;
+  sb.disabled = !n;
+  const box = $('videos'); box.innerHTML = '';
+  const list = S.videos.filter(v => GROUPS[tab].includes(v.status));
+  if (tab !== 'todo') list.sort((a, b) => ((a.youtube || {}).publish_at_ts || 0) - ((b.youtube || {}).publish_at_ts || 0));
+  if (!list.length) box.appendChild(el('div', 'hint', tab === 'todo' ? 'Nothing here yet. Tap 🎬 Make above.' : 'Nothing yet.'));
+  for (const v of list) box.appendChild(card(v));
+}
+function card(v) {
+  const c = el('div', 'vcard');
+  const making = MAKING.includes(v.status), onYT = ['scheduled', 'posted'].includes(v.status);
+  const vid = el('div', 'vid');
+  if (v.has_video) {
+    const p = el('video'); p.controls = true; p.playsInline = true; p.preload = 'metadata';
+    p.src = `/api/balls/videos/${v.id}/video?t=${v.made_at || v.created_at}`;
+    vid.appendChild(p);
+  } else {
+    vid.appendChild(el('div', 'ph', making ? '⏳' : v.status === 'error' ? '⚠️' : '🫧'));
+  }
+  c.appendChild(vid);
+  const f = el('div', 'form');
+  const save = async (body) => { try { await api('/api/balls/videos/' + v.id, jsonOpts('PUT', body)); } catch (e) { alert(e.message); } load(); };
+  if (v.status === 'ready' || onYT || v.status === 'uploading') {
+    f.appendChild(el('label', '', 'YouTube title'));
+    const t = el('input'); t.maxLength = 100; t.value = v.title || ''; t.disabled = onYT || v.status === 'uploading';
+    t.onchange = () => save({ title: t.value }); f.appendChild(t);
+    if (!onYT) {
+      const det = el('details'); det.appendChild(el('summary', '', 'Description'));
+      const ds = el('textarea'); ds.rows = 4; ds.value = v.description || '';
+      ds.onchange = () => save({ description: ds.value }); det.appendChild(ds); f.appendChild(det);
+    }
+  }
+  if (v.chips) {
+    const ch = el('div', 'chips');
+    for (const x of v.chips) ch.appendChild(el('span', 'chip', x));
+    if (v.seconds) ch.appendChild(el('span', 'chip', `${Math.round(v.seconds)} s`));
+    f.appendChild(ch);
+  }
+  const yt = v.youtube || {};
+  let msg;
+  if (v.status === 'queued') msg = ['wait', '⏳ Waiting its turn…'];
+  else if (v.status === 'picking') msg = ['wait', `🧪 Testing runs for one that reaches the end at a good pace… (${v.tried || 0} tried)`];
+  else if (v.status === 'rendering') msg = ['wait', `🎬 Making the video… ${Math.round((v.progress || 0) * 100)}%`];
+  else if (v.status === 'uploading') msg = ['wait', '⏳ Uploading…'];
+  else if (v.status === 'ready') msg = ['ok', `✅ Ready. Schedule it for ${S.next_slot ? sa(S.next_slot, { weekday: 'short', day: 'numeric', month: 'short' }) : 'the next free day'}.`];
+  else if (v.status === 'scheduled') msg = ['ok', `📅 Goes public ${sa(yt.publish_at, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}.`];
+  else if (v.status === 'posted') msg = ['ok', '✅ Posted.'];
+  else msg = ['bad', '⚠️ ' + (v.error || 'Something went wrong.')];
+  const sl = el('div', 'st ' + msg[0], msg[1]);
+  if (yt.url) { sl.appendChild(document.createTextNode(' ')); const a = el('a', '', 'Open on YouTube'); a.href = yt.url; a.target = '_blank'; sl.appendChild(a); }
+  f.appendChild(sl);
+  if (making) {
+    const bar = el('div', 'bar'), fill = el('div');
+    fill.style.width = (v.status === 'rendering' ? Math.round((v.progress || 0) * 100) : v.status === 'picking' ? 3 : 0) + '%';
+    bar.appendChild(fill); f.appendChild(bar);
+  }
+  const acts = el('div', 'actions');
+  const btn = (label, cls, fn, dis) => { const b = el('button', cls, label); b.type = 'button'; b.disabled = !!dis; b.onclick = fn; acts.appendChild(b); return b; };
+  if (v.status === 'ready') {
+    btn('📅 Schedule', '', () => schedule(v, false), !S.connected);
+    btn('🚀 Post now', 'secondary', () => { if (confirm('Post it publicly right now instead of on its day?')) schedule(v, true); }, !S.connected);
+  }
+  if (v.status === 'error') btn('↻ Try again', '', async () => { try { await api(`/api/balls/videos/${v.id}/retry`, { method: 'POST' }); } catch (e) { alert(e.message); } load(); });
+  if (v.has_video) btn('⬇ Download', 'secondary', () => { location.href = `/api/balls/videos/${v.id}/video?download=true`; });
+  const del = btn(making ? '✖ Cancel' : '🗑 Delete', 'danger-link', async () => {
+    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone).' : making ? 'Stop making this one?' : 'Delete this video?')) return;
+    try { await api('/api/balls/videos/' + v.id, { method: 'DELETE' }); } catch (e) { alert(e.message); }
+    load();
+  }, v.status === 'uploading');
+  del.style.marginLeft = 'auto';
+  f.appendChild(acts);
+  c.appendChild(f);
+  return c;
+}
+async function schedule(v, now) {
+  try { await api(`/api/balls/videos/${v.id}/schedule`, jsonOpts('POST', { now })); }
+  catch (e) { alert(e.message); }
+  load();
+}
+$('sched-all').onclick = async () => {
+  const b = $('sched-all'); b.disabled = true;
+  const left = Math.max(0, S.uploads_per_day - S.uploads_today);
+  const ready = S.videos.filter(v => v.status === 'ready').reverse().slice(0, left);
+  for (const v of ready) {
+    b.textContent = '⏳ Uploading “' + (v.title || 'video') + '”…';
+    try { await api(`/api/balls/videos/${v.id}/schedule`, jsonOpts('POST', { now: false })); }
+    catch (e) { alert(e.message); break; }
+  }
+  load();
+};
+const params = new URLSearchParams(location.search);
+if (params.has('youtube_connected')) history.replaceState(null, '', '/ball-evolution');
 load().catch(e => alert(e.message));
 </script>
 </body>

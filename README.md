@@ -214,7 +214,8 @@ clipper/                    # pipeline + CLI, importable on its own
   longform_video.py          # long-form: rendering (Pillow frames into ffmpeg)
   visual_sources.py          # long-form: free visuals (emoji, stock, CC0 photos, X posts)
   voice_clone.py             # long-form: your cloned voice (Pocket TTS)
-  ball_evolution.py          # physics Short: bees multiply and merge up to a unicorn
+  ball_evolution.py          # physics Shorts: things multiply and merge up an evolution chain
+  ball_channel.py            # the Ball Evolution page's videos and settings on disk
   assets/                    # bundled emoji (Fluent Emoji 3D, MIT) and fonts (OFL)
 webapp/
   main.py                    # FastAPI app: job queue, API routes, HTML pages
@@ -309,6 +310,13 @@ documentary series for the same channel.
 5. Render (1080p), write a title and a description with chapters and
    credits, upload to YouTube as a regular video (private by default), and
    make two promo Shorts that link back to it.
+
+**Ball Evolution (`/ball-evolution`)**: satisfying physics Shorts for their
+own channel. One item drops, gold pegs multiply it, and matching ones merge
+into something bigger until the last one appears. Pick a theme, course and
+jar (or leave them on Auto, which avoids anything posted recently), make 1, 3
+or 7 at once, then schedule them one a day on the channel's own YouTube
+account. All visuals and sound are generated, so nothing can be claimed.
 
 Editing lessons (seeded from YouTube's review of the first episode, and
 anything you paste in) are kept and fed into the next scripts.

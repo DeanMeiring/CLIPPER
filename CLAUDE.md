@@ -493,7 +493,30 @@ merge it yourself; merging stays Dean's call per the rule above.
   him: actors no (photo copyright + right of publicity + impersonation
   rules); streamers only with their permission (their pfps/emotes are
   their art). Emoji themes instead.
-- Not built yet: a page on the site (render/upload to its own channel).
+- **Page (Oct 2026):** `/ball-evolution` (`BALLS_HTML`, Home link "🫧 Go
+  to Ball Evolution"), routes `/api/balls/*`, store
+  `clipper/ball_channel.py` in `BASE_DIR/_balls/` (`videos/<id>/video.json`
+  + `video.mp4`, `settings.json`). Its own YouTube account
+  `EXTRA_YOUTUBE_ACCOUNTS["balls"]` (token `_youtube_oauth_token_balls.json`,
+  connect with `/auth/youtube/login?profile=balls`). "Make" queues 1/3/7
+  videos (theme/course/jar or Auto); one background thread makes them in
+  turn by running `python -m clipper.ball_evolution --recipe <json>
+  --progress` as a subprocess (keeps the 3-5 min render off the web
+  server's GIL; PROGRESS/RESULT lines drive the page's progress bar), and
+  `pick_seed` uses "spawn" workers (max 4) because forking a threaded
+  server can deadlock. The history for `pick_recipe` is the recipes in
+  every video.json, kept after the mp4 is gone. A make interrupted by a
+  restart is queued again from scratch on the next page load; Cancel kills
+  the subprocess. Upload/schedule mirrors Rocket League (`publishAt` on
+  the next free day at his SA time, `rocket_league.next_slot`), max 2
+  uploads/day here (`BALLS_UPLOADS_PER_DAY`; the 10,000-unit quota is
+  shared by every channel), category Entertainment (`upload_video
+  (category_id="24")`; every other upload still sends Gaming), mp4 deleted
+  3 days after it's public. Title = the hook + the first item's emoji;
+  description never names the last item (no spoiler). "Name on the
+  videos" (watermark) is drawn bottom-right on videos made after it's set.
+  Uploads are `selfDeclaredMadeForKids: False` like every upload here;
+  Dean was told to decide whether this channel is "made for kids".
 
 ## Clip layout
 
