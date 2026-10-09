@@ -6584,8 +6584,10 @@ def balls_remake_upcoming() -> dict:
             continue        # on YouTube, uploading right now, or not made yet (it'll get the new look)
         _balls_remake(v["id"])
         out["remade"] += 1
-    scheduled = [v for v in videos if (v.get("youtube") or {}).get("video_id")
-                 and (v["youtube"].get("publish_at_ts") or 0) > now + 60]
+    # also the ones removed from the list with 🗑 (hidden): they're still
+    # scheduled on YouTube and still hold their time until they're gone there
+    scheduled = [v for v in _balls.videos() if (v.get("youtube") or {}).get("video_id")
+                 and not v["youtube"].get("removed") and (v["youtube"].get("publish_at_ts") or 0) > now + 60]
     if scheduled:
         token = _youtube_token_stores[BALLS_PROFILE].get_valid_access_token()
         alive = _balls_on_youtube(token, [v["youtube"]["video_id"] for v in scheduled]) if token else None
@@ -6603,6 +6605,7 @@ def balls_remake_upcoming() -> dict:
                 out["replaced"] += 1
             else:
                 out["on_youtube"].append({"id": v["id"], "title": v.get("title"), "at": yt.get("publish_at"),
+                                          "hidden": bool(v.get("hidden")),
                                           "studio": f"https://studio.youtube.com/video/{yt['video_id']}/edit"})
     if out["remade"] or out["replaced"]:
         _balls_start_worker()
@@ -11568,7 +11571,7 @@ function showRemake(r) {
   if (r.on_youtube.length) {
     line(`📅 ${r.on_youtube.length} already scheduled on YouTube. This app can upload but not delete there, so open each one, delete it (⋮ menu → Delete forever), then press the button again: a new one is made for the same time.`);
     for (const v of r.on_youtube) {
-      const a = el('a', '', `${v.at ? slotText(v.at) : ''} · ${v.title || 'video'} ↗`);
+      const a = el('a', '', `${v.at ? slotText(v.at) : ''} · ${v.title || 'video'}${v.hidden ? ' (removed from this list, still on YouTube)' : ''} ↗`);
       a.href = v.studio; a.target = '_blank'; a.rel = 'noopener';
       box.appendChild(el('div')).appendChild(a);
     }
@@ -11706,7 +11709,7 @@ function card(v) {
     });
   if (v.has_video) btn('⬇ Download', 'secondary', () => { location.href = `/api/balls/videos/${v.id}/video?download=true`; });
   const del = btn(making ? '✖ Cancel' : '🗑 Delete', 'danger-link', async () => {
-    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube (delete it in YouTube Studio if you want it gone), and its time stays taken.' : making ? 'Stop making this one?' : 'Delete this video?')) return;
+    if (!confirm(onYT ? 'Remove it from this list? It stays on YouTube and still posts at its time. To replace it, delete it in YouTube Studio, then press ♻️ Remake upcoming: a new one is made for that time.' : making ? 'Stop making this one?' : 'Delete this video?')) return;
     try { await api('/api/balls/videos/' + v.id, { method: 'DELETE' }); } catch (e) { alert(e.message); }
     load();
   }, v.status === 'uploading');
