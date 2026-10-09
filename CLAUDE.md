@@ -591,6 +591,13 @@ merge it yourself; merging stays Dean's call per the rule above.
   stays taken and the autopilot doesn't post a second one there. "🚀 Post
   now to YouTube + Instagram" (`POST .../post-both`) shows when Instagram
   is connected.
+  First real morning (9 Oct): the 08:00 video missed its slot. A manual
+  post the day before used one of the 2 uploads of that YouTube day, and
+  the 08:00 upload has to happen before 08:00, still in that same day
+  (it resets 09:00/10:00 SA). Fixes: the waker also runs at 09:05 and
+  10:05 SA (cron `5 6,7,8,13 * * *` UTC) so a missed slot posts late
+  within the 3 h window, and `BALLS_UPLOADS_PER_DAY` is 3 so the backlog
+  can catch up (with 2 it would stay a day behind for good).
   Restarts (a deploy, Railway waking the app) used to leave the autopilot
   idle until the page was opened: now a startup thread restarts the loop
   when autopilot is on, and every tick runs `_balls_resume` (requeues a
