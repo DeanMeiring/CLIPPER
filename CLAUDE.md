@@ -713,7 +713,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   (default on; old jobs' new clips get it too) applies wherever the
   letterbox would be used, vertical sources stay letterboxed. Per clip:
   "🪪 Switch to old look / card style" = `POST .../mark-irl?card=`
-  (no flag follows the job). Registry layout name "card".
+  (no flag follows the job). Registry layout name "card". "✏️ Edit card
+  text" (Dean asked to change the post text) = `POST .../card-text`: sets
+  `clip["hook_text"]` (emoji stripped, the card font has none; empty = no
+  post text), swaps the HookText line in the normal .ass too
+  (`captions.set_hook_text`) and re-renders the card via mark-irl.
 
 ## Gotchas
 

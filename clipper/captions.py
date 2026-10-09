@@ -501,3 +501,15 @@ def build_card_ass(
 
 def card_ass_path(normal_ass: Path) -> Path:
     return normal_ass.with_name(normal_ass.stem + ".card.ass")
+
+
+def set_hook_text(ass_path: Path, text: str) -> None:
+    """Swap the boxed hook line (style HookText) in a clip's normal .ass
+    for new text -- or drop it when text is empty -- keeping every other
+    line, so a clip switched back from the card shows the edited hook."""
+    hook = clean_hook_text(text)
+    lines = [l for l in ass_path.read_text(encoding="utf-8").split("\n") if ",HookText," not in l]
+    if hook:
+        lines.append(f"Dialogue: 1,{_fmt_ts(0)},{_fmt_ts(HOOK_TEXT_SECONDS)},HookText,,0,0,0,,"
+                     f"{{\\fad(0,200)}}{_escape_ass_text(hook)}")
+    ass_path.write_text("\n".join(lines), encoding="utf-8")
