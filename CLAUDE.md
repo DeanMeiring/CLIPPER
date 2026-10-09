@@ -529,6 +529,25 @@ merge it yourself; merging stays Dean's call per the rule above.
   as the next item; ladder + "NEW:" banner). Tuning lessons: escape was
   ~65 s with a slow spin / small gap; now 35-45 s; touch 26-38 s.
   `good_end` for both is 25-60 s.
+- **Neon ring look (Oct 2026):** the first ring video on black beat the
+  rest, and Dean found the backgrounds not eye-catching. Researched (the
+  2023 "will the ball escape" Shorts: bright balls on dark, glow and trails
+  are the genre's tools; no real study compares backgrounds), then 8
+  mockups; he picked trails + rainbow ring and four backgrounds. Ring
+  recipes now draw `backdrop` from `be.RING_BACKDROPS` (black / space /
+  synthwave / blurred; black weighted 3, space 2, synthwave 2, blurred 1
+  in `_RING_BACKDROP_DRAW`, then `pick_recipe` avoids repeating the last
+  one, so black is ~40%). With one of them `CirclePainter` adds light
+  trails (full-res layer from just above the ring down, faded x0.82 a
+  frame, lines from the last position so fast balls streak), a rainbow ring
+  with glow (drawn once; the gap is cut out per frame with a pieslice mask,
+  so the colours stay put while the gap turns) and a glow on each ball
+  sprite. Synthwave is the "calm" version Dean preferred over a busy one:
+  dark sky, faint grid below the count (`SYNTH_HORIZON` 1640), its lines
+  scroll toward the viewer. ~31 ms a frame vs ~19 before (per-frame
+  rotation, blur and big alpha arcs were 80-90 ms and were dropped). Older
+  ring recipes (backdrop gradient/glow/...) draw byte for byte as before
+  (checked), and evolve videos are unchanged.
 - **Gates, wheel, Halloween (Oct 2026):** Dean asked for multiplier and
   spinning-wheel versions of Evolve, and Halloween themes. Two more
   courses in `COURSES`: `gates` (three rows of sensor segments,

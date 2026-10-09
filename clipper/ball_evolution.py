@@ -79,6 +79,12 @@ for _k, _bg in _LEGACY_BG.items():
 COURSES = ["pegs", "triangle", "spinners", "ramps", "bumpers", "gates", "wheel"]
 SKINS = ["bubble", "glass", "plain", "neon"]                 # how each item is drawn
 BACKDROPS = ["gradient", "glow", "stars", "grid", "dots"]    # behind the machine
+# The ring formats' own backgrounds (clipper/ball_circles.py), all with
+# light trails and a rainbow ring. Dean picked them from mockups after the
+# first ring video on black beat the others; black comes up most, so the
+# draw list repeats it.
+RING_BACKDROPS = ["black", "space", "synthwave", "blurred"]
+_RING_BACKDROP_DRAW = ["black"] * 3 + ["space"] * 2 + ["synthwave"] * 2 + ["blurred"]
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -149,7 +155,8 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         "ending": rng.choice(ENDINGS),
         "key": rng.choice(sorted(KEYS)), "scale": scale,
         "bpm": rng.choice([88, 96, 100, 108]),
-        "skin": rng.choice(SKINS), "backdrop": rng.choice(BACKDROPS), "sound": rng.choice(SOUNDS),
+        "skin": rng.choice(SKINS), "backdrop": rng.choice(_RING_BACKDROP_DRAW if fmt in ("escape", "touch") else BACKDROPS),
+        "sound": rng.choice(SOUNDS),
         "format": fmt or "evolve",
     }
 
