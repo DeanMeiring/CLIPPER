@@ -678,7 +678,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   gone (`videos.list` with his token, 1 unit), hides the record with
   `youtube.removed` (still counts toward the day's uploads, no longer
   holds its slot or gets an Instagram post) and plans a new video for
-  that time.
+  that time. This includes videos hidden with the app's own 🗑 (first real
+  use: Dean hid Saturday's two that way, the button skipped hidden ones,
+  and Saturday stayed blocked); a hidden one still on YouTube is listed as
+  "removed from this list, still on YouTube" because it will still post.
 
 ## Instagram posting (Oct 2026)
 
