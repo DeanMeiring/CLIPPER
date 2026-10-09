@@ -598,6 +598,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   10:05 SA (cron `5 6,7,8,13 * * *` UTC) so a missed slot posts late
   within the 3 h window, and `BALLS_UPLOADS_PER_DAY` is 3 so the backlog
   can catch up (with 2 it would stay a day behind for good).
+  9 Oct: the first ring video (escape, 1.1k views in a day) beat the
+  evolve one (~250), and Dean asked for more ring videos: the kind now
+  rotates per slot, not per day, through `BALLS_FORMAT_CYCLE` (escape,
+  touch, escape, evolve, touch, escape, touch, evolve: 3 in 4 rings),
+  `_balls_format_for(dt)`; a manual Make defaults to the next slot's kind.
   Restarts (a deploy, Railway waking the app) used to leave the autopilot
   idle until the page was opened: now a startup thread restarts the loop
   when autopilot is on, and every tick runs `_balls_resume` (requeues a
