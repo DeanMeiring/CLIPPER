@@ -6096,11 +6096,15 @@ def _balls_view(v: dict) -> dict:
     return c
 
 
-BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch")
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
-# day). Dean saw the ring videos get more views, so 3 in 4 are rings.
-BALLS_FORMAT_CYCLE = ("escape", "touch", "escape", "evolve", "touch", "escape", "touch", "evolve")
-BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply"}
+# day). Dean saw the ring videos get more views, so most are rings; 🧱
+# Break in (Oct 2026) took two of the ten: 8 in 10 are rings now, with
+# 🧬 Evolve every 5th.
+BALLS_FORMAT_CYCLE = ("escape", "touch", "breakin", "escape", "evolve",
+                      "touch", "escape", "breakin", "touch", "evolve")
+BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
+                       "breakin": "🧱 Break in"}
 
 
 def _balls_tz():
@@ -11368,7 +11372,7 @@ __CSS__
 __NAV_LINKS__
 <div class="card">
   <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
-  <p class="subtitle">Satisfying physics Shorts for their own channel, in three kinds that take turns day by day: 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more) and ✨ Touch &amp; multiply (two balls touch, a new one pops out). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
+  <p class="subtitle">Satisfying physics Shorts for their own channel, in four kinds that take turns: 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more), ✨ Touch &amp; multiply (two balls touch, a new one pops out) and 🧱 Break in (one ball finds its way into a room of bricks, and every brick it breaks makes another ball). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
   <div id="conn" class="status"></div>
   <div id="igconn" class="status" style="margin-top:8px"></div>
 
@@ -11531,8 +11535,8 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
   $('ap-hint').textContent = ap.on
-    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Mostly ring videos: 3 in 4 are ⭕ / ✨, every 4th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
-    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, mostly ring videos (3 in 4) with 🧬 Evolve every 4th.`;
+    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Mostly ring videos: 8 in 10 are ⭕ / ✨ / 🧱, every 5th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
+    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, mostly ring videos (8 in 10) with 🧬 Evolve every 5th.`;
   const plan = $('ap-plan'); plan.innerHTML = '';
   plan.style.display = ap.on ? '' : 'none';
   const word = { queued: '⏳ waiting to be made', picking: '🧪 being made', rendering: '🎬 being made', ready: '✅ made, uploads soon',

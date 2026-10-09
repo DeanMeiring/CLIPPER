@@ -662,6 +662,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   rotates per slot, not per day, through `BALLS_FORMAT_CYCLE` (escape,
   touch, escape, evolve, touch, escape, touch, evolve: 3 in 4 rings),
   `_balls_format_for(dt)`; a manual Make defaults to the next slot's kind.
+  (Since Break in: a 10-slot cycle, 8 in 10 rings, Evolve every 5th.)
   Restarts (a deploy, Railway waking the app) used to leave the autopilot
   idle until the page was opened: now a startup thread restarts the loop
   when autopilot is on, and every tick runs `_balls_resume` (requeues a
@@ -682,6 +683,27 @@ merge it yourself; merging stays Dean's call per the rule above.
   use: Dean hid Saturday's two that way, the button skipped hidden ones,
   and Saturday stayed blocked); a hidden one still on YouTube is listed as
   "removed from this list, still on YouTube" because it will still post.
+
+- **Break in (Oct 2026):** Dean's idea, from two sandbox prototypes. The
+  first (ring on top, corridor packed with tiles, doubling on each return,
+  box below) broke through "way too quick"; he asked for it upside down
+  with a plain corridor. `clipper/ball_breakin.py` (`format: "breakin"`,
+  dispatched by `_parts`): one ball in a rainbow ring at the bottom (no
+  gravity, steady 520 px/s, tiny random turns, balls pass through each
+  other), a 92 px gap at the top into a plain corridor, a room of 11x11
+  tiles on top. Every broken tile spawns a ball there. With 1-hit tiles the
+  room went in ~1 s, so hits needed rise from 1 at the entrance row to 6
+  at the far row (numbers on the tiles): the room clears ~10-15 s after
+  the first ball gets in. The ladder runs on ball count (log scale); the
+  last item appears when the room is cleared. `good_end` 18-42 s, which
+  with `MAX_UNLOCK_GAP` keeps the wait to get in at ~6-18 s (about 1 in 4
+  seeds pass). Its own hooks ("Can one cookie clear the room?",
+  `BREAKIN_HOOKS`), endings (`CLEARED!`...) and description, drawn from a
+  separate rng, so the other formats' recipes are unchanged (checked on
+  800 recipes). Neon look like the rings, backgrounds black / space /
+  blurred (`_BREAKIN_BACKDROP_DRAW`; the synthwave grid would sit behind
+  the ring). ~3 min to make a 34 s video. `BALLS_FORMAT_CYCLE` is 10
+  slots now: escape x3, touch x3, breakin x2, evolve x2.
 
 ## Instagram posting (Oct 2026)
 

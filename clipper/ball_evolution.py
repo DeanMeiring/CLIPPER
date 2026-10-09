@@ -85,6 +85,12 @@ BACKDROPS = ["gradient", "glow", "stars", "grid", "dots"]    # behind the machin
 # draw list repeats it.
 RING_BACKDROPS = ["black", "space", "synthwave", "blurred"]
 _RING_BACKDROP_DRAW = ["black"] * 3 + ["space"] * 2 + ["synthwave"] * 2 + ["blurred"]
+# "Break in" (clipper/ball_breakin.py) has its ring at the bottom, where
+# the synthwave grid would sit behind it and the count, so it goes without.
+_BREAKIN_BACKDROP_DRAW = ["black"] * 3 + ["space"] * 2 + ["blurred"]
+BREAKIN_HOOKS = ["Can one {item} clear the room?", "Will one {item} break in?",
+                 "One {item} vs a room of bricks", "How long until it breaks in?"]
+BREAKIN_ENDINGS = ["CLEARED!", "ROOM CLEARED!", "ALL GONE!"]
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -139,7 +145,7 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 # ---- recipes -----------------------------------------------------------
 
-FORMATS = ("evolve", "escape", "touch")      # escape/touch: clipper/ball_circles.py
+FORMATS = ("evolve", "escape", "touch", "breakin")   # escape/touch: ball_circles.py, breakin: ball_breakin.py
 
 
 def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
@@ -147,7 +153,7 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     rng = random.Random(f"recipe-{seed}")
     theme = theme or rng.choice(sorted(THEMES))
     scale = rng.choice(sorted(SCALES))
-    return {
+    recipe = {
         "seed": seed, "theme": theme,
         "course": course or rng.choice(COURSES),
         "jar": jar or rng.choice(JARS),
@@ -159,6 +165,13 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         "sound": rng.choice(SOUNDS),
         "format": fmt or "evolve",
     }
+    if fmt == "breakin":
+        # its own draw, so the other formats' recipes stay exactly as they were
+        b = random.Random(f"breakin-recipe-{seed}")
+        item = THEMES[theme]["chain"][0][1].lower()
+        recipe.update(backdrop=b.choice(_BREAKIN_BACKDROP_DRAW), hook=b.choice(BREAKIN_HOOKS).format(item=item),
+                      ending=b.choice(BREAKIN_ENDINGS))
+    return recipe
 
 
 def _load_history(path) -> list:
@@ -688,12 +701,18 @@ def _parts(recipe: dict):
     if recipe.get("format") in ("escape", "touch"):
         from clipper import ball_circles
         return ball_circles.CircleSim, ball_circles.CirclePainter
+    if recipe.get("format") == "breakin":
+        from clipper import ball_breakin
+        return ball_breakin.BreakInSim, ball_breakin.BreakInPainter
     return Sim, Painter
 
 
 def good_end(recipe: dict) -> tuple:
     if recipe.get("format") in ("escape", "touch"):
         return (25.0, 60.0)
+    if recipe.get("format") == "breakin":
+        # with MAX_UNLOCK_GAP this also keeps the wait to get in to ~6-18 s
+        return (18.0, 42.0)
     n = len(THEMES[recipe["theme"]]["chain"])
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -1218,6 +1237,11 @@ def publish_text(recipe: dict) -> dict:
     theme = THEMES[recipe["theme"]]
     first = emoji_char(theme["chain"][0][0])
     title = f"{recipe['hook']} {first}"
+    if recipe.get("format") == "breakin":
+        desc = (f"One {first} bounces around until it finds the way in. Every brick it breaks makes "
+                f"another one, so once it's in, there's no stopping it.\n\n"
+                f"Guess how long it takes 👇\n\n#satisfying #physics #brickbreaker #asmr")
+        return {"title": title[:100], "description": desc}
     desc = (f"It starts with one {first}. Every gold peg sends out another, and two of the same "
             f"merge into something bigger. Can it reach the end?\n\n"
             f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
