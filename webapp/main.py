@@ -30,7 +30,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
-from clipper.captions import build_ass, build_card_ass, card_ass_path, clean_hook_text, hook_line_ass
+from clipper.captions import build_ass, build_card_ass, card_ass_path, clean_hook_text, hook_line_ass, set_hook_text
 from clipper.download import _ffprobe_duration, download_video, is_url, probe_video
 from clipper import hook_line
 from clipper import documentary
@@ -1983,6 +1983,39 @@ def mark_clip_irl(job_id: str, filename: str, card: Optional[bool] = None) -> di
     _persist(job_id)
     job_queue.put(job_id)
     return {"ok": True}
+
+
+class CardTextRequest(BaseModel):
+    text: str = ""
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/card-text")
+def set_clip_card_text(job_id: str, filename: str, req: CardTextRequest) -> dict:
+    """Change the text on a card clip (the hook shown as the post text) and
+    re-render it. Empty text leaves the card without post text. The clip's
+    normal .ass gets the same hook, so switching to the old look matches."""
+    if Path(filename).name != filename:
+        raise HTTPException(400, "bad filename")
+    text = clean_hook_text(req.text)[:150]
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "job is still running -- wait for it to finish first")
+        clip = next((c for c in (job.get("clips") or []) if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if not clip.get("is_card"):
+            raise HTTPException(409, "this clip isn't in the card style -- switch it to the card style first")
+        ass_path = BASE_DIR / job_id / f"_{Path(filename).stem}.ass"
+        if not ass_path.exists():
+            raise HTTPException(409, "its caption file is missing")
+        clip["hook_text"] = text or None
+    set_hook_text(ass_path, text)
+    clip_registry.update_fields(_clip_registry_path, _registry_id(job_id, clip), hook_text=text or None)
+    _persist(job_id)
+    return mark_clip_irl(job_id, filename, card=True)
 
 
 @protected.get("/api/jobs/{job_id}")
@@ -8455,6 +8488,32 @@ async function poll(jobId) {
           const cardBtn = document.createElement('button');
           cardBtn.type = 'button';
           cardBtn.textContent = c.is_card ? '🪪 Switch to old look' : '🪪 Switch to card style';
+          if (c.is_card) {
+            const textBtn = document.createElement('button');
+            textBtn.type = 'button';
+            textBtn.textContent = '✏️ Edit card text';
+            textBtn.addEventListener('click', async () => {
+              const text = prompt('Text on the card (leave empty for none):', c.hook_text || '');
+              if (text === null) return;
+              textBtn.disabled = true;
+              textBtn.textContent = 'Starting...';
+              try {
+                const r = await fetch(`/api/jobs/${jobId}/clips/${c.file}/card-text`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+                if (!r.ok) {
+                  const data = await r.json().catch(() => ({}));
+                  alert(data.detail || 'Could not change the text.');
+                  return;
+                }
+                loadJobsList();
+                attachToJob(jobId);
+              } finally {
+                textBtn.disabled = false;
+                textBtn.textContent = '✏️ Edit card text';
+              }
+            });
+            secondaryRow.appendChild(textBtn);
+          }
           cardBtn.addEventListener('click', async () => {
             cardBtn.disabled = true;
             cardBtn.textContent = 'Starting...';
