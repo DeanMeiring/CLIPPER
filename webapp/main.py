@@ -5955,7 +5955,7 @@ def _balls_make(vid: str) -> None:
     video = _balls.load(vid)
     opts = video.get("options") or {}
     settings = _balls.settings()
-    fmt = opts.get("format") or _balls_format_for(datetime.datetime.now(_balls_tz()).date())
+    fmt = opts.get("format") or _balls_next_format(settings)
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
@@ -6059,7 +6059,10 @@ def _balls_view(v: dict) -> dict:
     return c
 
 
-BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch")   # one per day, both slots that day
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch")
+# Which kind each posting slot gets, in turn (slot by slot, not day by
+# day). Dean saw the ring videos get more views, so 3 in 4 are rings.
+BALLS_FORMAT_CYCLE = ("escape", "touch", "escape", "evolve", "touch", "escape", "touch", "evolve")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply"}
 
 
@@ -6068,8 +6071,20 @@ def _balls_tz():
     return ZoneInfo(rocket_league.TZ)
 
 
-def _balls_format_for(day: datetime.date) -> str:
-    return BALLS_FORMAT_ROTATION[day.toordinal() % len(BALLS_FORMAT_ROTATION)]
+def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
+    """The kind of video for the posting slot at dt (BALLS_FORMAT_CYCLE)."""
+    times = _balls_slot_times(s or _balls.settings())
+    local = dt.astimezone(_balls_tz())
+    hm = local.strftime("%H:%M")
+    pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
+    i = local.date().toordinal() * len(times) + pos
+    return BALLS_FORMAT_CYCLE[i % len(BALLS_FORMAT_CYCLE)]
+
+
+def _balls_next_format(s: Optional[dict] = None) -> str:
+    s = s or _balls.settings()
+    ahead = _balls_slots_ahead(s, 2)
+    return _balls_format_for(ahead[0], s) if ahead else BALLS_FORMAT_CYCLE[0]
 
 
 def _balls_slot_times(s: dict) -> List[str]:
@@ -6169,11 +6184,11 @@ def balls_state() -> dict:
             by_slot[key] = v
     for dt in _balls_slots_ahead(s, max(1, int(s.get("ahead_days") or 2)))[:6]:
         v = by_slot.get(_slot_key(dt))
-        upcoming.append({"at": dt.isoformat(), "format": _balls_format_for(dt.date()),
+        upcoming.append({"at": dt.isoformat(), "format": _balls_format_for(dt, s),
                          "video": v["id"] if v else None, "status": _balls_view(v)["status"] if v else None,
                          "title": (v or {}).get("title")})
     autopilot = {"on": bool(s.get("autopilot")), "slots": _balls_slot_times(s), "upcoming": upcoming,
-                 "today": _balls_format_for(today), "tomorrow": _balls_format_for(today + datetime.timedelta(days=1)),
+                 "today": _balls_next_format(s),
                  "waker": bool(os.environ.get("AUTOPILOT_KEY")), "last_tick": _balls_last_tick}
     used = 0
     root = BASE_DIR / "_balls"
@@ -6351,7 +6366,7 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         for dt in _balls_slots_ahead(s, max(1, min(int(s.get("ahead_days") or 2), 3)), now):
             if dt < now + datetime.timedelta(minutes=20) or _slot_key(dt) in taken or making >= BALLS_MAX_QUEUE:
                 continue
-            _balls.new_video({"format": _balls_format_for(dt.date()), "slot": _slot_key(dt), "auto": True})
+            _balls.new_video({"format": _balls_format_for(dt, s), "slot": _slot_key(dt), "auto": True})
             taken.add(_slot_key(dt))
             making += 1
             out["planned"] += 1
@@ -11288,7 +11303,7 @@ function fillOptions() {
   if (filled) return;
   filled = true;
   const opt = (sel, v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
-  opt($('m-format'), '', `📆 Today's kind (${fmtLabel(S.autopilot.today)})`);
+  opt($('m-format'), '', `📆 Next slot's kind (${fmtLabel(S.autopilot.today)})`);
   for (const f of S.options.formats) opt($('m-format'), f.key, f.label);
   opt($('m-theme'), '', '🔀 Auto');
   for (const t of S.options.themes) opt($('m-theme'), t.key, t.label);
@@ -11376,8 +11391,8 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
   $('ap-hint').textContent = ap.on
-    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Today is ${fmtLabel(ap.today)}, tomorrow ${fmtLabel(ap.tomorrow)}. You can still change titles, delete one (another is made for that time) or post your own.`
-    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, taking turns: ${S.options.formats.map(f => f.label).join(' → ')}.`;
+    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Mostly ring videos: 3 in 4 are ⭕ / ✨, every 4th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
+    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, mostly ring videos (3 in 4) with 🧬 Evolve every 4th.`;
   const plan = $('ap-plan'); plan.innerHTML = '';
   plan.style.display = ap.on ? '' : 'none';
   const word = { queued: '⏳ waiting to be made', picking: '🧪 being made', rendering: '🎬 being made', ready: '✅ made, uploads soon',
