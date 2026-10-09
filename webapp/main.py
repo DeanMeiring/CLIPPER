@@ -268,8 +268,10 @@ class JobRequest(BaseModel):
     source: str
     focus: Optional[str] = None
     num_clips: int = 5
-    min_len: float = 15.0
-    max_len: float = 90.0
+    # Shorts of 20 s or less get about 2.5x the views of longer ones on
+    # Caught On Stream (Oct 2026, last 47 Shorts), so that's the default.
+    min_len: float = 10.0
+    max_len: float = 20.0
     # YouTube's auto-caption timestamps lag the actual audio noticeably --
     # Whisper aligns word timing to the audio itself, so default to it for
     # captions that don't look delayed. Slower, but accurate.
@@ -301,8 +303,10 @@ class JobRequest(BaseModel):
 class RegenerateRequest(BaseModel):
     focus: Optional[str] = None
     num_clips: int = 3
-    min_len: float = 15.0
-    max_len: float = 90.0
+    # Shorts of 20 s or less get about 2.5x the views of longer ones on
+    # Caught On Stream (Oct 2026, last 47 Shorts), so that's the default.
+    min_len: float = 10.0
+    max_len: float = 20.0
     reset_used: bool = False
 
 
@@ -1362,8 +1366,8 @@ def _run_regenerate(job_id: str, req: dict) -> None:
 
     num_clips = max(1, int(req.get("num_clips") or 3))
     focus = req.get("focus") or None
-    min_len = float(req.get("min_len") or 15.0)
-    max_len = min(float(req.get("max_len") or 90.0), MAX_SHORT_SECONDS)
+    min_len = float(req.get("min_len") or 10.0)
+    max_len = min(float(req.get("max_len") or 20.0), MAX_SHORT_SECONDS)
     reset_used = bool(req.get("reset_used"))
 
     with jobs_lock:
@@ -6904,12 +6908,12 @@ __NAV_LINKS__
   </div>
   <div>
     <label>Min length (s)</label>
-    <input id="min_len" type="number" value="15">
+    <input id="min_len" type="number" value="10">
   </div>
   <div>
     <label>Max length (s)</label>
-    <input id="max_len" type="number" value="45" max="60">
-    <div class="hint">Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.</div>
+    <input id="max_len" type="number" value="20" max="60">
+    <div class="hint">20 s or less is the default: on this channel those Shorts get about 2.5x the views of longer ones. Capped at 60s -- past that, YouTube can silently upload it as a regular video instead of a Short.</div>
   </div>
 </div>
 
