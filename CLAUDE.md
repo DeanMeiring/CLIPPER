@@ -524,6 +524,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   as the next item; ladder + "NEW:" banner). Tuning lessons: escape was
   ~65 s with a slow spin / small gap; now 35-45 s; touch 26-38 s.
   `good_end` for both is 25-60 s.
+- **Gates, wheel, Halloween (Oct 2026):** Dean asked for multiplier and
+  spinning-wheel versions of Evolve, and Halloween themes. Two more
+  courses in `COURSES`: `gates` (three rows of sensor segments,
+  collision_type 4, labelled ×2 / +1 / +2 and shuffled per seed; a tier-0
+  item passing one spawns that many copies just under it, each gate once
+  per item, copies inherit `hit`; no gold pegs: the hole drips one item
+  every `GATE_DRIP` 1.1 s instead; counter reads "made"; a "×2" label pops
+  where items pass, at most one per gate per 0.35 s, faded in `Sim.step`)
+  and `wheel` (one kinematic body: three bars through a solid 70 px hub =
+  six spokes, slick spokes; with four bars and grippy spokes items rode
+  the pockets by the hub forever and runs stalled; gold pegs above and in
+  columns beside it). Both reach the end in the good window on about half
+  of seeds, which `pick_seed` handles. Halloween pack in `ball_themes`
+  (haunted, witch, graveyard, monsters, trick_or_treat, plus the old
+  spooky; 14 more emoji copied in from the same Fluent package);
+  `ball_themes.SEASONS` (October = Halloween, December = winter) gives
+  those themes +3 in `pick_recipe`, about 40% of picks in October. Long
+  hooks now shrink to fit the width.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips
