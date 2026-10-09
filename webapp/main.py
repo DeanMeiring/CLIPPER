@@ -5895,7 +5895,11 @@ def rl_settings(req: RLSettings) -> dict:
 # 3-5 minute render never holds the web server's GIL or threads.
 _balls = ball_channel.Store(BASE_DIR / "_balls")
 BALLS_PROFILE = "balls"
-BALLS_UPLOADS_PER_DAY = 2   # the YouTube upload quota is shared with every other channel here
+# The YouTube upload quota is shared with every other channel here. Two
+# posts a day need 2; the third is catch-up room: a slot missed because the
+# day's uploads were used (e.g. a manual post) goes up late, and without a
+# spare upload every later 08:00 post would then stay a day behind.
+BALLS_UPLOADS_PER_DAY = 3
 BALLS_KEEP_DAYS = 3         # a posted Short's video is kept this long, then deleted to save space
 BALLS_MAX_QUEUE = 10
 BALLS_TIMEOUT = 40 * 60     # a make that runs longer than this is stuck
