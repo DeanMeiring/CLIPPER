@@ -6153,7 +6153,7 @@ def _balls_taken_slots(videos: List[dict]) -> set:
     out = set()
     for v in videos:
         ts = (v.get("youtube") or {}).get("publish_at_ts")
-        if ts:
+        if ts and not v["youtube"].get("removed"):
             out.add(_slot_key(datetime.datetime.fromtimestamp(ts, _balls_tz())))
         slot = (v.get("options") or {}).get("slot")
         if slot and v.get("status") != "error" and not v.get("youtube"):
@@ -6177,7 +6177,7 @@ def _balls_taken(videos: List[dict]) -> dict:
     out: dict = {}
     for v in videos:
         ts = (v.get("youtube") or {}).get("publish_at_ts")
-        if ts:
+        if ts and not v["youtube"].get("removed"):
             day = datetime.datetime.fromtimestamp(ts, _balls_tz()).date().isoformat()
             out[day] = out.get(day, 0) + 1
     return out
@@ -6213,6 +6213,8 @@ def balls_state() -> dict:
     upcoming = []
     by_slot = {}
     for v in videos:
+        if (v.get("youtube") or {}).get("removed"):
+            continue
         key = (v.get("options") or {}).get("slot")
         ts = (v.get("youtube") or {}).get("publish_at_ts")
         if ts:
@@ -6433,7 +6435,7 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
             for v in _balls.videos():
                 yt = v.get("youtube") or {}
                 ts = yt.get("publish_at_ts") or 0
-                if (not ts or ts > time.time() or time.time() - ts > 12 * 3600 or v.get("instagram")
+                if (not ts or ts > time.time() or time.time() - ts > 12 * 3600 or v.get("instagram") or yt.get("removed")
                         or v["id"] in _balls_instagram or not (_balls.video_dir(v["id"]) / "video.mp4").is_file()):
                     continue
                 _balls_instagram.add(v["id"])
@@ -6536,6 +6538,75 @@ def balls_instagram(vid: str) -> dict:
     _balls.update(vid, lambda v: v.update(instagram={"status": "posting", "started_at": time.time()}))
     threading.Thread(target=_balls_post_instagram, args=(vid, token), daemon=True).start()
     return _balls_view(_balls.load(vid))
+
+
+def _balls_on_youtube(token: str, video_ids: List[str]) -> Optional[set]:
+    """Which of these videos are still on the channel (None: couldn't tell).
+    The owner's token sees private and scheduled ones too."""
+    import requests
+    try:
+        resp = requests.get("https://www.googleapis.com/youtube/v3/videos",
+                            params={"part": "id", "id": ",".join(video_ids)},
+                            headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        resp.raise_for_status()
+        return {item["id"] for item in resp.json().get("items") or []}
+    except (requests.RequestException, ValueError, KeyError):
+        return None
+
+
+def _balls_remake(vid: str) -> None:
+    """Throw this video away (stopping its make if one runs) and queue it
+    to be made again from scratch: new recipe, title and description."""
+    proc = _balls_active.get(vid)
+    if proc is not None and proc.poll() is None:
+        _balls_cancelled.add(vid)
+        proc.kill()
+    (_balls.video_dir(vid) / "video.mp4").unlink(missing_ok=True)
+    _balls.update(vid, lambda v: v.update(status="queued", progress=0.0, tried=0, recipe=None, error=None,
+                                          title=None, description=None, made_at=None, seconds=None,
+                                          unlocks=None, dropped=None))
+
+
+@protected.post("/api/balls/remake-upcoming")
+def balls_remake_upcoming() -> dict:
+    """Make every video that isn't public yet again with the current look
+    (Dean: after a design fix, the ones queued for the next days still had
+    the old one). A video already scheduled on YouTube can't be swapped
+    from here -- the app may upload but not delete -- so it's listed with
+    its YouTube Studio link; once Dean has deleted it there, pressing again
+    frees its time and a new one is made for it."""
+    now = time.time()
+    out = {"remade": 0, "replaced": 0, "on_youtube": [], "unchecked": False}
+    videos = [v for v in _balls.videos() if not v.get("hidden")]
+    for v in videos:
+        made = v.get("recipe") or v.get("status") in ("picking", "rendering", "ready", "error")
+        if v.get("youtube") or v["id"] in _balls_uploading or not made:
+            continue        # on YouTube, uploading right now, or not made yet (it'll get the new look)
+        _balls_remake(v["id"])
+        out["remade"] += 1
+    scheduled = [v for v in videos if (v.get("youtube") or {}).get("video_id")
+                 and (v["youtube"].get("publish_at_ts") or 0) > now + 60]
+    if scheduled:
+        token = _youtube_token_stores[BALLS_PROFILE].get_valid_access_token()
+        alive = _balls_on_youtube(token, [v["youtube"]["video_id"] for v in scheduled]) if token else None
+        out["unchecked"] = alive is None
+        for v in scheduled:
+            yt = v["youtube"]
+            if alive is not None and yt["video_id"] not in alive:
+                # deleted in Studio: keep the record (it still counts toward
+                # today's uploads) but give its time to a new video
+                slot = _slot_key(datetime.datetime.fromtimestamp(yt["publish_at_ts"], _balls_tz()))
+                (_balls.video_dir(v["id"]) / "video.mp4").unlink(missing_ok=True)
+                _balls.update(v["id"], lambda x: x.update(hidden=True, youtube=dict(x["youtube"], removed=True)))
+                fmt = (v.get("recipe") or {}).get("format") or (v.get("options") or {}).get("format")
+                _balls.new_video(dict(v.get("options") or {}, slot=slot, format=fmt, auto=True))
+                out["replaced"] += 1
+            else:
+                out["on_youtube"].append({"id": v["id"], "title": v.get("title"), "at": yt.get("publish_at"),
+                                          "studio": f"https://studio.youtube.com/video/{yt['video_id']}/edit"})
+    if out["remade"] or out["replaced"]:
+        _balls_start_worker()
+    return dict(balls_state(), remake=out)
 
 
 @protected.delete("/api/balls/videos/{vid}")
@@ -11324,6 +11395,9 @@ __NAV_LINKS__
     <label class="check"><input id="ap-ig" type="checkbox"> 📸 Also post each one to Instagram when it goes public</label>
     <div class="plan" id="ap-plan"></div>
     <div class="status bad" id="ap-warn" style="display:none;margin-top:10px"></div>
+    <button id="remake" type="button" class="secondary">♻️ Remake upcoming videos with the newest look</button>
+    <div class="hint">After a design change: every video that isn’t public yet is made again from scratch, for the same times.</div>
+    <div class="status ok" id="remake-out" style="display:none;margin-top:10px"></div>
     <details><summary>Added under every description</summary><textarea id="s-desc" rows="3" placeholder="e.g. New one every day!"></textarea></details>
     <div class="days" id="days"></div>
     <div class="hint" id="quota"></div>
@@ -11474,6 +11548,32 @@ function renderAutopilot() {
   for (const e of ((ap.last_tick || {}).errors || [])) msgs.push('⚠️ ' + e);
   warn.style.display = msgs.length ? '' : 'none';
   warn.textContent = msgs.join(' ');
+}
+$('remake').onclick = async () => {
+  if (!confirm('Make every video that isn’t public yet again, with the newest look? Ones already scheduled on YouTube stay there until you delete them in YouTube Studio (the page lists them).')) return;
+  const b = $('remake'); b.disabled = true;
+  try {
+    const out = await api('/api/balls/remake-upcoming', { method: 'POST' });
+    showRemake(out.remake);
+    await load();
+  } catch (e) { alert(e.message); }
+  b.disabled = false;
+};
+function showRemake(r) {
+  const box = $('remake-out'); box.innerHTML = ''; box.style.display = '';
+  const line = (t) => box.appendChild(el('div', '', t));
+  if (r.remade) line(`♻️ ${r.remade} being made again with the newest look.`);
+  if (r.replaced) line(`🗑 ${r.replaced} you deleted on YouTube: new ones are being made for their times.`);
+  if (r.unchecked) line('⚠️ Couldn’t check YouTube just now. Try again in a minute.');
+  if (r.on_youtube.length) {
+    line(`📅 ${r.on_youtube.length} already scheduled on YouTube. This app can upload but not delete there, so open each one, delete it (⋮ menu → Delete forever), then press the button again: a new one is made for the same time.`);
+    for (const v of r.on_youtube) {
+      const a = el('a', '', `${v.at ? slotText(v.at) : ''} · ${v.title || 'video'} ↗`);
+      a.href = v.studio; a.target = '_blank'; a.rel = 'noopener';
+      box.appendChild(el('div')).appendChild(a);
+    }
+  }
+  if (!box.childNodes.length) line('Nothing to remake: no video is waiting to be posted.');
 }
 $('make').onclick = async () => {
   const b = $('make'); b.disabled = true;

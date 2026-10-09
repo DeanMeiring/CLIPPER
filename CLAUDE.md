@@ -666,6 +666,19 @@ merge it yourself; merging stays Dean's call per the rule above.
   idle until the page was opened: now a startup thread restarts the loop
   when autopilot is on, and every tick runs `_balls_resume` (requeues a
   video a restart cut off mid-make, starts the worker for queued ones).
+  "♻️ Remake upcoming videos with the newest look" (Posting section,
+  `POST /api/balls/remake-upcoming`; Dean asked after a design fix left
+  the next days' videos in the old look): every video that isn't public
+  yet and was already made (or is being made: its process is killed) is
+  queued again from scratch -- new recipe, title, description, same slot;
+  not-yet-made ones are left alone. Ones already scheduled on YouTube
+  can't be swapped: the OAuth scopes allow upload but not delete (adding
+  delete would mean a broader scope + reconnecting), so they're listed
+  with Studio links; after Dean deletes one there, pressing again sees it
+  gone (`videos.list` with his token, 1 unit), hides the record with
+  `youtube.removed` (still counts toward the day's uploads, no longer
+  holds its slot or gets an Instagram post) and plans a new video for
+  that time.
 
 ## Instagram posting (Oct 2026)
 
