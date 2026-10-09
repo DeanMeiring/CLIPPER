@@ -542,6 +542,23 @@ merge it yourself; merging stays Dean's call per the rule above.
   `ball_themes.SEASONS` (October = Halloween, December = winter) gives
   those themes +3 in `pick_recipe`, about 40% of picks in October. Long
   hooks now shrink to fit the width.
+- **Gumball (Oct 2026):** Dean found the box course + narrow neck + jar
+  "weird and difficult to follow" and picked the gumball from five drawn
+  shapes (tube, gumball, hourglass, round flask, vase). `JARS` is now just
+  `gumball` (old box/bowl/flask in `OLD_JARS` still render old recipes
+  exactly as before): one outline, a 260 px neck from the hole down into a
+  globe (`GUMBALL` cx 540, cy 1100, r 520). `_build`'s `Y()` maps every
+  course's 400..1030 band into 665..1085 and `inside()` keeps pegs,
+  spinners, bumpers, ramps, gates (as wide as the globe at that height) and
+  the wheel inside it. Lessons: pegs right under the neck made wedges
+  (band moved down); squeezed staggered rows got closer than an item and
+  formed a mesh (gumball pegs keep >= 2r+40 apart); spinners flicked items
+  out of the open neck, and a lid made items roll off its outside, so an
+  item flung back up the neck simply vanishes "into the hole"; fewer pegs
+  fit, so more are gold (x1.3, max 0.62); gates' drip starts at 1.5 s and
+  speeds up (a steady drip left a long wait for the last item). `Sim.geo`
+  (`_geo`) holds the merge / landed / pull / wait-count lines and the
+  counter position per machine. 30-80% of seeds per course are good.
 - Course tuning lessons: long full-width ramps were too slow (~16 s to
   roll down three); balls rest forever in any gap narrower than a ball
   (peg-wall pockets, peg pairs, ramp ends at a wall), so `peg()` skips

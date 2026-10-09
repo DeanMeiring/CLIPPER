@@ -65,7 +65,7 @@ PULL = 900.0             # px/s^2, a bit more than gravity
 SECONDS_CAP = 90.0
 END_HOLD = 4.0
 MAX_UNLOCK_GAP = 18.0
-GATE_DRIP = 1.1          # gates course: one item from the hole every this many s
+GATE_DRIP = 1.5          # gates course: the hole drips every this many s at first
 
 # ---- themes: (emoji file, name) small to big ---------------------------
 # The evolution chains live in clipper/ball_themes.py (57 of them). The
@@ -80,7 +80,40 @@ COURSES = ["pegs", "triangle", "spinners", "ramps", "bumpers", "gates", "wheel"]
 SKINS = ["bubble", "glass", "plain", "neon"]                 # how each item is drawn
 BACKDROPS = ["gradient", "glow", "stars", "grid", "dots"]    # behind the machine
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
-JARS = ["box", "bowl", "flask"]
+# Dean found the box course + narrow neck + jar hard to follow and picked
+# the gumball (one round globe under a short neck) from five mockups; the
+# old jars stay for re-rendering old recipes.
+JARS = ["gumball"]
+OLD_JARS = ["box", "bowl", "flask"]
+GUMBALL = {"cx": 540, "cy": 1100, "r": 520, "neck": 130}
+# The course band 400..1030 maps to 665..1085, leaving room under the neck
+# (pegs right under it made pockets where items wedged and the run stalled).
+_GUM_TOP, _GUM_SCALE = 665, 420 / 630
+_GUM_GOLD = 1.3          # fewer pegs fit in the globe: more of them are gold
+
+
+def _geo(recipe: dict) -> dict:
+    """Where items count as "in the jar" (merge, landed, pull), where the
+    hole's wait-count line is, and where the counter text goes."""
+    if recipe.get("jar") == "gumball":
+        cy, r = GUMBALL["cy"], GUMBALL["r"]
+        return {"merge_y": cy - 30, "above_y": cy - 110, "land_y": cy - 70, "pull_y": cy - 90,
+                "text_y": cy + r + 24, "text_l": 110, "text_r": 970}
+    return {"merge_y": NECK_Y - 10, "above_y": NECK_Y, "land_y": JAR_TOP - 40, "pull_y": JAR_TOP - 60,
+            "text_y": JAR_BOT + 18, "text_l": JAR_L, "text_r": JAR_R}
+
+
+def _gumball_points() -> list:
+    """The neck down from the hole, then the globe, as one open outline."""
+    cx, cy, r, n = GUMBALL["cx"], GUMBALL["cy"], GUMBALL["r"], GUMBALL["neck"]
+    a0 = math.asin(n / r)
+    pts = [(cx - n, 380)]
+    steps = 96
+    for k in range(steps + 1):
+        a = -math.pi / 2 - a0 - (2 * math.pi - 2 * a0) * k / steps
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    pts.append((cx + n, 380))
+    return pts
 ENDINGS = ["EVOLVED!", "FINAL FORM!", "MAXED OUT!"]
 
 KEYS = {"C": 261.63, "D": 293.66, "Eb": 311.13, "F": 349.23, "G": 392.00, "A": 220.00 * 2}
@@ -191,6 +224,19 @@ def _jar_points(jar: str) -> list:
 def _build(recipe: dict):
     import pymunk
 
+    gum = recipe.get("jar") == "gumball"
+
+    def Y(y):                    # course coordinates -> this machine's
+        return _GUM_TOP + (y - COURSE_TOP) * _GUM_SCALE if gum else y
+
+    def inside(x, y, m):         # is (x, y) at least m inside the walls?
+        if not gum:
+            return WALL_L + m <= x <= WALL_R - m
+        cx, cy, r, n = GUMBALL["cx"], GUMBALL["cy"], GUMBALL["r"], GUMBALL["neck"]
+        if math.hypot(x - cx, y - cy) <= r - m:
+            return True
+        return y < cy and abs(x - cx) <= n - m
+
     rng = random.Random(recipe["seed"])
     space = pymunk.Space()
     space.gravity = (0, GRAVITY)
@@ -200,26 +246,37 @@ def _build(recipe: dict):
     pegs = []       # {"shape","pos","r","gold","flash","note"}
     spinners = []   # {"body","half"}
 
-    for a, b in [((WALL_L, COURSE_TOP - 20), (WALL_L, COURSE_BOT)),
-                 ((WALL_R, COURSE_TOP - 20), (WALL_R, COURSE_BOT)),
-                 ((WALL_L, COURSE_BOT), (NECK_L, NECK_Y)), ((WALL_R, COURSE_BOT), (NECK_R, NECK_Y))]:
-        parts.append(_seg(space, static, a, b))
-    jar = _jar_points(recipe["jar"])
-    for a, b in zip(jar, jar[1:]):
-        parts.append(_seg(space, static, a, b, kind="jar"))
+    if gum:
+        outline = _gumball_points()
+        for a, b in zip(outline, outline[1:]):
+            parts.append(_seg(space, static, a, b, r=7, kind="jar"))
+    else:
+        for a, b in [((WALL_L, COURSE_TOP - 20), (WALL_L, COURSE_BOT)),
+                     ((WALL_R, COURSE_TOP - 20), (WALL_R, COURSE_BOT)),
+                     ((WALL_L, COURSE_BOT), (NECK_L, NECK_Y)), ((WALL_R, COURSE_BOT), (NECK_R, NECK_Y))]:
+            parts.append(_seg(space, static, a, b))
+        jar = _jar_points(recipe["jar"])
+        for a, b in zip(jar, jar[1:]):
+            parts.append(_seg(space, static, a, b, kind="jar"))
 
     def peg(x, y, gold_share, r=PEG_R, elasticity=0.55):
         # a peg too close to a wall makes a pocket narrower than a ball,
         # where one can rest forever; leave those out
         room = 6 + r + 38
-        if not WALL_L + room <= x <= WALL_R - room:
+        y = Y(y)
+        if not inside(x, y, room):
+            return
+        # squeezed into the globe, staggered rows can end up closer than an
+        # item is wide and form a mesh nothing passes through
+        if gum and any(math.dist((x, y), q["pos"]) < 2 * r + 40 for q in pegs):
             return
         p = pymunk.Circle(static, r, (x, y))
         p.elasticity, p.friction = elasticity, 0.3
         p.collision_type = 2
         space.add(p)
         note = int((x - WALL_L) / (WALL_R - WALL_L) * 10)     # left low, right high
-        pegs.append({"shape": p, "pos": (x, y), "r": r, "gold": rng.random() < gold_share,
+        pegs.append({"shape": p, "pos": (x, y), "r": r,
+                     "gold": rng.random() < (min(0.62, gold_share * _GUM_GOLD) if gum else gold_share),
                      "flash": 0.0, "note": max(0, min(9, note))})
 
     course = recipe["course"]
@@ -248,10 +305,12 @@ def _build(recipe: dict):
         for row, y in enumerate((540, 800)):
             xs = (230, 540, 850) if row == 0 else (385, 695)
             for k, x in enumerate(xs):
+                half = 80 if gum else 95
+                if not inside(x, Y(y), half + 30):
+                    continue
                 body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-                body.position = (x, y)
+                body.position = (x, Y(y))
                 body.angular_velocity = speed * (1 if (k + row) % 2 == 0 else -1)
-                half = 95
                 s = pymunk.Segment(body, (-half, 0), (half, 0), 8)
                 s.elasticity, s.friction = 0.5, 0.4
                 s.collision_type = 3
@@ -276,7 +335,11 @@ def _build(recipe: dict):
         # a ball-wide gap left at every low end so nothing gets pinned.
         for x, y, d in ((330, 470, 1), (750, 470, -1), (270, 615, -1), (810, 615, 1)):
             dx, dy = half * math.cos(tilt), half * math.sin(tilt) * d
-            parts.append(_seg(space, static, (x - dx, y - dy), (x + dx, y + dy), r=7,
+            if gum:
+                dx, dy = dx * 0.8, dy * 0.8
+                if not (inside(x - dx, Y(y) - dy, 45) and inside(x + dx, Y(y) + dy, 45)):
+                    continue
+            parts.append(_seg(space, static, (x - dx, Y(y) - dy), (x + dx, Y(y) + dy), r=7,
                               kind="ramp", elasticity=0.3, friction=0.05))
         share = rng.uniform(0.7, 0.76)
         gx = rng.choice([84, 92])
@@ -295,10 +358,15 @@ def _build(recipe: dict):
         mults = [[2, "+1"], ["+1", 2, "+2"], [2, "+2"]]
         rng.shuffle(mults[0]); rng.shuffle(mults[1]); rng.shuffle(mults[2])
         for row, (y, ms) in enumerate(zip((530, 750, 960), mults)):
+            y = Y(y)
             n = len(ms)
-            span = (WALL_R - WALL_L - 40) / n
+            left, right = WALL_L, WALL_R
+            if gum:          # as wide as the globe is at this height
+                hw = math.sqrt(max(0.0, GUMBALL["r"] ** 2 - (y - GUMBALL["cy"]) ** 2)) - 30
+                left, right = GUMBALL["cx"] - hw, GUMBALL["cx"] + hw
+            span = (right - left - 40) / n
             for i, m in enumerate(ms):
-                x0 = WALL_L + 20 + i * span + 14
+                x0 = left + 20 + i * span + 14
                 x1 = x0 + span - 28
                 g = _pm.Segment(static, (x0, y), (x1, y), 10)
                 g.sensor = True
@@ -309,7 +377,7 @@ def _build(recipe: dict):
                 space.add(g)
                 parts.append(g)
             for i in range(1, n):                     # dividers between gates
-                x = WALL_L + 20 + i * span
+                x = left + 20 + i * span
                 parts.append(_seg(space, static, (x, y - 34), (x, y + 10), r=6, kind="divider"))
         gx = rng.choice([92, 100])
         for y, off in ((430, 0), (640, gx / 2), (860, 0)):
@@ -322,9 +390,9 @@ def _build(recipe: dict):
         # that bats the items around, gold pegs above and beside it.
         speed = rng.uniform(0.9, 1.4) * rng.choice((-1, 1))
         body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-        body.position = (540, 715)
+        body.position = (540, Y(715))
         body.angular_velocity = speed
-        half = 235
+        half = 200 if gum else 235
         space.add(body)
         # Three bars = six spokes (pockets wide enough to spill), slick, and
         # a solid hub: with four bars and grippy spokes items rode the
@@ -357,8 +425,10 @@ def _build(recipe: dict):
     else:  # bumpers
         for y, xs in ((520, (250, 540, 830)), (760, (395, 685)), (960, (250, 830))):
             for x in xs:
-                r = rng.choice([40, 46, 52])
-                p = pymunk.Circle(static, r, (x, y))
+                r = rng.choice([40, 46, 52]) * (0.85 if gum else 1)
+                if not inside(x, Y(y), r + 45):
+                    continue
+                p = pymunk.Circle(static, r, (x, Y(y)))
                 p.elasticity, p.friction = 0.9, 0.2
                 p.collision_type = 3
                 p.part = "bumper"
@@ -368,7 +438,7 @@ def _build(recipe: dict):
         for y, off in ((430, 0), (475, 42), (630, 0), (675, 42), (855, 0), (900, 42)):
             x = WALL_L + 45 + off
             while x < WALL_R - 30:
-                if all(math.dist((x, y), q.offset) > q.radius + 30 for q in parts
+                if all(math.dist((x, Y(y)), q.offset) > q.radius + 30 for q in parts
                        if getattr(q, "part", "") == "bumper"):
                     peg(x, y, share)
                 x += 84
@@ -389,6 +459,7 @@ class Sim:
         self.last = len(self.chain) - 1
         self.radii = [17 * 1.29 ** k for k in range(len(self.chain))]
         self.rng, self.space, self.parts, self.pegs, self.spinners = _build(recipe)
+        self.geo = _geo(recipe)
         self.peg_by_shape = {p["shape"]: p for p in self.pegs}
         self.balls: list[dict] = []
         self.queue = [0]
@@ -430,7 +501,7 @@ class Sim:
         shape.collision_type = 1
         self.space.add(body, shape)
         b = {"body": body, "shape": shape, "tier": tier, "r": r0,
-             "hit": set(), "landed": False, "alive": True}
+             "hit": set(), "landed": False, "alive": True, "born": self.t}
         shape.ball = b
         self.balls.append(b)
         return b
@@ -473,8 +544,8 @@ class Sim:
     def _on_ball(self, arbiter, space, data):
         a, c = (getattr(s, "ball", None) for s in arbiter.shapes)
         if (a and c and a["tier"] == c["tier"] and a["tier"] < self.last
-                and a["body"].position.y > NECK_Y - 10
-                and c["body"].position.y > NECK_Y - 10):
+                and a["body"].position.y > self.geo["merge_y"]
+                and c["body"].position.y > self.geo["merge_y"]):
             self._merges.append((a, c))
 
     def _apply_merges(self):
@@ -505,7 +576,7 @@ class Sim:
         ones settling on opposite sides can't stall the run."""
         by_tier: dict[int, list] = {}
         for b in self.balls:
-            if b["tier"] >= PULL_FROM_TIER and b["body"].position.y > JAR_TOP - 60:
+            if b["tier"] >= PULL_FROM_TIER and b["body"].position.y > self.geo["pull_y"]:
                 by_tier.setdefault(b["tier"], []).append(b)
         for group in by_tier.values():
             if len(group) < 2:
@@ -521,7 +592,7 @@ class Sim:
     def step(self):
         dt = 1 / FPS
         self._release_cd -= dt
-        above = sum(1 for b in self.balls if b["body"].position.y < NECK_Y)
+        above = sum(1 for b in self.balls if b["body"].position.y < self.geo["above_y"])
         if (self.queue and self._release_cd <= 0 and self.done_at is None
                 and above < MAX_ABOVE_NECK):
             n = 1 if len(self.queue) < 6 else min(len(self.queue), 1 + len(self.queue) // 12)
@@ -531,13 +602,22 @@ class Sim:
                                (self.rng.uniform(-40, 40), 30))
                 self.spawned += 1
             self.hole_pulse = 1.0
-            self._release_cd = (GATE_DRIP if self.gate_course
+            # gates: the drip starts slow and speeds up, so the last items
+            # don't keep the viewer waiting (a steady drip grows linearly)
+            gate_cd = max(0.45, GATE_DRIP - 0.025 * self.t) * (1.15 if self.last <= 7 else 1.0)
+            self._release_cd = (gate_cd if self.gate_course
                                 else 0.7 if self.spawned < 4 else max(0.04, 0.45 - self.spawned * 0.004))
 
         for _ in range(4):
             self._pull_pairs()          # pymunk clears forces after every step
             self.space.step(dt / 4)
             self._apply_merges()        # never inside the collision callback
+        top = 372 if self.recipe.get("jar") == "gumball" else 150
+        for b in self.balls:            # anything flung out of the machine is gone
+            x, y = b["body"].position     # (in the gumball: back up the neck = into the hole)
+            if b["alive"] and not (-50 < x < W + 50 and (top if self.t - b["born"] > 0.6 else 150) < y < H + 50):
+                b["alive"] = False
+                self.space.remove(b["body"], b["shape"])
         self.balls[:] = [b for b in self.balls if b["alive"]]
 
         for b in self.balls:            # freshly merged items grow in ~0.2 s
@@ -545,7 +625,7 @@ class Sim:
             if b["r"] < full:
                 b["r"] = min(full, b["r"] + (full - self.radii[max(0, b["tier"] - 1)]) / 12)
                 b["shape"].unsafe_set_radius(b["r"])
-            if not b["landed"] and b["body"].position.y > JAR_TOP - 40:
+            if not b["landed"] and b["body"].position.y > self.geo["land_y"]:
                 b["landed"] = True
             # nothing may sit forever on a ramp end or a bumper's top
             if not b["landed"] and b["body"].velocity.length < 3 and self.rng.random() < 0.05:
@@ -554,7 +634,7 @@ class Sim:
         for b, g in self._gated:
             m = g.mult
             extra = (int(m[1:]) if isinstance(m, str) else m - 1)
-            above = sum(1 for x in self.balls if x["body"].position.y < NECK_Y)
+            above = sum(1 for x in self.balls if x["body"].position.y < self.geo["above_y"])
             if self.done_at is not None or above > MAX_ABOVE_NECK * 2 or self.spawned >= SPAWN_CAP:
                 extra = 0
             p, v = b["body"].position, b["body"].velocity
@@ -843,9 +923,10 @@ class Painter:
         self.header(im, d, sim)
         unit = THEMES[self.recipe["theme"]]["unit"]
         verb = "made" if getattr(sim, "gate_course", False) else "dropped"
-        d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} {verb}", font=self.f_small,
+        g = sim.geo
+        d.text((g["text_l"], g["text_y"]), f"{sim.spawned:,} {unit} {verb}", font=self.f_small,
                fill=(220, 230, 255, 255))
-        self.watermark(d, JAR_R, JAR_BOT + 18)
+        self.watermark(d, g["text_r"], g["text_y"])
         self.overlays(im, d, sim)
         return im
 
@@ -1188,7 +1269,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, help="start seed (default: random)")
     ap.add_argument("--theme", choices=sorted(THEMES))
     ap.add_argument("--course", choices=COURSES)
-    ap.add_argument("--jar", choices=JARS)
+    ap.add_argument("--jar", choices=JARS + OLD_JARS)
     ap.add_argument("--format", choices=FORMATS, default="evolve")
     ap.add_argument("--history", help="JSON file of past recipes; avoids repeats, gets appended")
     ap.add_argument("--exact", action="store_true", help="render this seed as is, no picking")
