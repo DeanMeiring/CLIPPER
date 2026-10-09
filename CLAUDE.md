@@ -93,6 +93,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   the picker and the AI overview read (`render_prompt_text`), and into a
   "What the clip picker learns from" block on Analytics. The picker
   prompt's own wording is unchanged.
+- **Short clips (Oct 2026):** Dean noticed shorter clips win. Checked on
+  the last 47 Shorts (vidIQ): <= 20 s median ~3.8k views, 6 of 7 over 2k;
+  21-60 s median ~1.3-1.5k. Clip length now defaults to 10-20 s
+  (`JobRequest` / `RegenerateRequest` / Generate more / the Home boxes);
+  the picker prompt only changes in those two numbers.
 - YouTube announced on 1 Oct 2026 that the Shorts feed will cut reach for
   channels that mainly re-upload others' clips without significant changes
   (voice-over describing the clip, minor edits and templates don't count;
