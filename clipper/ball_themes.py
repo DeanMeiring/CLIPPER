@@ -132,6 +132,23 @@ _SPECS = {
             "🧘 Stretch, 🤸 Flip, 🏃 Run, 🚴 Cycle, 🏋️ Lift, 🤼 Wrestle, 🥊 Boxing, 🥇 Gold, 🏆 Champion"),
     "camping": (["Can a match light up the night?", "What's the last thing at camp?"], "matches",
                 "🔥 Fire, 🪵 Log, 🔦 Flashlight, 🎒 Backpack, 🏕️ Campsite, 🌲 Forest, 🏔️ Mountain, 🌌 Night sky"),
+    # Halloween pack (with "spooky" above); favoured in October, see SEASONS
+    "haunted": (["Can a spider web become a haunted house?", "What's inside the haunted house?"], "webs",
+                "🕸️ Web, 🕷️ Spider, 🦇 Bat, 🦉 Owl, 🐺 Wolf, 👻 Ghost, 🌕 Full moon, 🏚️ Haunted house"),
+    "witch": (["Can a candle become a witch?", "What does the witch make?"], "candles",
+              "🕯️ Candle, 🧹 Broom, 🐈‍⬛ Black cat, 🧪 Potion, 🐍 Snake, 🔮 Crystal ball, 🌙 Moon, 🧙 Witch"),
+    "graveyard": (["Can a bone wake the graveyard?", "What crawls out of the grave?"], "bones",
+                  "🦴 Bone, 💀 Skull, ☠️ Crossbones, 🪦 Headstone, ⚰️ Coffin, 🧟 Zombie, 🧛 Vampire, 👻 Ghost, 😈 Devil"),
+    "monsters": (["Can a clown become the scariest monster?", "Which monster is last?"], "clowns",
+                 "🤡 Clown, 👺 Goblin, 👹 Ogre, 🧌 Troll, 🐺 Werewolf, 👽 Alien, 🧟 Zombie, 🧛 Vampire, 👿 Demon"),
+    "trick_or_treat": (["Can one candy fill the whole night?", "Trick or treat... what's last?"], "candies",
+                       "🍬 Candy, 🍭 Lollipop, 🍫 Chocolate, 🍂 Leaf, 🎭 Mask, 🕯️ Candle, 🎃 Pumpkin, 👻 Ghost, 🏚️ Haunted house"),
+}
+
+# Themes the picker favours in a season: month -> theme keys.
+SEASONS = {
+    10: {"spooky", "haunted", "witch", "graveyard", "monsters", "trick_or_treat"},
+    12: {"winter"},
 }
 
 

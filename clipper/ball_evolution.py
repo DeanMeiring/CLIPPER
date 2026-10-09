@@ -65,6 +65,7 @@ PULL = 900.0             # px/s^2, a bit more than gravity
 SECONDS_CAP = 90.0
 END_HOLD = 4.0
 MAX_UNLOCK_GAP = 18.0
+GATE_DRIP = 1.1          # gates course: one item from the hole every this many s
 
 # ---- themes: (emoji file, name) small to big ---------------------------
 # The evolution chains live in clipper/ball_themes.py (57 of them). The
@@ -75,7 +76,7 @@ THEMES = ball_themes.build()
 for _k, _bg in _LEGACY_BG.items():
     if _k in THEMES:
         THEMES[_k]["bg"] = _bg
-COURSES = ["pegs", "triangle", "spinners", "ramps", "bumpers"]
+COURSES = ["pegs", "triangle", "spinners", "ramps", "bumpers", "gates", "wheel"]
 SKINS = ["bubble", "glass", "plain", "neon"]                 # how each item is drawn
 BACKDROPS = ["gradient", "glow", "stars", "grid", "dots"]    # behind the machine
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
@@ -127,11 +128,15 @@ def _load_history(path) -> list:
         return []
 
 
-def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None, fmt=None) -> dict:
+def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None, fmt=None, today=None) -> dict:
     """A recipe that looks and sounds different from what was posted lately:
     its theme isn't one of the last ~20, its theme+course+jar combination is
     new, and its course, ball style, background and sound differ from the
-    last video's -- as far as the candidates allow (best score wins)."""
+    last video's -- as far as the candidates allow (best score wins). In a
+    season (ball_themes.SEASONS: Halloween in October) its themes score a
+    bit more, so they come up about every third video instead of rarely."""
+    import datetime
+    season = ball_themes.SEASONS.get((today or datetime.date.today()).month, set())
     window = min(20, max(3, len(THEMES) // 2))
     recent = {h.get("theme") for h in history[-window:]}
     def combo(h):
@@ -146,10 +151,11 @@ def pick_recipe(seed: int, history: list, theme=None, course=None, jar=None, fmt
         r["seed"] = seed
         score = (4 * (combo(r) not in combos)
                  + 4 * (bool(theme) or r["theme"] not in recent)
-                 + sum(r.get(f) != last.get(f) for f in ("course", "skin", "backdrop", "sound")))
+                 + sum(r.get(f) != last.get(f) for f in ("course", "skin", "backdrop", "sound"))
+                 + 3 * (not theme and r["theme"] in season))
         if score > best_score:
             best, best_score = r, score
-        if score == 12:
+        if score == 12 + 3 * bool(season):
             break
     return best
 
@@ -280,6 +286,74 @@ def _build(recipe: dict):
             while x < WALL_R - 30:
                 peg(x, y, share)
                 x += gx
+    elif course == "gates":
+        # Multiplier gates: every item that falls through one comes out as
+        # that many (copies appear right under the gate). Three rows, each
+        # split across the width, with a few plain pegs to spread the flow.
+        # No gold pegs: the hole drips steadily instead (see Sim.step).
+        import pymunk as _pm
+        mults = [[2, "+1"], ["+1", 2, "+2"], [2, "+2"]]
+        rng.shuffle(mults[0]); rng.shuffle(mults[1]); rng.shuffle(mults[2])
+        for row, (y, ms) in enumerate(zip((530, 750, 960), mults)):
+            n = len(ms)
+            span = (WALL_R - WALL_L - 40) / n
+            for i, m in enumerate(ms):
+                x0 = WALL_L + 20 + i * span + 14
+                x1 = x0 + span - 28
+                g = _pm.Segment(static, (x0, y), (x1, y), 10)
+                g.sensor = True
+                g.collision_type = 4
+                g.part = "gate"
+                g.mult = m
+                g.flash = 0.0
+                space.add(g)
+                parts.append(g)
+            for i in range(1, n):                     # dividers between gates
+                x = WALL_L + 20 + i * span
+                parts.append(_seg(space, static, (x, y - 34), (x, y + 10), r=6, kind="divider"))
+        gx = rng.choice([92, 100])
+        for y, off in ((430, 0), (640, gx / 2), (860, 0)):
+            x = WALL_L + 50 + off
+            while x < WALL_R - 30:
+                peg(x, y, 0.0)
+                x += gx
+    elif course == "wheel":
+        # A big spinning wheel (four bars through the hub = eight spokes)
+        # that bats the items around, gold pegs above and beside it.
+        speed = rng.uniform(0.9, 1.4) * rng.choice((-1, 1))
+        body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+        body.position = (540, 715)
+        body.angular_velocity = speed
+        half = 235
+        space.add(body)
+        # Three bars = six spokes (pockets wide enough to spill), slick, and
+        # a solid hub: with four bars and grippy spokes items rode the
+        # pockets next to the hub forever and the run stalled.
+        hub = pymunk.Circle(body, 70)
+        hub.elasticity, hub.friction = 0.5, 0.1
+        hub.collision_type = 3
+        hub.part = "spinner"
+        space.add(hub)
+        for k in range(3):
+            a = k * math.pi / 3
+            dx, dy = half * math.cos(a), half * math.sin(a)
+            s_ = pymunk.Segment(body, (-dx, -dy), (dx, dy), 9)
+            s_.elasticity, s_.friction = 0.5, 0.08
+            s_.collision_type = 3
+            s_.part = "spinner"
+            space.add(s_)
+            spinners.append({"body": body, "half": half, "rot": a, "wheel": True})
+        share = rng.uniform(0.5, 0.58)
+        for y, off in ((420, 0), (455, 42)):
+            x = WALL_L + 45 + off
+            while x < WALL_R - 30:
+                peg(x, y, share)
+                x += 84
+        for y in range(540, 960, 70):                 # columns either side of the wheel
+            for x in (150, 220, 860, 930):
+                peg(x + (35 if (y // 70) % 2 else 0) * (1 if x < 540 else -1), y, share)
+        for x in range(200, 900, 84):
+            peg(x, 985, share)
     else:  # bumpers
         for y, xs in ((520, (250, 540, 830)), (760, (395, 685)), (960, (250, 830))):
             for x in xs:
@@ -332,6 +406,11 @@ class Sim:
         self._multiplied: list[dict] = []
         self.space.on_collision(1, 2, begin=self._on_peg)
         self.space.on_collision(1, 3, begin=self._on_part)
+        self.space.on_collision(1, 4, begin=self._on_gate)
+        self.gates = [p for p in self.parts if getattr(p, "part", "") == "gate"]
+        self.gate_course = bool(self.gates)
+        self._gated: list[tuple] = []
+        self.pops: list[list] = []        # floating "x2" labels
         self.space.on_collision(1, 1, pre_solve=self._on_ball)
 
     @staticmethod
@@ -369,6 +448,14 @@ class Sim:
         if peg["gold"] and b["tier"] == 0 and id(peg) not in b["hit"]:
             b["hit"].add(id(peg))
             self._multiplied.append(peg)
+
+    def _on_gate(self, arbiter, space, data):
+        bs, gs = arbiter.shapes
+        b = getattr(bs, "ball", None)
+        if b is None or b["tier"] != 0 or id(gs) in b["hit"]:
+            return
+        b["hit"].add(id(gs))
+        self._gated.append((b, gs))
 
     def _on_part(self, arbiter, space, data):
         b = getattr(arbiter.shapes[0], "ball", None)
@@ -444,7 +531,8 @@ class Sim:
                                (self.rng.uniform(-40, 40), 30))
                 self.spawned += 1
             self.hole_pulse = 1.0
-            self._release_cd = 0.7 if self.spawned < 4 else max(0.04, 0.45 - self.spawned * 0.004)
+            self._release_cd = (GATE_DRIP if self.gate_course
+                                else 0.7 if self.spawned < 4 else max(0.04, 0.45 - self.spawned * 0.004))
 
         for _ in range(4):
             self._pull_pairs()          # pymunk clears forces after every step
@@ -463,6 +551,29 @@ class Sim:
             if not b["landed"] and b["body"].velocity.length < 3 and self.rng.random() < 0.05:
                 b["body"].apply_impulse_at_local_point((self.rng.uniform(-40, 40) * b["body"].mass, 0))
 
+        for b, g in self._gated:
+            m = g.mult
+            extra = (int(m[1:]) if isinstance(m, str) else m - 1)
+            above = sum(1 for x in self.balls if x["body"].position.y < NECK_Y)
+            if self.done_at is not None or above > MAX_ABOVE_NECK * 2 or self.spawned >= SPAWN_CAP:
+                extra = 0
+            p, v = b["body"].position, b["body"].velocity
+            for k in range(extra):
+                nb = self._add_ball(0, (p.x + self.rng.uniform(-18, 18), p.y + 26 + k * 4),
+                                    (v.x + self.rng.uniform(-120, 120), max(60.0, v.y)))
+                nb["hit"] = set(b["hit"])
+                self.spawned += 1
+            g.flash = 1.0
+            if extra and self.t - getattr(g, "popped", -1.0) > 0.35:   # one label at a time per gate
+                g.popped = self.t
+                self.pops.append([p.x, g.a.y + 70, f"×{m}" if not isinstance(m, str) else m, 1.0])
+                self.events.append((self.t, "note", self.spawned, 0.8))
+        self._gated.clear()
+        for p in self.pops:             # labels fade over ~0.33 s
+            p[3] -= 0.05
+        self.pops[:] = [p for p in self.pops if p[3] > 0][-24:]
+        if self.gate_course and self.done_at is None and len(self.queue) < 2:
+            self.queue.append(0)        # gates multiply; the hole just keeps dripping
         for _ in self._multiplied:
             if self.spawned + len(self.queue) < SPAWN_CAP:
                 self.queue.append(0)
@@ -616,6 +727,7 @@ class Painter:
         self.sprites: dict = {}
         self.f_hook, self.f_banner = _font(54), _font(64)
         self.f_big, self.f_small = _font(130), _font(36, "Inter-Bold.ttf")
+        self.f_gate = _font(46)
 
     def sprite(self, tier: int, r: float) -> Image.Image:
         r = max(4, int(round(r)))
@@ -659,7 +771,9 @@ class Painter:
         d = ImageDraw.Draw(im, "RGBA")
         glass = (200, 220, 255, 150)
         for s in sim.parts:
-            if isinstance(s, sim.pymunk.Segment):
+            if getattr(s, "part", "") == "gate":
+                self.gate(d, s)
+            elif isinstance(s, sim.pymunk.Segment):
                 w = 14 if s.part == "ramp" else 10
                 d.line([s.a, s.b], fill=(255, 255, 255, 190) if s.part == "ramp" else glass, width=w)
             else:                                     # bumper
@@ -668,7 +782,21 @@ class Painter:
                           outline=(140, 220, 255, 220), width=6)
         for sp in sim.spinners:
             b, h = sp["body"], sp["half"]
-            a, c = b.local_to_world((-h, 0)), b.local_to_world((h, 0))
+            rot = sp.get("rot", 0.0)
+            dx, dy = h * math.cos(rot), h * math.sin(rot)
+            a, c = b.local_to_world((-dx, -dy)), b.local_to_world((dx, dy))
+            if sp.get("wheel"):
+                x, y = b.position
+                if rot == 0.0:                       # the rim, once per wheel
+                    d.ellipse((x - h - 8, y - h - 8, x + h + 8, y + h + 8),
+                              outline=self.colours[-1] + (90,), width=6)
+                d.line([a, c], fill=self.colours[-1] + (235,), width=18)
+                for e in (a, c):
+                    d.ellipse((e[0] - 13, e[1] - 13, e[0] + 13, e[1] + 13), fill=(255, 255, 255, 235))
+                if rot == 0.0:
+                    d.ellipse((x - 70, y - 70, x + 70, y + 70), fill=self.colours[-1] + (255,),
+                              outline=(255, 255, 255, 240), width=8)
+                continue
             d.line([a, c], fill=(255, 140, 200, 230), width=16)
             x, y = b.position
             d.ellipse((x - 10, y - 10, x + 10, y + 10), fill=(255, 255, 255, 230))
@@ -704,13 +832,35 @@ class Painter:
             e[3] -= 0.06
         sim.effects[:] = [e for e in sim.effects if e[3] > 0]
 
+        for p in getattr(sim, "pops", []):          # "x2" floating up from a gate
+            x, y, label, life = p
+            f = self.f_gate
+            w = d.textlength(label, font=f)
+            yy = y - 40 + (1 - life) * 40               # drifts down with the copies
+            d.text((x - w / 2 + 2, yy + 2), label, font=f, fill=(0, 0, 0, int(140 * life)))
+            d.text((x - w / 2, yy), label, font=f, fill=(140, 255, 160, int(255 * life)))
+
         self.header(im, d, sim)
         unit = THEMES[self.recipe["theme"]]["unit"]
-        d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} dropped", font=self.f_small,
+        verb = "made" if getattr(sim, "gate_course", False) else "dropped"
+        d.text((JAR_L, JAR_BOT + 18), f"{sim.spawned:,} {unit} {verb}", font=self.f_small,
                fill=(220, 230, 255, 255))
         self.watermark(d, JAR_R, JAR_BOT + 18)
         self.overlays(im, d, sim)
         return im
+
+    def gate(self, d, g):
+        """A multiplier gate: a glowing bar with its number on it."""
+        (x0, y), (x1, _) = g.a, g.b
+        plus = isinstance(g.mult, str)
+        col = (90, 170, 255) if plus else (80, 230, 120)
+        fl = g.flash
+        d.rounded_rectangle((x0, y - 34, x1, y + 10), 12, fill=col + (int(60 + 90 * fl),),
+                            outline=col + (230,), width=4)
+        label = g.mult if plus else f"×{g.mult}"
+        w = d.textlength(label, font=self.f_gate)
+        d.text(((x0 + x1) / 2 - w / 2, y - 37), label, font=self.f_gate, fill=(255, 255, 255, 245))
+        g.flash *= 0.85
 
     # Shared by every Ball Evolution format (see ball_circles.CirclePainter).
     def ctext(self, d, y, s, f, fill=(255, 255, 255, 255)):
@@ -720,7 +870,11 @@ class Painter:
 
     def header(self, im, d, sim):
         """The hook line and the ladder that reveals each item."""
-        self.ctext(d, 30, self.recipe["hook"], self.f_hook)
+        hook = self.recipe["hook"]
+        f = self.f_hook
+        if d.textlength(hook, font=f) > W - 50:        # a long hook shrinks to fit
+            f = _font(max(34, int(54 * (W - 50) / d.textlength(hook, font=f))))
+        self.ctext(d, 30, hook, f)
         n, cell, ic_s, top = len(self.chain), self.cell, self.icon, 128
         x0 = (W - cell * n) / 2
         for i in range(n):
