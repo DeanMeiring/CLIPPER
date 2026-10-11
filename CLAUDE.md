@@ -839,8 +839,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   a ball that touches the spikes turns grey and stays; each picture gets
   `Z_TRIES` 14 / pictures tries; the jaw only opens when the final picture
   drops in -- open from the start or on a timer, earlier balls got out
-  first). Rotation (20 slots): escape x3, spiral, center, breakin, rays,
+  first). `trail` "With every bounce, the ball evolves" (one ball in a
+  ring under gravity, every bounce stamps a coloured circle on a layer that
+  stays and the ball grows a little; the picture changes every ~N bounces;
+  ends when its radius is 46% of the ring's). Rotation (22 slots,
+  `BALLS_FORMAT_CYCLE`): escape x3, spiral, trail, center, breakin, rays,
   box, zen x2 each, merge, spikes, shrink, jaws, touch x1.
+  **Bounce sounds (11 Oct):** merge and every arena kind pick
+  `recipe["bounce_sound"]` (own rng `bounce-sound-<seed>`, so the other
+  recipe fields are unchanged): `tune` 2 : `meow` 1 : `phonk` 1.
+  `clipper/ball_sounds.py`, numpy only: Dean asked for "a cursed meow,
+  heavily deep, deeper the more it bounces" (a synthesised meow, slowed a
+  bit more each bounce up to 3.5x) and "the song people post mog videos
+  to" -- those are labels' phonk tracks that Content ID would claim on
+  every video, so it's an original 808 cowbell riff + 808 bass in the same
+  style; Dean was told. The card chip shows "🐱 cursed meow" / "🥁 phonk".
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.
