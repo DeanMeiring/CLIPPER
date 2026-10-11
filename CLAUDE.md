@@ -797,6 +797,11 @@ merge it yourself; merging stays Dean's call per the rule above.
 - **Rotation + Break in (11 Oct):** Dean's numbers: the gap ring and Break
   in do best, the peg/gumball Evolve ~200 views. `BALLS_FORMAT_CYCLE` (12
   slots): escape x4, breakin x4, merge x2, touch x2; Evolve only by hand.
+  An autopilot video (`options.auto` + `slot`) takes its kind from the
+  rotation at make time, not from its plan: the first Remake after this
+  change still made Evolve videos for slots planned while Evolve was in
+  the cycle, and Dean ("the maze path in the circle is too confusing")
+  doesn't want them.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

@@ -6001,6 +6001,15 @@ def _balls_make(vid: str) -> None:
     opts = video.get("options") or {}
     settings = _balls.settings()
     fmt = opts.get("format") or _balls_next_format(settings)
+    if opts.get("auto") and opts.get("slot"):
+        # an autopilot video takes its slot's kind from the rotation as it is
+        # *now*: a slot planned while Evolve was still in it (Dean dropped
+        # Evolve on 11 Oct) must not come back as Evolve on a remake
+        try:
+            at = datetime.datetime.strptime(opts["slot"], "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
+            fmt = _balls_format_for(at, settings)
+        except ValueError:
+            pass
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
