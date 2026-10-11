@@ -825,6 +825,22 @@ merge it yourself; merging stays Dean's call per the rule above.
   x2, merge x2, spikes x2, shrink x2, jaws x1, touch x1. Tuned with the
   countryball pack: good seeds per 12 center ~2, spikes ~3, shrink 11,
   jaws 5.
+  **Four more (11 Oct)**, from reels Dean sent with big numbers, same
+  module: `spiral` "Will the ball multiply?" (809K likes: balls break an
+  Archimedean spiral wall, pieces take 2 hits in the middle up to 18 on the
+  outer turn, every broken piece makes a ball, counter "x28"; pictures
+  follow the share of wall gone -- by ball count they all came in the last
+  second), `rays` (570K: rounds of rainbow rays fall into a parabola and
+  bounce through the focus, 1..150 rays, the round's picture at the focus;
+  analytic paths, no physics, every seed works; our own tune, the reel used
+  Interstellar's), `box` "+3 after each escape" (360K: a box with a hole in
+  the floor, each ball out adds 3, counter to 2,500, max 520 simulated at
+  once, the rest wait), `zen` "Reminds me of something" (106K: a spiked ring;
+  a ball that touches the spikes turns grey and stays; each picture gets
+  `Z_TRIES` 14 / pictures tries; the jaw only opens when the final picture
+  drops in -- open from the start or on a timer, earlier balls got out
+  first). Rotation (20 slots): escape x3, spiral, center, breakin, rays,
+  box, zen x2 each, merge, spikes, shrink, jaws, touch x1.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

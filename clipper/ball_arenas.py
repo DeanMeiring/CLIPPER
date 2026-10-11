@@ -728,5 +728,546 @@ class JawsPainter(ArenaPainter):
         return self.finish(im, d, sim, f"{sim.escaped} escaped · {sim.popped} popped")
 
 
+# ---- Will the ball multiply? (spiral) ------------------------------------------------
+
+P_TURNS = 4.2           # turns of the spiral wall
+P_R_OUT = 450           # its outer end
+P_BALL = 15
+P_SPEED = 420
+P_SEG = 26              # length of one breakable wall piece
+P_HP_IN, P_HP_OUT = 2, 18   # hits a piece takes: the middle .. the outer turn
+P_MAX = 160
+P_CLEAR = 0.9           # share of the wall gone = the final form
+
+
+def _spiral_pts() -> list:
+    """An Archimedean spiral from near the middle out to P_R_OUT, as points
+    about P_SEG apart; the outer ring closes round the whole spiral."""
+    pts, th, top = [], 0.6, P_TURNS * 2 * math.pi
+    a = P_R_OUT / top
+    while th < top:
+        r = a * th
+        pts.append((CX + r * math.cos(th), CY + r * math.sin(th)))
+        th += P_SEG / max(r, 30)
+    return pts
+
+
+class SpiralSim(ArenaSim):
+    """One ball starts in the spiral's middle. Every piece of the spiral
+    wall takes two hits; a piece that breaks makes another ball. The counter
+    is the multiplier ("x28"); the last picture comes when nearly the whole
+    spiral is gone."""
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        import pymunk
+
+        self.pm = pymunk
+        sp = self.space = pymunk.Space()
+        sp.iterations = 10
+        n = 120
+        outer = [(CX + (P_R_OUT + 46) * math.cos(2 * math.pi * i / n), CY + (P_R_OUT + 46) * math.sin(2 * math.pi * i / n))
+                 for i in range(n + 1)]
+        for p, q in zip(outer, outer[1:]):
+            w = pymunk.Segment(sp.static_body, p, q, 5)
+            w.elasticity, w.friction, w.collision_type = 1.0, 0.0, 3
+            sp.add(w)
+        self.pieces = []
+        pts = _spiral_pts()
+        for i, (p, q) in enumerate(zip(pts, pts[1:])):
+            w = pymunk.Segment(sp.static_body, p, q, 6)
+            w.elasticity, w.friction, w.collision_type = 1.0, 0.0, 5
+            hp = round(P_HP_IN + (P_HP_OUT - P_HP_IN) * i / max(1, len(pts) - 2))
+            w.piece = {"a": p, "b": q, "hp": hp, "full": hp, "flash": 0.0}
+            sp.add(w)
+            self.pieces.append(w)
+        self.total = len(self.pieces)
+        self._dead: list = []
+        self._spawns: list = []
+        sp.on_collision(1, 5, begin=self._on_piece)
+        sp.on_collision(1, 3, begin=self._on_wall)
+        start = _spiral_pts()[0]
+        self._add((CX + (start[0] - CX) * 0.4, CY + (start[1] - CY) * 0.4))
+
+    def _add(self, pos):
+        pm = self.pm
+        body = pm.Body()
+        body.position = pos
+        a = self.rng.uniform(0, 2 * math.pi)
+        body.velocity = (P_SPEED * math.cos(a), P_SPEED * math.sin(a))
+        shape = pm.Circle(body, P_BALL)
+        shape.density, shape.elasticity, shape.friction, shape.collision_type = 1.0, 1.0, 0.0, 1
+        shape.filter = pm.ShapeFilter(group=1)
+        self.space.add(body, shape)
+        b = {"body": body, "shape": shape, "tier": self.best, "r": P_BALL}
+        shape.ball = b
+        self.balls.append(b)
+        return b
+
+    def _on_wall(self, arbiter, space, data):
+        self.bounce(0.5)
+        return True
+
+    def _on_piece(self, arbiter, space, data):
+        w = arbiter.shapes[1]
+        if w in self._dead:
+            return False
+        w.piece["hp"] -= 1
+        w.piece["flash"] = 1.0
+        self.bounce(0.8)
+        if w.piece["hp"] <= 0:
+            self._dead.append(w)
+            (ax, ay), (bx, by) = w.piece["a"], w.piece["b"]
+            self._spawns.append(((ax + bx) / 2, (ay + by) / 2))
+            self.events.append((self.t, "knock", "bumper", 0.7))
+        else:
+            self.events.append((self.t, "tick", self.rng.randrange(10), 0.5))
+        return True
+
+    def step(self):
+        dt = 1 / FPS
+        for _ in range(3):
+            self.space.step(dt / 3)
+            for w in self._dead:
+                if w in self.pieces:
+                    self.space.remove(w)
+                    self.pieces.remove(w)
+            self._dead.clear()
+        for pos in self._spawns:
+            if len(self.balls) < P_MAX and self.done_at is None:
+                nb = self._add(pos)
+                if len(self.effects) < 10:
+                    self.effects.append([pos[0], pos[1], 22, 1.0, nb["tier"]])
+                self.events.append((self.t, "pop", min(self.best, 6), 0.5))
+        self._spawns.clear()
+        for b in self.balls:
+            v = b["body"].velocity.rotated(self.rng.gauss(0, 0.02))
+            b["body"].velocity = v * (P_SPEED / (v.length or 1))
+        for w in self.pieces:
+            w.piece["flash"] *= 0.8
+        self.spawned = len(self.balls)
+        if self.done_at is None:
+            if 1 - len(self.pieces) / self.total >= P_CLEAR:
+                self.finish(ok=True)
+            else:
+                # pictures follow how much of the spiral is gone (by ball
+                # count they all came in the last second)
+                gone = (1 - len(self.pieces) / self.total) / P_CLEAR
+                self.reveal(min(self.last - 1, int(gone * self.last)))
+        self.t += dt
+
+
+class SpiralPainter(ArenaPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        self.outer = rainbow_ring(P_R_OUT + 46)
+
+    def frame(self, sim: SpiralSim) -> Image.Image:
+        im = self.base(sim)
+        im.paste(self.outer, (CX - self.outer.width // 2, CY - self.outer.height // 2), self.outer)
+        d = ImageDraw.Draw(im, "RGBA")
+        n = sim.total
+        for i, w in enumerate(sim.pieces):
+            pc = w.piece
+            col = _hue(int(i * 360 / n), 360)
+            f = pc["flash"]
+            col = tuple(int(c + (255 - c) * f) for c in col)
+            d.line([pc["a"], pc["b"]], fill=col + (int(110 + 145 * pc["hp"] / pc["full"]),), width=9)
+        self.balls(im, sim)
+        self.effects(d, sim)
+        return self.finish(im, d, sim, f"x{len(sim.balls)}")
+
+
+# ---- Rays in a parabola ------------------------------------------------------------
+
+R_FOCUS_Y = 1240        # the focus
+R_VERTEX_Y = 1420       # the bottom of the parabola (focal length 180)
+R_X0, R_X1 = 70, 1010   # where rays start, left to right
+R_TOP = 330             # where they start falling
+R_SPEED = 900.0
+R_ROUND = 4.2           # seconds per round
+
+
+def _parab_y(x: float) -> float:
+    f = R_VERTEX_Y - R_FOCUS_Y
+    return R_VERTEX_Y - (x - CX) ** 2 / (4 * f)
+
+
+def _ray_path(x: float) -> list:
+    """Down to the parabola, through the focus to the other side, then up."""
+    f = R_VERTEX_Y - R_FOCUS_Y
+    hit1 = (x, _parab_y(x))
+    # the reflected ray passes the focus and meets the parabola at x2 = -4f^2/(x - CX)
+    dx = x - CX
+    x2 = CX - 4 * f * f / dx if abs(dx) > 1 else CX
+    x2 = max(R_X0 - 60, min(R_X1 + 60, x2))
+    hit2 = (x2, _parab_y(x2))
+    return [(x, R_TOP), hit1, (CX, R_FOCUS_Y), hit2, (x2, R_TOP - 40)]
+
+
+class RaysSim(ArenaSim):
+    """"Rays: 10 -> 100": round after round of rainbow rays fall into a
+    parabola and all bounce through the focus. Each round has more rays and
+    shows the next picture at the focus; no physics engine, so every seed
+    works (only the colours and ray order change)."""
+
+    COUNTS = [1, 3, 6, 10, 20, 40, 70, 100, 150]
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        k = len(self.chain)
+        self.counts = self.COUNTS[-k:] if k <= len(self.COUNTS) else self.COUNTS
+        self.round = 0
+        self.rays: list = []
+        self.hue0 = self.rng.random()
+        self._start_round()
+
+    def _start_round(self):
+        n = self.counts[min(self.round, len(self.counts) - 1)]
+        xs = [R_X0 + (R_X1 - R_X0) * (i + 0.5) / n for i in range(n)] if n > 1 else [CX - 260]
+        self.rays = []
+        for i, x in enumerate(xs):
+            path = _ray_path(x)
+            lens = [math.dist(p, q) for p, q in zip(path, path[1:])]
+            self.rays.append({"path": path, "lens": lens, "start": self.t + self.rng.uniform(0, 0.25),
+                              "hue": (self.hue0 + i / max(1, n)) % 1, "hits": 0})
+        self.round_start = self.t
+
+    def ray_pos(self, ray, t: float):
+        """(points drawn so far, head position, segment index)."""
+        dist = max(0.0, (t - ray["start"]) * R_SPEED)
+        pts = [ray["path"][0]]
+        for k, ((p, q), ln) in enumerate(zip(zip(ray["path"], ray["path"][1:]), ray["lens"])):
+            if dist <= ln:
+                f = dist / ln if ln else 1
+                head = (p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f)
+                return pts + [head], head, k
+            dist -= ln
+            pts.append(q)
+        return pts, pts[-1], len(ray["lens"])
+
+    def step(self):
+        dt = 1 / FPS
+        for ray in self.rays:
+            _, _, k = self.ray_pos(ray, self.t)
+            while ray["hits"] < min(k, 3):
+                ray["hits"] += 1
+                if ray["hits"] in (1, 3):
+                    self.bounce(0.7)
+                    self.events.append((self.t, "tick", int(ray["hue"] * 9.99), 0.4))
+        if self.done_at is None:
+            reached = all(self.ray_pos(r, self.t)[2] >= 2 for r in self.rays)
+            if reached and self.round >= self.best:
+                self.reveal(self.round)
+                if self.round >= self.last:
+                    self.finish(ok=True)
+            if self.t - self.round_start >= R_ROUND and self.round < self.last:
+                self.round += 1
+                self._start_round()
+        self.spawned = len(self.rays)
+        self.t += dt
+
+
+class RaysPainter(ArenaPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        self.f_rays = be._font(96)
+        pts = [(x, _parab_y(x)) for x in range(0, W + 1, 8) if _parab_y(x) > 300]
+        self.curve = _glow_lines([(pts, (240, 240, 255))], width=7)
+
+    def frame(self, sim: RaysSim) -> Image.Image:
+        im = self.bg.copy()
+        im.paste(self.curve, (0, 0), self.curve)
+        d = ImageDraw.Draw(im, "RGBA")
+        n = len(sim.rays)
+        w = 4 if n <= 10 else 3 if n <= 40 else 2
+        heads = []
+        for ray in sim.rays:
+            pts, head, k = sim.ray_pos(ray, sim.t)
+            if len(pts) > 1:
+                r, g, b = colorsys.hsv_to_rgb(ray["hue"], 0.75, 1)
+                d.line(pts, fill=(int(r * 255), int(g * 255), int(b * 255), 230), width=w, joint="curve")
+            heads.append(head)
+        for x, y in heads:
+            d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=(255, 255, 255, 255))
+        # the round's picture at the focus once the rays meet there
+        tier = min(sim.best, sim.last)
+        if sim.done_at is None and sim.best == sim.round:
+            age = sim.t - sim.unlocked_at.get(tier, sim.t)
+            s = int(150 * min(1.0, age / 0.4)) if tier else 120
+            if s > 4:
+                pic = self.emoji[tier].resize((s, s), Image.LANCZOS)
+                im.paste(pic, (int(CX - s / 2), int(R_FOCUS_Y - s / 2)), pic)
+        self.header(im, d, sim)
+        self.ctext(d, R_VERTEX_Y + 60, f"RAYS: {n}", self.f_rays, (255, 255, 255, 255))
+        self.watermark(d, W - 60, H - 70)
+        self.overlays(im, d, sim, item_y=860, text_y=1010)
+        return im
+
+
+# ---- +3 balls after each escape (box) -------------------------------------------------
+
+B_L, B_T, B_R, B_B = 100, 420, 980, 1300    # the box
+B_HOLE = (330, 470)     # the hole in the floor (x from, to)
+B_BALL = 13
+B_PLUS = 3
+B_LIVE = 520            # balls simulated at once
+B_TARGET = 2500         # the count for the final form
+
+
+class BoxSim(ArenaSim):
+    """Balls in a box with a hole in the floor. Every ball that falls out
+    adds three at the top. The count climbs fast; past B_LIVE the extra
+    balls wait their turn (the counter keeps counting them)."""
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        import pymunk
+
+        self.pm = pymunk
+        sp = self.space = pymunk.Space()
+        sp.gravity = (0, 1300)
+        sp.iterations = 8
+        walls = [((B_L, B_T), (B_R, B_T)), ((B_L, B_T), (B_L, B_B)), ((B_R, B_T), (B_R, B_B)),
+                 ((B_L, B_B), (B_HOLE[0], B_B)), ((B_HOLE[1], B_B), (B_R, B_B))]
+        for p, q in walls:
+            w = pymunk.Segment(sp.static_body, p, q, 6)
+            w.elasticity, w.friction, w.collision_type = 0.9, 0.2, 3
+            sp.add(w)
+        sp.on_collision(1, 3, begin=self._on_wall)
+        self.count = 1
+        self.escaped = 0
+        self.waiting = 0
+        self._add()
+        self.thresholds = [round(B_TARGET ** (k / self.last)) for k in range(self.last + 1)]
+
+    def _add(self):
+        pm = self.pm
+        body = pm.Body()
+        body.position = (self.rng.uniform(B_L + 40, B_R - 40), B_T + 40 + self.rng.uniform(0, 60))
+        body.velocity = (self.rng.uniform(-500, 500), self.rng.uniform(-200, 200))
+        shape = pm.Circle(body, B_BALL)
+        shape.density, shape.elasticity, shape.friction, shape.collision_type = 1.0, 0.85, 0.2, 1
+        self.space.add(body, shape)
+        b = {"body": body, "shape": shape, "tier": self.best, "r": B_BALL, "out": False}
+        shape.ball = b
+        self.balls.append(b)
+
+    def _on_wall(self, arbiter, space, data):
+        if len(self.hits) < 4000:
+            self.bounce(0.5)
+        return True
+
+    def step(self):
+        dt = 1 / FPS
+        for _ in range(2):
+            self.space.step(dt / 2)
+        live = 0
+        for b in list(self.balls):
+            y = b["body"].position.y
+            if not b["out"] and y > B_B + B_BALL + 4:
+                b["out"] = True
+                if self.done_at is None:
+                    self.escaped += 1
+                    self.count += B_PLUS
+                    self.waiting += B_PLUS
+                    self.events.append((self.t, "note", self.escaped % 40, 0.6))
+            if y > H + 60:
+                self.space.remove(b["body"], b["shape"])
+                self.balls.remove(b)
+            elif not b["out"]:
+                live += 1
+        # new balls drop in at the top, a few per frame
+        for _ in range(min(self.waiting, 12)):
+            if live >= B_LIVE:
+                break
+            self._add()
+            self.waiting -= 1
+            live += 1
+        self.spawned = self.count
+        if self.done_at is None:
+            tier = max(k for k, th in enumerate(self.thresholds) if self.count >= th or k == 0)
+            self.reveal(tier)
+            if self.count >= B_TARGET:
+                self.finish(ok=True)
+        self.t += dt
+
+
+class BoxPainter(ArenaPainter):
+    TRAIL_FADE = 0.6
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        lines = [([(B_HOLE[0], B_B), (B_L, B_B), (B_L, B_T), (B_R, B_T), (B_R, B_B), (B_HOLE[1], B_B)], (245, 245, 255))]
+        self.static = _glow_lines(lines, width=10)
+
+    def frame(self, sim: BoxSim) -> Image.Image:
+        im = self.base(sim)
+        im.paste(self.static, (0, 0), self.static)
+        d = ImageDraw.Draw(im, "RGBA")
+        self.balls(im, sim)
+        self.effects(d, sim)
+        self.header(im, d, sim)
+        self.ctext(d, B_T - 90, f"Balls: {sim.count:,}", self.f_count, (255, 255, 255, 255))
+        self.watermark(d, W - 60, H - 70)
+        self.overlays(im, d, sim, item_y=CY - 160, text_y=CY)
+        return im
+
+
+# ---- Reminds me of something (the spike jaw) ------------------------------------------
+
+Z_R = 440               # the ring
+Z_SPIKE = 70            # how far the spikes reach in
+Z_MOUTH = 2.0           # the gap's full width (radians), on the left; the jaw
+Z_OPEN = 3.0            # opens over this many seconds once the final picture
+                        # drops in (open from the start, the first balls flew
+                        # straight out; opening on a timer, a middle one did)
+Z_BALL = 34
+Z_GRAVITY = 650
+Z_TRIES = 14            # balls before the final picture, shared out over the others
+
+
+class ZenSim(ArenaSim):
+    """A ring lined with spikes, open on one side. One ball at a time drops
+    in; a ball that touches the spikes dies and turns grey where it is, and
+    the next ball drops in (each picture gets a few tries). The jaw only
+    opens when the final picture drops in. The grey ones stay, so later balls bounce off
+    them. A good run: the final picture is the one that gets out."""
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        import pymunk
+
+        self.pm = pymunk
+        sp = self.space = pymunk.Space()
+        sp.gravity = (0, Z_GRAVITY)
+        sp.iterations = 15
+        self.mouth = math.pi + self.rng.uniform(-0.35, 0.35)
+        self.dead: list = []           # grey balls: (x, y, tier)
+        self.idx = 0
+        self.escaped_at = None
+        self.final_at = None
+        self.lives = max(1, Z_TRIES // max(1, self.last))
+        sp.on_collision(1, 4, begin=self._on_grey)
+        self._drop()
+
+    def _drop(self):
+        pm = self.pm
+        body = pm.Body()
+        body.position = (CX + self.rng.uniform(-60, 60), CY - 120)
+        a = -math.pi / 2 + self.rng.uniform(-0.7, 0.7)       # mostly up: a long arc before it lands
+        sp = self.rng.uniform(450, 700)
+        body.velocity = (sp * math.cos(a), sp * math.sin(a))
+        shape = pm.Circle(body, Z_BALL)
+        shape.density, shape.elasticity, shape.friction, shape.collision_type = 1.0, 0.95, 0.1, 1
+        self.space.add(body, shape)
+        tier = min(self.last, self.idx // self.lives)
+        self.ball = {"body": body, "shape": shape, "tier": tier, "r": Z_BALL, "born": self.t}
+        shape.ball = self.ball
+        self.balls = [self.ball]
+        self.reveal(tier)
+        if tier == self.last and self.final_at is None:
+            self.final_at = self.t
+            self.banner = ("THE JAW OPENS...", self.t)
+
+    def _on_grey(self, arbiter, space, data):
+        self.bounce(0.8)
+        self.events.append((self.t, "knock", "bumper", 0.6))
+        return True
+
+    def mouth_w(self) -> float:
+        if self.final_at is None:
+            return 0.0
+        return Z_MOUTH * min(1.0, (self.t - self.final_at) / Z_OPEN)
+
+    def _in_mouth(self, ang: float) -> bool:
+        return abs((ang - self.mouth + math.pi) % (2 * math.pi) - math.pi) < self.mouth_w() / 2
+
+    def step(self):
+        dt = 1 / FPS
+        if self.done_at is None:
+            for _ in range(3):
+                self.space.step(dt / 3)
+            b = self.ball
+            x, y = _pos(b)
+            dist = math.hypot(x - CX, y - CY)
+            ang = math.atan2(y - CY, x - CX)
+            if dist > Z_R + Z_BALL:
+                # out through the mouth
+                self.events.append((self.t, "fanfare", 0, 1.0))
+                self.finish(ok=b["tier"] == self.last)
+                self.escaped_at = (x, y)
+            elif dist > Z_R - Z_SPIKE * 0.55 - Z_BALL and not self._in_mouth(ang):
+                # touched the spikes: grey, and it stays there
+                self.space.remove(b["body"], b["shape"])
+                g = self.pm.Circle(self.space.static_body, Z_BALL, (x, y))
+                g.elasticity, g.friction, g.collision_type = 0.95, 0.1, 4
+                self.space.add(g)
+                self.dead.append((x, y, b["tier"]))
+                self.effects.append([x, y, Z_BALL * 1.4, 1.0, b["tier"]])
+                self.events.append((self.t, "pop", 5, 1.0))
+                self.bounce(1.0)
+                self.idx += 1
+                if self.idx >= self.last * self.lives + 8:      # the final picture gets 8 tries
+                    self.finish(ok=False)
+                    self.balls = []
+                else:
+                    self._drop()
+        self.spawned = len(self.dead)
+        self.t += dt
+
+
+class ZenPainter(ArenaPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        self.ring = None
+
+    def _jaw(self, sim: ZenSim) -> Image.Image:
+        """The whole spiked ring, drawn once; frame() cuts the open mouth out."""
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        n = 110
+        a0 = sim.mouth
+        span = 2 * math.pi
+        for k in range(n):
+            a1, a2 = a0 + span * k / n, a0 + span * (k + 1) / n
+            am = (a1 + a2) / 2
+            base1 = (CX + Z_R * math.cos(a1), CY + Z_R * math.sin(a1))
+            base2 = (CX + Z_R * math.cos(a2), CY + Z_R * math.sin(a2))
+            tip = (CX + (Z_R - Z_SPIKE) * math.cos(am), CY + (Z_R - Z_SPIKE) * math.sin(am))
+            outer = [(CX + (Z_R + 26) * math.cos(a2), CY + (Z_R + 26) * math.sin(a2)),
+                     (CX + (Z_R + 26) * math.cos(a1), CY + (Z_R + 26) * math.sin(a1))]
+            d.polygon([base1, base2] + outer, fill=(40, 70, 190, 255))
+            d.polygon([base1, tip, base2], fill=(30, 50, 150, 255), outline=(255, 255, 255, 255))
+        glow = layer.filter(ImageFilter.GaussianBlur(10))
+        glow.alpha_composite(layer)
+        return glow
+
+    def frame(self, sim: ZenSim) -> Image.Image:
+        if self.ring is None:
+            self.ring = self._jaw(sim)
+            self.ring_alpha = self.ring.getchannel("A")
+        im = self.base(sim)
+        w = math.degrees(sim.mouth_w())
+        if w > 0.5:
+            cut = Image.new("L", (W, H), 255)
+            m = math.degrees(sim.mouth)
+            ImageDraw.Draw(cut).pieslice((CX - 900, CY - 900, CX + 900, CY + 900), m - w / 2, m + w / 2, fill=0)
+            im.paste(self.ring, (0, 0), ImageChops.multiply(self.ring_alpha, cut))
+        else:
+            im.paste(self.ring, (0, 0), self.ring)
+        d = ImageDraw.Draw(im, "RGBA")
+        for x, y, tier in sim.dead:
+            sp = self.sprite(tier, Z_BALL)
+            grey = Image.merge("RGBA", (*[sp.convert("L").point(lambda v: v // 3)] * 3, sp.getchannel("A")))
+            im.paste(grey, (int(x - grey.width / 2), int(y - grey.height / 2)), grey)
+        self.balls(im, sim)
+        self.effects(d, sim)
+        n = len(sim.dead)
+        return self.finish(im, d, sim, f"{n} didn't make it")
+
+
 PARTS = {"center": (CenterSim, CenterPainter), "spikes": (SpikesSim, SpikesPainter),
-         "shrink": (ShrinkSim, ShrinkPainter), "jaws": (JawsSim, JawsPainter)}
+         "shrink": (ShrinkSim, ShrinkPainter), "jaws": (JawsSim, JawsPainter),
+         "spiral": (SpiralSim, SpiralPainter), "rays": (RaysSim, RaysPainter),
+         "box": (BoxSim, BoxPainter), "zen": (ZenSim, ZenPainter)}

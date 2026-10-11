@@ -45,6 +45,15 @@ KINDS = {
     "jaws": "a '4 seconds to escape' video: balls with pictures bounce in a turning broken ring, each has "
             "4 seconds (the arc around it) to get out or it pops, and every escape makes two more; new "
             "ones come out as the next picture, up to the final one",
+    "spiral": "a 'will the ball multiply?' video: balls with pictures break a spiral wall piece by piece, "
+              "every broken piece makes another ball (the counter is the multiplier), and new balls come "
+              "out as the next picture, up to the final one",
+    "rays": "a 'rays in a parabola' video: rounds of rainbow lines fall into a parabola and all bounce "
+            "through its focus, where each round's picture appears; the last round shows the final one",
+    "box": "a '+3 balls after each escape' video: balls with pictures fall out of a hole in a box's floor "
+           "and each one adds three more at the top; new ones come out as the next picture",
+    "zen": "a 'reminds me of something' video: a ring of spikes with one gap; each picture drops in, and "
+           "one that touches the spikes turns grey and stays there; the last picture gets out the gap",
 }
 
 _PROMPT = """These are 4 frames from a vertical YouTube Short, {kind}. \

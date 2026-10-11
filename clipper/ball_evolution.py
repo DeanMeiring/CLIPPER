@@ -104,9 +104,15 @@ ARENA_HOOKS = {
     "shrink": ["The ball grows, the circle shrinks", "Every bounce: bigger ball, smaller circle",
                "How big can it get?"],
     "jaws": ["Each ball has 4 seconds to escape", "4 seconds to escape", "Can they escape in 4 seconds?"],
+    "spiral": ["Will the ball multiply?", "Can one ball break the spiral?", "How many balls does it take?"],
+    "rays": ["Watch where the rays meet", "Every ray hits the same spot", "More rays, same spot"],
+    "box": ["+3 balls after each escape", "Every escape adds 3 balls", "How fast does it fill up?"],
+    "zen": ["Reminds me of something...", "Only one makes it out", "Which one escapes?"],
 }
 ARENA_ENDINGS = {"center": ["WINNER!", "THE BEST!", "CHAMPION!"], "spikes": ["SURVIVED!", "FINAL FORM!"],
-                 "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"]}
+                 "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"],
+                 "spiral": ["MULTIPLIED!", "SPIRAL GONE!", "FINAL FORM!"], "rays": ["PERFECT FOCUS!", "FINAL FORM!"],
+                 "box": ["OVERFLOW!", "FINAL FORM!"], "zen": ["IT ESCAPED!", "FINAL FORM!"]}
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -161,7 +167,8 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 # ---- recipes -----------------------------------------------------------
 
-FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
+FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
+           "spiral", "rays", "box", "zen")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
 #                                                                   merge: ball_merge.py
 
 
@@ -846,7 +853,7 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
     import multiprocessing
 
     workers = workers or max(1, min(4, os.cpu_count() or 2))
-    if recipe.get("format") in ("center", "spikes"):
+    if recipe.get("format") in ("center", "spikes", "zen"):
         # the crowned picture wins / the ball survives on only some seeds,
         # and these simulate in ~0.1 s, so try many more
         tries = max(tries, 240)
@@ -1380,6 +1387,18 @@ def publish_text(recipe: dict) -> dict:
         desc = ("Each ball has 4 seconds to get out of the turning ring before it pops, and every ball "
                 "that escapes makes two more.\n\nGuess the last one 👇\n\n"
                 "#satisfying #physics #bouncingball")
+    elif fmt == "spiral":
+        desc = (f"One {first} starts in the middle of a spiral. Every piece of wall it breaks makes another "
+                f"ball, until the spiral is gone.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
+    elif fmt == "rays":
+        desc = ("Rays fall into a parabola and every one bounces through the same point, its focus. "
+                "More rays each round.\n\nGuess the last one 👇\n\n#satisfying #math #physics")
+    elif fmt == "box":
+        desc = ("Every ball that falls out of the box adds three more.\n\nGuess the last one 👇\n\n"
+                "#satisfying #physics #bouncingball")
+    elif fmt == "zen":
+        desc = ("A ring full of spikes with one way out. Every ball that touches a spike stays there, "
+                "grey, and the next one drops in. Which one gets out?\n\n#satisfying #physics #bouncingball")
     elif fmt == "escape":
         desc = (f"One {first} bounces in a spinning ring. Every time one gets out through the gap, "
                 f"two more appear inside, and they keep changing on the way to the last one.\n\n"

@@ -6249,20 +6249,24 @@ def _balls_view(v: dict) -> dict:
     return c
 
 
-BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws")
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
+                         "spiral", "rays", "box", "zen")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
 # out of the rotation (still in Make by hand). Then (11 Oct) he asked for
 # four more music.bouncingball kinds, rotated in (clipper/ball_arenas.py).
-# 16 slots: escape x3, breakin x3, center x2, merge x2, spikes x2,
-# shrink x2, jaws x1, touch x1.
-BALLS_FORMAT_CYCLE = ("escape", "center", "breakin", "spikes", "merge", "escape", "shrink", "breakin",
-                      "jaws", "center", "escape", "breakin", "spikes", "merge", "shrink", "touch")
+# Then four more he sent with big numbers (spiral 809K likes, rays 570K,
+# box +3 360K, spike jaw 106K). 20 slots: escape x3, breakin x2, spiral x2,
+# center x2, rays x2, box x2, zen x2, merge, spikes, shrink, jaws, touch.
+BALLS_FORMAT_CYCLE = ("escape", "spiral", "center", "breakin", "rays", "box", "merge", "escape", "zen", "spikes",
+                      "spiral", "breakin", "center", "rays", "shrink", "box", "escape", "jaws", "touch", "zen")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
-                       "shrink": "🔴 Ball grows, circle shrinks", "jaws": "⏱ 4 seconds to escape"}
+                       "shrink": "🔴 Ball grows, circle shrinks", "jaws": "⏱ 4 seconds to escape",
+                       "spiral": "🌀 Will the ball multiply?", "rays": "🌈 Rays in a parabola",
+                       "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something"}
 
 
 def _balls_tz():
