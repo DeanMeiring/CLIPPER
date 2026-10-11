@@ -52,6 +52,7 @@ from clipper import ball_packs
 from clipper import ball_review
 from clipper import ball_starters
 from clipper import ball_cursed
+from clipper import ball_photos
 from clipper import ball_evolution
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
@@ -6134,10 +6135,10 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
 def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
     """The pictures for a video: a chosen pack, else the oldest pack no video
     has used (your uploads first, then GIPHY and starter packs), else a new
-    cursed pack the app makes itself (ball_cursed: our own edits of the
-    bundled MIT emoji, so nothing taken from GIPHY or meme pages), else the
-    pack used longest ago, else None = the theme's emoji. Packs Claude's
-    check said no to are skipped."""
+    cursed pack the app makes itself -- from a free (CC0) photo
+    (ball_photos, needs the Claude key), else from the bundled emoji
+    (ball_cursed) -- else the pack used longest ago, else None = the
+    theme's emoji. Packs Claude's check said no to are skipped."""
     if choice == "emoji":
         return None
     pack = None
@@ -6148,6 +6149,12 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
             pack = None
     _balls_seed_starters()
     pack = pack or _ball_packs.next_unused()
+    if pack is None and os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            pack = _balls_photo_pack()
+        except Exception as e:
+            print(f"[balls] photo pack failed, using the emoji ones: {e}", flush=True)
+            pack = None
     if pack is None:
         try:
             pack = ball_cursed.new_pack(_ball_packs)
@@ -6163,10 +6170,8 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
     return pack
 
 
-def _balls_auto_pack() -> dict:
-    recent = [p["title"] for p in _ball_packs.packs() if p.get("source") == "giphy"]
-    return ball_packs.auto_pack(_ball_packs, os.environ["GIPHY_API_KEY"], os.environ["ANTHROPIC_API_KEY"],
-                                recent, log=lambda m: print(m, flush=True))
+def _balls_photo_pack() -> dict:
+    return ball_photos.photo_pack(_ball_packs, os.environ["ANTHROPIC_API_KEY"], log=lambda m: print(m, flush=True))
 
 
 def _balls_seed_starters() -> None:
@@ -6438,7 +6443,7 @@ class BallsPackUpload(BaseModel):
 def balls_packs() -> dict:
     _balls_seed_starters()
     return {"packs": [_balls_pack_view(p) for p in reversed(_ball_packs.packs())],
-            "giphy": bool(os.environ.get("GIPHY_API_KEY"))}
+            "photos": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
 @protected.get("/api/balls/packs/{pid}/{name}")
@@ -6472,13 +6477,14 @@ def balls_pack_upload(req: BallsPackUpload) -> dict:
 
 @protected.post("/api/balls/packs/auto")
 def balls_pack_auto() -> dict:
-    """Find a pack on GIPHY now (Claude plans the chain and checks every picture)."""
-    if not os.environ.get("GIPHY_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(409, "Add GIPHY_API_KEY on Railway first.")
+    """Make a cursed pack from a free photo now (Openverse CC0, Claude picks
+    the photo and finds the face)."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(409, "Add ANTHROPIC_API_KEY on Railway first.")
     try:
-        pack = _balls_auto_pack()
+        pack = _balls_photo_pack()
     except Exception as e:
-        print(f"[balls] automatic picture pack failed: {e}", flush=True)
+        print(f"[balls] photo pack failed: {e}", flush=True)
         raise HTTPException(502, f"Couldn't make a pack this time ({e}) -- try again.")
     return _balls_pack_view(pack)
 
@@ -11620,8 +11626,8 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🖼 Picture packs</h3>
-    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself from the bundled emoji (free to use: Cat → Long Cat → Cool Cat → Buff Cat → Sigma Cat → Cursed Cat → Deep Fried Cat → Cat God), so there's always a fresh one. 🔎 Find a pack now still searches GIPHY, but only when you press it: GIPHY stickers belong to the people who made them.</div>
-    <div class="actions"><button id="pk-auto" type="button" class="secondary">🔎 Find a pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
+    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself: it finds a free photo (public domain, from Openverse), Claude picks one with an animal looking at the camera, and the app edits it (Cool → Buff → Sigma or Chad → Cursed → Deep Fried → God). Without a photo it does the same with the bundled emoji, so there's always a fresh pack. Nothing is taken from Google or meme pages.</div>
+    <div class="actions"><button id="pk-auto" type="button" class="secondary">📷 Make a photo pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
     <div id="pk-form" style="display:none">
       <label for="pk-title">Pack name</label><input id="pk-title" maxlength="60" placeholder="e.g. Cursed cats">
       <label for="pk-files">Pictures (6–9)</label><input id="pk-files" type="file" accept="image/*" multiple>
@@ -11999,19 +12005,19 @@ function renderPacks() {
   const sel = $('m-pack'), cur = sel.value;
   sel.innerHTML = '';
   const opt = (v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
-  opt('auto', PK.giphy ? '🔀 Auto: next unused pack, else a new GIPHY one' : '🔀 Auto: next unused pack');
+  opt('auto', '🔀 Auto: next unused pack, else a new cursed one');
   opt('emoji', '😀 Emoji, no pictures');
   for (const p of PK.packs) if (!p.flagged) opt(p.id, `🖼 ${p.title}${p.used_by ? ' (used)' : ''}`);
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
-  $('pk-auto').disabled = !PK.giphy;
-  $('pk-auto').title = PK.giphy ? '' : 'Add GIPHY_API_KEY on Railway first';
+  $('pk-auto').disabled = !PK.photos;
+  $('pk-auto').title = PK.photos ? '' : 'Add ANTHROPIC_API_KEY on Railway first';
   const box = $('pk-packs');
   box.innerHTML = '';
   if (!PK.packs.length) box.appendChild(el('div', 'hint', 'No packs yet.'));
   for (const p of PK.packs) {
     const row = el('div', 'pk'), head = el('div', 'pk-head');
     head.appendChild(el('b', '', p.title));
-    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : p.source === 'starter' ? 'starter' : p.source === 'cursed' ? 'made by the app' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
+    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : p.source === 'starter' ? 'starter' : p.source === 'cursed' ? 'made by the app' : p.source === 'photo' ? 'free photo' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
     const del = el('button', 'danger-link', '🗑');
     del.type = 'button';
     del.onclick = async () => {
@@ -12088,9 +12094,9 @@ $('pk-save').onclick = async () => {
   renderUpl();
 };
 $('pk-auto').onclick = async () => {
-  const b = $('pk-auto'); b.disabled = true; b.textContent = '🔎 Finding pictures… (about a minute)';
+  const b = $('pk-auto'); b.disabled = true; b.textContent = '📷 Finding a photo… (about a minute)';
   try { await api('/api/balls/packs/auto', { method: 'POST' }); await loadPacks(); } catch (e) { alert(e.message); }
-  b.textContent = '🔎 Find a pack now'; b.disabled = !PK.giphy;
+  b.textContent = '📷 Make a photo pack now'; b.disabled = !PK.photos;
 };
 
 load().catch(e => alert(e.message));

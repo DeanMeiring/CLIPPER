@@ -64,9 +64,11 @@ def _put(canvas: Image.Image, im: Image.Image, cx: float, cy: float) -> None:
 
 
 class Face:
-    def __init__(self, code: str, name: str, eye_y: float, eye_dx: float):
+    def __init__(self, code: str, name: str, eye_y: float, eye_dx: float, im: Optional[Image.Image] = None):
+        """An emoji face (code), or any square RGBA picture (im: a photo's
+        face cut out by ball_photos)."""
         self.code, self.name, self.eye_y, self.eye_dx = code, name, eye_y, eye_dx
-        self.im = _fit(_emoji(code), S * 0.86)
+        self.im = _fit(im if im is not None else _emoji(code), S * 0.86)
 
     def eyes(self, size: float, cx: float, cy: float) -> list:
         """Where the eyes are when the face is drawn size wide at cx, cy."""
@@ -189,6 +191,30 @@ def deep_fried(f: Face, rng) -> Image.Image:
     return out
 
 
+def chad(f: Face, rng) -> Image.Image:
+    """The chad-cat look: from the eyes down the face widens and stretches
+    smoothly into a huge jaw, with harder contrast."""
+    size = int(S * 0.70)
+    src = np.asarray(_fit(f.im, size)).astype(np.float32)
+    e = size * min(0.8, f.eye_y + 0.05)                   # the stretch starts just under the eyes
+    stretch, widen = 1.5, 0.38
+    total = e + (size - e) * stretch
+    y0 = (S - total) / 2
+    yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
+    ys = yy - y0
+    ys = np.where(ys > e, e + (ys - e) / stretch, ys)
+    t = np.clip((ys - e) / (size - e), 0, 1)
+    k = 1 + widen * t * t * (3 - 2 * t)                    # smoothstep: no seam
+    xs = (xx - S / 2) / k + size / 2
+    ok = (ys >= 0) & (ys <= size - 1) & (xs >= 0) & (xs <= size - 1)
+    out = src[np.clip(ys, 0, size - 1).astype(np.int32), np.clip(xs, 0, size - 1).astype(np.int32)]
+    out[~ok] = 0
+    c = Image.fromarray(out.astype(np.uint8), "RGBA")
+    a = c.getchannel("A")
+    rgb = ImageEnhance.Contrast(ImageEnhance.Sharpness(c.convert("RGB")).enhance(2.0)).enhance(1.3)
+    return Image.merge("RGBA", (*rgb.split(), a))
+
+
 def god(f: Face, rng) -> Image.Image:
     c = _canvas()
     # golden glow behind
@@ -222,13 +248,20 @@ STEPS = [
 ]
 
 
-def make(base: str, seed: int) -> dict:
-    """{title, hook, items: [(name, RGBA)]} for one face."""
-    code, name, ey, ex = next(b for b in BASES if b[0] == base)
+# a photo's steps: the chad jaw stretch can stand in for the sigma edit
+PHOTO_STEPS = STEPS[:4] + [[("Sigma {n}", sigma), ("Chad {n}", chad)]] + STEPS[5:]
+
+
+def make(base: str, seed: int, face: Optional[Face] = None, steps: Optional[list] = None) -> dict:
+    """{title, hook, items: [(name, RGBA)]} for one face (an emoji from
+    BASES, or a ready Face)."""
+    if face is None:
+        code, name, ey, ex = next(b for b in BASES if b[0] == base)
+        face = Face(code, name, ey, ex)
+    f, name = face, face.name
     rng = random.Random(f"cursed-{base}-{seed}")
-    f = Face(code, name, ey, ex)
     items = []
-    for options in STEPS:
+    for options in steps or STEPS:
         label, fn = rng.choice(options)
         items.append((label.format(n=name), fn(f, rng)))
     return {"title": f"{name} to {name} God", "hook": rng.choice(HOOKS).format(n=name.lower()),

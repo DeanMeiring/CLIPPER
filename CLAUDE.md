@@ -777,13 +777,23 @@ merge it yourself; merging stays Dean's call per the rule above.
   own edits: plain > Chubby/Long > Cool (🕶) > Buff (💪 x2) > Sigma (B&W,
   🕶, 👔) > Cursed (👄, extra 👁, swirl) > Deep Fried (saturated, JPEG
   crunch, red laser eyes) > God (👑, 🪽, gold glow). When every pack is
-  used the app makes a new cursed pack itself (`ball_cursed.new_pack`,
-  source "cursed", a face not used lately), so GIPHY is no longer used
-  automatically (stickers belong to their makers); "🔎 Find a pack now"
-  still searches GIPHY when pressed. Dean asked about scraping Google
-  Images for chad-cat style photos; told him why not (others' copyright,
-  real people's faces, Google's terms/CAPTCHA, reused-content
-  demonetization) and he chose free real photos + our edits instead.
+  used the app makes a new cursed pack itself, so GIPHY is no longer used
+  (stickers belong to their makers; `ball_packs.auto_pack` is kept but
+  nothing calls it now). Dean asked about scraping Google Images for
+  chad-cat style photos; told him why not (others' copyright, real
+  people's faces, Google's terms/CAPTCHA, reused-content demonetization)
+  and he chose free real photos + our edits: `clipper/ball_photos.py`
+  searches Openverse (CC0 / public domain only) for one of 20 animal
+  faces, Claude picks a photo with one animal facing the camera (no
+  people, text, watermarks) and gives the face box + eyes as fractions,
+  `cut_face` cuts a circle centred on the eyes, and `ball_cursed.make`
+  runs `PHOTO_STEPS` on it (adds "Chad": a smooth widen + stretch from the
+  eyes down). Source "photo", credit "Photo by X, CC0 via Openverse" in
+  the description. Order when nothing is unused: photo pack (needs the
+  Claude key) > emoji cursed pack (`ball_cursed.new_pack`). "📷 Make a
+  photo pack now" (`POST /api/balls/packs/auto`). Openverse is blocked in
+  the sandbox: tested with a fake `requests`, a fake Claude and
+  skimage's `chelsea.png` cat.
 - **Rotation + Break in (11 Oct):** Dean's numbers: the gap ring and Break
   in do best, the peg/gumball Evolve ~200 views. `BALLS_FORMAT_CYCLE` (12
   slots): escape x4, breakin x4, merge x2, touch x2; Evolve only by hand.
