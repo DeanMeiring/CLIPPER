@@ -802,6 +802,28 @@ merge it yourself; merging stays Dean's call per the rule above.
   change still made Evolve videos for slots planned while Evolve was in
   the cycle, and Dean ("the maze path in the circle is too confusing")
   doesn't want them.
+  **Four more kinds (11 Oct):** Dean sent music.bouncingball's grid and
+  asked for all four, rotating (`clipper/ball_arenas.py`, `be._parts` ->
+  `ball_arenas.PARTS`; neon dark look; a tune from the bounces via
+  `music_track` like Merge; own hooks/endings `be.ARENA_HOOKS` /
+  `ARENA_ENDINGS`, skin "plain"): `center` Hold the center (every pack
+  picture bounces around a black hole that grows; falling in = out,
+  crossed out in the ladder; last one wins; `simulate` now returns `ok`
+  and `is_good` needs it: the seed must make the pack's final picture win,
+  ~1 in 8, so `pick_seed` tries 240 seeds for center/spikes; a pack whose
+  title is a question, "Which country is the best?", is the hook),
+  `spikes` Spikes will grow (one ball, steady speed, no gravity, in an
+  octagon; a solid spike grows where it hits a wall once it has moved off;
+  only a near head-on hit on a tip pops it -- with gravity, whole-spike
+  pops or spikes grown under the ball it popped after 2-5 spikes; next
+  picture every ~28 bounces / pictures; seeds where it survives to the final form),
+  `shrink` The ball grows, the circle shrinks (own physics, ~68 bounces,
+  ~25 s), `jaws` 4 seconds to escape (a turning ring of 3 arcs; each ball
+  has 4 s or pops, an escape makes two; rotating teeth were tried and swept
+  every resting ball). Rotation (16 slots): escape x3, breakin x3, center
+  x2, merge x2, spikes x2, shrink x2, jaws x1, touch x1. Tuned with the
+  countryball pack: good seeds per 12 center ~2, spikes ~3, shrink 11,
+  jaws 5.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

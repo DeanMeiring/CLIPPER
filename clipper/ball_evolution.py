@@ -96,6 +96,17 @@ BREAKIN_ENDINGS = ["CLEARED!", "ROOM CLEARED!", "ALL GONE!"]
 MERGE_HOOKS = ["Will it merge into its final form?", "What's the final form?",
                "Guess the final form", "Wait for the final form..."]
 MERGE_ENDINGS = ["FINAL FORM!", "IT EVOLVED!", "MAXED OUT!"]
+# The music.bouncingball kinds Dean asked for (clipper/ball_arenas.py):
+# their own hooks and endings, a tune from the bounces, the dark neon look.
+ARENA_HOOKS = {
+    "center": ["Last one standing wins", "Who holds the center?", "Which one survives the hole?"],
+    "spikes": ["Spikes grow on every bounce!", "Will it survive the spikes?", "Every bounce grows a spike"],
+    "shrink": ["The ball grows, the circle shrinks", "Every bounce: bigger ball, smaller circle",
+               "How big can it get?"],
+    "jaws": ["Each ball has 4 seconds to escape", "Escape the jaws in 4 seconds", "Can they escape the jaws?"],
+}
+ARENA_ENDINGS = {"center": ["WINNER!", "THE BEST!", "CHAMPION!"], "spikes": ["SURVIVED!", "FINAL FORM!"],
+                 "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"]}
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -150,7 +161,7 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 # ---- recipes -----------------------------------------------------------
 
-FORMATS = ("evolve", "escape", "touch", "breakin", "merge")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
+FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
 #                                                                   merge: ball_merge.py
 
 
@@ -174,7 +185,14 @@ def apply_pack(recipe: dict, pack: dict) -> dict:
     rng = random.Random(f"pack-hook-{recipe.get('seed')}-{pack.get('id')}")
     recipe["pack"] = pack
     fmt = recipe.get("format")
-    if fmt == "breakin":
+    if fmt == "center":
+        # "Which country is the best?": the pack's own question, if it is one
+        title = str(pack.get("title") or "")
+        if title.endswith("?"):
+            recipe["hook"] = title
+    elif fmt in ARENA_HOOKS:
+        pass                                   # these keep their own hook: it explains the game
+    elif fmt == "breakin":
         name = pack["items"][0]["name"]
         proper = str(pack.get("template") or "").startswith("flags")      # country names keep their capital
         recipe["hook"] = rng.choice(BREAKIN_HOOKS).format(item=name if proper else name.lower())
@@ -241,6 +259,13 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
         recipe.update(backdrop="black", hook=m.choice(MERGE_HOOKS), ending=m.choice(MERGE_ENDINGS),
                       tune=m.choice(tunes), bed="off")
+    if fmt in ARENA_HOOKS:
+        import datetime
+        from clipper import ball_merge
+        a = random.Random(f"{fmt}-recipe-{seed}")
+        tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
+        recipe.update(backdrop=a.choice(_BREAKIN_BACKDROP_DRAW), hook=a.choice(ARENA_HOOKS[fmt]),
+                      ending=a.choice(ARENA_ENDINGS[fmt]), tune=a.choice(tunes), bed="off", skin="plain")
     return recipe
 
 
@@ -777,6 +802,9 @@ def _parts(recipe: dict):
     if recipe.get("format") == "merge":
         from clipper import ball_merge
         return ball_merge.MergeSim, ball_merge.MergePainter
+    if recipe.get("format") in ARENA_HOOKS:
+        from clipper import ball_arenas
+        return ball_arenas.PARTS[recipe["format"]]
     return Sim, Painter
 
 
@@ -788,6 +816,8 @@ def good_end(recipe: dict) -> tuple:
         return (18.0, 42.0)
     if recipe.get("format") == "merge":
         return (24.0, 46.0)
+    if recipe.get("format") in ARENA_HOOKS:
+        return (22.0, 48.0)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -801,12 +831,13 @@ def simulate(recipe: dict) -> dict:
     times = sorted(sim.unlocked_at.values())
     gap = max((b - a for a, b in zip(times, times[1:])), default=99.0)
     return {"seed": recipe["seed"], "done_at": sim.done_at and round(sim.done_at, 1),
-            "max_gap": round(gap, 1), "best": sim.best}
+            "max_gap": round(gap, 1), "best": sim.best, "ok": getattr(sim, "ok", True)}
 
 
 def is_good(recipe: dict, r: dict) -> bool:
     lo, hi = good_end(recipe)
-    return r["done_at"] is not None and lo <= r["done_at"] <= hi and r["max_gap"] <= MAX_UNLOCK_GAP
+    return (r["done_at"] is not None and lo <= r["done_at"] <= hi and r["max_gap"] <= MAX_UNLOCK_GAP
+            and r.get("ok", True))
 
 
 def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=print) -> dict:
@@ -815,6 +846,10 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
     import multiprocessing
 
     workers = workers or max(1, min(4, os.cpu_count() or 2))
+    if recipe.get("format") in ("center", "spikes"):
+        # the crowned picture wins / the ball survives on only some seeds,
+        # and these simulate in ~0.1 s, so try many more
+        tries = max(tries, 240)
     lo, hi = good_end(recipe)
     good = []
     start = recipe["seed"]
@@ -1331,6 +1366,20 @@ def publish_text(recipe: dict) -> dict:
         desc = (f"One {first} bounces around until it finds the way in. Every brick it breaks makes "
                 f"another one, so once it's in, there's no stopping it.\n\n"
                 f"Guess how long it takes 👇\n\n#satisfying #physics #brickbreaker #asmr")
+    elif fmt == "center":
+        desc = ("They all bounce around a black hole that keeps growing. Fall in and you're out: "
+                "the last one standing wins.\n\nWho did you pick? 👇\n\n#satisfying #physics #bouncingball")
+    elif fmt == "spikes":
+        desc = (f"Every time the {first} hits a wall, a spike grows there. It changes every few bounces: "
+                f"can it reach its final form before a spike gets it?\n\nGuess the last one 👇\n\n"
+                f"#satisfying #physics #bouncingball")
+    elif fmt == "shrink":
+        desc = (f"Every bounce makes the {first} bigger and the circle smaller, until there's no room "
+                f"left.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
+    elif fmt == "jaws":
+        desc = ("Each ball has 4 seconds to get out of the turning jaws. A tooth or the clock pops it, "
+                "and every ball that escapes makes two more.\n\nGuess the last one 👇\n\n"
+                "#satisfying #physics #bouncingball")
     elif fmt == "escape":
         desc = (f"One {first} bounces in a spinning ring. Every time one gets out through the gap, "
                 f"two more appear inside, and they keep changing on the way to the last one.\n\n"

@@ -34,6 +34,17 @@ KINDS = {
                "ball; new ones come out as the next picture, up to the final one",
     "evolve": "a ball-drop video: pictures fall through pegs into a jar, two of the same merge "
               "into the next one, up to the final one",
+    "center": "a 'hold the center' video: the pictures bounce in a ring around a growing black hole; "
+              "one that falls in is out (crossed out at the top), and the last one left is the winner "
+              "shown big at the end",
+    "spikes": "a 'spikes will grow' video: one ball with a picture bounces in an octagon, a spike grows "
+              "where it hits a wall, and the ball changes into the next picture every few bounces, up "
+              "to the final one",
+    "shrink": "a 'the ball grows, the circle shrinks' video: one ball with a picture gets bigger and the "
+              "ring smaller on every bounce, changing pictures on the way, until it fills the ring",
+    "jaws": "a '4 seconds to escape' video: balls with pictures bounce in a turning broken ring, each has "
+            "4 seconds (the arc around it) to get out or it pops, and every escape makes two more; new "
+            "ones come out as the next picture, up to the final one",
 }
 
 _PROMPT = """These are 4 frames from a vertical YouTube Short, {kind}. \

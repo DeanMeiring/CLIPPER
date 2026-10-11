@@ -6241,7 +6241,7 @@ def _balls_view(v: dict) -> dict:
         pack = r.get("pack") or {}
         if pack:
             c["chips"][1] = f"🖼 {pack['title']}"
-        if fmt == "merge":
+        if fmt == "merge" or fmt in ball_evolution.ARENA_HOOKS:
             c["chips"] = [c["chips"][0], c["chips"][1], r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}"]
             c["chips"] = [x for x in c["chips"] if x]
         else:
@@ -6249,16 +6249,20 @@ def _balls_view(v: dict) -> dict:
     return c
 
 
-BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge")
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
-# out of the rotation (still in Make by hand). 12 slots: escape x4,
-# breakin x4, merge x2, touch x2.
-BALLS_FORMAT_CYCLE = ("escape", "breakin", "merge", "escape", "touch", "breakin",
-                      "escape", "breakin", "merge", "escape", "touch", "breakin")
+# out of the rotation (still in Make by hand). Then (11 Oct) he asked for
+# four more music.bouncingball kinds, rotated in (clipper/ball_arenas.py).
+# 16 slots: escape x3, breakin x3, center x2, merge x2, spikes x2,
+# shrink x2, jaws x1, touch x1.
+BALLS_FORMAT_CYCLE = ("escape", "center", "breakin", "spikes", "merge", "escape", "shrink", "breakin",
+                      "jaws", "center", "escape", "breakin", "spikes", "merge", "shrink", "touch")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
-                       "breakin": "🧱 Break in", "merge": "🌀 Merge to final form"}
+                       "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
+                       "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
+                       "shrink": "🔴 Ball grows, circle shrinks", "jaws": "⏱ 4 seconds to escape"}
 
 
 def _balls_tz():
