@@ -34,6 +34,28 @@ KINDS = {
                "ball; new ones come out as the next picture, up to the final one",
     "evolve": "a ball-drop video: pictures fall through pegs into a jar, two of the same merge "
               "into the next one, up to the final one",
+    "center": "a 'hold the center' video: the pictures bounce in a ring around a growing black hole; "
+              "one that falls in is out (crossed out at the top), and the last one left is the winner "
+              "shown big at the end",
+    "spikes": "a 'spikes will grow' video: one ball with a picture bounces in an octagon, a spike grows "
+              "where it hits a wall, and the ball changes into the next picture every few bounces, up "
+              "to the final one",
+    "shrink": "a 'the ball grows, the circle shrinks' video: one ball with a picture gets bigger and the "
+              "ring smaller on every bounce, changing pictures on the way, until it fills the ring",
+    "jaws": "a '4 seconds to escape' video: balls with pictures bounce in a turning broken ring, each has "
+            "4 seconds (the arc around it) to get out or it pops, and every escape makes two more; new "
+            "ones come out as the next picture, up to the final one",
+    "spiral": "a 'will the ball multiply?' video: balls with pictures break a spiral wall piece by piece, "
+              "every broken piece makes another ball (the counter is the multiplier), and new balls come "
+              "out as the next picture, up to the final one",
+    "rays": "a 'rays in a parabola' video: rounds of rainbow lines fall into a parabola and all bounce "
+            "through its focus, where each round's picture appears; the last round shows the final one",
+    "box": "a '+3 balls after each escape' video: balls with pictures fall out of a hole in a box's floor "
+           "and each one adds three more at the top; new ones come out as the next picture",
+    "zen": "a 'reminds me of something' video: a ring of spikes with one gap; each picture drops in, and "
+           "one that touches the spikes turns grey and stays there; the last picture gets out the gap",
+    "trail": "a 'with every bounce, the ball evolves' video: one ball with a picture grows on every bounce "
+             "and leaves a permanent rainbow trail that fills the ring; it changes pictures up to the final one",
 }
 
 _PROMPT = """These are 4 frames from a vertical YouTube Short, {kind}. \

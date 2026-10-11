@@ -802,6 +802,58 @@ merge it yourself; merging stays Dean's call per the rule above.
   change still made Evolve videos for slots planned while Evolve was in
   the cycle, and Dean ("the maze path in the circle is too confusing")
   doesn't want them.
+  **Four more kinds (11 Oct):** Dean sent music.bouncingball's grid and
+  asked for all four, rotating (`clipper/ball_arenas.py`, `be._parts` ->
+  `ball_arenas.PARTS`; neon dark look; a tune from the bounces via
+  `music_track` like Merge; own hooks/endings `be.ARENA_HOOKS` /
+  `ARENA_ENDINGS`, skin "plain"): `center` Hold the center (every pack
+  picture bounces around a black hole that grows; falling in = out,
+  crossed out in the ladder; last one wins; `simulate` now returns `ok`
+  and `is_good` needs it: the seed must make the pack's final picture win,
+  ~1 in 8, and the first one must fall in by 8 s (`C_FIRST_OUT`: no dead
+  start), so `pick_seed` tries 240 seeds for center/spikes; a pack whose
+  title is a question, "Which country is the best?", is the hook),
+  `spikes` Spikes will grow (one ball, steady speed, no gravity, in an
+  octagon; a solid spike grows where it hits a wall once it has moved off;
+  only a near head-on hit on a tip pops it -- with gravity, whole-spike
+  pops or spikes grown under the ball it popped after 2-5 spikes; next
+  picture every ~28 bounces / pictures; seeds where it survives to the final form),
+  `shrink` The ball grows, the circle shrinks (own physics, ~68 bounces,
+  ~25 s), `jaws` 4 seconds to escape (a turning ring of 3 arcs; each ball
+  has 4 s or pops, an escape makes two; rotating teeth were tried and swept
+  every resting ball). Rotation (16 slots): escape x3, breakin x3, center
+  x2, merge x2, spikes x2, shrink x2, jaws x1, touch x1. Tuned with the
+  countryball pack: good seeds per 12 center ~2, spikes ~3, shrink 11,
+  jaws 5.
+  **Four more (11 Oct)**, from reels Dean sent with big numbers, same
+  module: `spiral` "Will the ball multiply?" (809K likes: balls break an
+  Archimedean spiral wall, pieces take 2 hits in the middle up to 18 on the
+  outer turn, every broken piece makes a ball, counter "x28"; pictures
+  follow the share of wall gone -- by ball count they all came in the last
+  second), `rays` (570K: rounds of rainbow rays fall into a parabola and
+  bounce through the focus, 1..150 rays, the round's picture at the focus;
+  analytic paths, no physics, every seed works; our own tune, the reel used
+  Interstellar's), `box` "+3 after each escape" (360K: a box with a hole in
+  the floor, each ball out adds 3, counter to 2,500, max 520 simulated at
+  once, the rest wait), `zen` "Reminds me of something" (106K: a spiked ring;
+  a ball that touches the spikes turns grey and stays; each picture gets
+  `Z_TRIES` 14 / pictures tries; the jaw only opens when the final picture
+  drops in -- open from the start or on a timer, earlier balls got out
+  first). `trail` "With every bounce, the ball evolves" (one ball in a
+  ring under gravity, every bounce stamps a coloured circle on a layer that
+  stays and the ball grows a little; the picture changes every ~N bounces;
+  ends when its radius is 46% of the ring's). Rotation (22 slots,
+  `BALLS_FORMAT_CYCLE`): escape x3, spiral, trail, center, breakin, rays,
+  box, zen x2 each, merge, spikes, shrink, jaws, touch x1.
+  **Bounce sounds (11 Oct):** merge and every arena kind pick
+  `recipe["bounce_sound"]` (own rng `bounce-sound-<seed>`, so the other
+  recipe fields are unchanged): `tune` 2 : `meow` 1 : `phonk` 1.
+  `clipper/ball_sounds.py`, numpy only: Dean asked for "a cursed meow,
+  heavily deep, deeper the more it bounces" (a synthesised meow, slowed a
+  bit more each bounce up to 3.5x) and "the song people post mog videos
+  to" -- those are labels' phonk tracks that Content ID would claim on
+  every video, so it's an original 808 cowbell riff + 808 bass in the same
+  style; Dean was told. The card chip shows "🐱 cursed meow" / "🥁 phonk".
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

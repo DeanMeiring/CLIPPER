@@ -231,7 +231,12 @@ class MergeSim:
         return (self.done_at is not None and self.t - self.done_at > END_HOLD) or self.t > SECONDS_CAP
 
     def music_track(self, n: int) -> np.ndarray:
-        """The tune, one note per ring hit (ball_evolution.mix_audio adds it)."""
+        """The tune, one note per ring hit (ball_evolution.mix_audio adds it);
+        or the cursed meow / phonk riff when the recipe picked one."""
+        kind = self.recipe.get("bounce_sound")
+        if kind in ("meow", "phonk"):
+            from clipper import ball_sounds
+            return ball_sounds.track(kind, self.hits, n)
         out = np.zeros(n, dtype=np.float32)
         notes = TUNES.get(self.recipe.get("tune") or "", TUNES["mountain_king"])
         k, last, cache = 0, -1.0, {}
