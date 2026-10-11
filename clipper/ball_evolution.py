@@ -91,6 +91,11 @@ _BREAKIN_BACKDROP_DRAW = ["black"] * 3 + ["space"] * 2 + ["blurred"]
 BREAKIN_HOOKS = ["Can one {item} clear the room?", "Will one {item} break in?",
                  "One {item} vs a room of bricks", "How long until it breaks in?"]
 BREAKIN_ENDINGS = ["CLEARED!", "ROOM CLEARED!", "ALL GONE!"]
+# "Merge into final form" (clipper/ball_merge.py): pictures from a pack
+# (clipper/ball_packs.py) or the theme's emoji, and a tune from the bounces.
+MERGE_HOOKS = ["Will it merge into its final form?", "What's the final form?",
+               "Guess the final form", "Wait for the final form..."]
+MERGE_ENDINGS = ["FINAL FORM!", "IT EVOLVED!", "MAXED OUT!"]
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -145,7 +150,8 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 # ---- recipes -----------------------------------------------------------
 
-FORMATS = ("evolve", "escape", "touch", "breakin")   # escape/touch: ball_circles.py, breakin: ball_breakin.py
+FORMATS = ("evolve", "escape", "touch", "breakin", "merge")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
+#                                                                   merge: ball_merge.py
 
 
 def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
@@ -171,6 +177,13 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         item = THEMES[theme]["chain"][0][1].lower()
         recipe.update(backdrop=b.choice(_BREAKIN_BACKDROP_DRAW), hook=b.choice(BREAKIN_HOOKS).format(item=item),
                       ending=b.choice(BREAKIN_ENDINGS))
+    if fmt == "merge":
+        import datetime
+        from clipper import ball_merge
+        m = random.Random(f"merge-recipe-{seed}")
+        tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
+        recipe.update(backdrop="black", hook=m.choice(MERGE_HOOKS), ending=m.choice(MERGE_ENDINGS),
+                      tune=m.choice(tunes), bed="off")
     return recipe
 
 
@@ -704,6 +717,9 @@ def _parts(recipe: dict):
     if recipe.get("format") == "breakin":
         from clipper import ball_breakin
         return ball_breakin.BreakInSim, ball_breakin.BreakInPainter
+    if recipe.get("format") == "merge":
+        from clipper import ball_merge
+        return ball_merge.MergeSim, ball_merge.MergePainter
     return Sim, Painter
 
 
@@ -713,6 +729,8 @@ def good_end(recipe: dict) -> tuple:
     if recipe.get("format") == "breakin":
         # with MAX_UNLOCK_GAP this also keeps the wait to get in to ~6-18 s
         return (18.0, 42.0)
+    if recipe.get("format") == "merge":
+        return (26.0, 46.0)
     n = len(THEMES[recipe["theme"]]["chain"])
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -1222,6 +1240,9 @@ def mix_audio(sim: Sim) -> np.ndarray:
     fx = np.tanh(fx * 1.4) * 0.85
     bed = v.music(sim.t + 1)[:n]
     mix = fx + bed
+    track = getattr(sim, "music_track", None)
+    if track is not None:                 # "merge": a tune played by the bounces
+        mix = mix * 0.7 + track(n)
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
 
 
@@ -1237,6 +1258,14 @@ def publish_text(recipe: dict) -> dict:
     theme = THEMES[recipe["theme"]]
     first = emoji_char(theme["chain"][0][0])
     title = f"{recipe['hook']} {first}"
+    if recipe.get("format") == "merge":
+        pack = recipe.get("pack")
+        title = recipe["hook"] if pack else f"{recipe['hook']} {first}"
+        desc = ("Two of the same merge into the next one, all the way to the final form. "
+                "Did you guess it? 👇\n\n#satisfying #physics #meme #evolution")
+        if pack and pack.get("credits"):
+            desc += "\n\nStickers via GIPHY"
+        return {"title": title[:100], "description": desc}
     if recipe.get("format") == "breakin":
         desc = (f"One {first} bounces around until it finds the way in. Every brick it breaks makes "
                 f"another one, so once it's in, there's no stopping it.\n\n"
@@ -1286,7 +1315,7 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
                    check=True)
     video.unlink(missing_ok=True)
     wav.unlink(missing_ok=True)
-    chain = THEMES[recipe["theme"]]["chain"]
+    chain = getattr(sim, "chain", None) or THEMES[recipe["theme"]]["chain"]
     info = dict(recipe, seconds=round(sim.t, 1), dropped=sim.spawned,
                 done_at=sim.done_at and round(sim.done_at, 1),
                 unlocks={chain[k][1]: round(t, 1) for k, t in sorted(sim.unlocked_at.items())})

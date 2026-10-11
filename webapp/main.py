@@ -5,6 +5,7 @@ at once.
 """
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -47,6 +48,7 @@ from clipper import longform_thumbnail
 from clipper import ranking
 from clipper import rocket_league
 from clipper import ball_channel
+from clipper import ball_packs
 from clipper import ball_evolution
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
@@ -5931,6 +5933,8 @@ def rl_settings(req: RLSettings) -> dict:
 # a separate process (`python -m clipper.ball_evolution --progress`), so a
 # 3-5 minute render never holds the web server's GIL or threads.
 _balls = ball_channel.Store(BASE_DIR / "_balls")
+# Picture packs for the "merge into final form" videos (clipper/ball_packs.py)
+_ball_packs = ball_packs.PackStore(BASE_DIR / "_balls" / "packs")
 BALLS_PROFILE = "balls"
 # The YouTube upload quota is shared with every other channel here. Two
 # posts a day need 2; the third is catch-up room: a slot missed because the
@@ -5996,7 +6000,16 @@ def _balls_make(vid: str) -> None:
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
-    recipe["bed"] = settings.get("bed") or "auto"
+    if fmt == "merge":
+        _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
+                                              note="Finding the pictures..."))
+        pack = _balls_pick_pack(vid, opts.get("pack"))
+        if pack:
+            recipe["pack"] = _ball_packs.recipe_pack(pack)
+            if pack.get("hook"):
+                recipe["hook"] = pack["hook"]
+    else:
+        recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
     tmp = out_dir / "video.part.mp4"
     cmd = [sys.executable, "-m", "clipper.ball_evolution", str(tmp), "--recipe", json.dumps(recipe), "--progress"]
@@ -6058,6 +6071,44 @@ def _balls_make(vid: str) -> None:
             proc.kill()
 
 
+def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
+    """The pictures for a "merge" video: a chosen pack, else the oldest
+    uploaded pack nothing has used, else a new automatic GIPHY pack (when
+    the keys are there), else None = the theme's emoji."""
+    if choice == "emoji":
+        return None
+    pack = None
+    if choice and choice != "auto":
+        try:
+            pack = _ball_packs.load(choice)
+        except (KeyError, OSError, ValueError):
+            pack = None
+    pack = pack or _ball_packs.next_upload()
+    if pack is None and os.environ.get("GIPHY_API_KEY") and os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            pack = _balls_auto_pack()
+        except Exception as e:
+            print(f"[balls] automatic picture pack failed, using emoji: {e}", flush=True)
+            pack = None
+    if pack:
+        _ball_packs.mark_used(pack["id"], vid)
+        # a retry or a remake of this video keeps the same pictures
+        _balls.update(vid, lambda v: v.setdefault("options", {}).update(pack=pack["id"]))
+    return pack
+
+
+def _balls_auto_pack() -> dict:
+    recent = [p["title"] for p in _ball_packs.packs() if p.get("source") == "giphy"]
+    return ball_packs.auto_pack(_ball_packs, os.environ["GIPHY_API_KEY"], os.environ["ANTHROPIC_API_KEY"],
+                                recent, log=lambda m: print(m, flush=True))
+
+
+def _balls_pack_view(p: dict) -> dict:
+    return {"id": p["id"], "title": p["title"], "source": p.get("source"), "used_by": p.get("used_by"),
+            "created_at": p.get("created_at"), "hook": p.get("hook"),
+            "items": [{"name": i["name"], "url": f"/api/balls/packs/{p['id']}/{i['file']}"} for i in p["items"]]}
+
+
 def _balls_resume() -> None:
     """Start the worker for queued videos, and queue again from scratch any
     a restart (a deploy, Railway waking the app) cut off mid-way."""
@@ -6092,19 +6143,26 @@ def _balls_view(v: dict) -> dict:
         c["chips"] = [BALLS_FORMAT_LABELS.get(fmt, fmt), f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}"]
         if fmt == "evolve":
             c["chips"] += [r.get("course"), r.get("jar")]
-        c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
+        if fmt == "merge":
+            pack = r.get("pack") or {}
+            c["chips"] = [BALLS_FORMAT_LABELS["merge"], f"🖼 {pack['title']}" if pack else c["chips"][1],
+                          r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}"]
+            c["chips"] = [x for x in c["chips"] if x]
+        else:
+            c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
     return c
 
 
-BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin")
+BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
-# day). Dean saw the ring videos get more views, so most are rings; 🧱
-# Break in (Oct 2026) took two of the ten: 8 in 10 are rings now, with
-# 🧬 Evolve every 5th.
-BALLS_FORMAT_CYCLE = ("escape", "touch", "breakin", "escape", "evolve",
-                      "touch", "escape", "breakin", "touch", "evolve")
+# day). Dean saw the ring videos get more views, so most are rings; then
+# 🧱 Break in, then 🌀 Merge (the music.bouncingball format, 308K likes on
+# the reel he sent), which gets the most slots. 12 slots: merge x3,
+# escape x3, touch x2, breakin x2, evolve x2.
+BALLS_FORMAT_CYCLE = ("merge", "escape", "touch", "breakin", "merge", "escape",
+                      "evolve", "touch", "merge", "escape", "breakin", "evolve")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
-                       "breakin": "🧱 Break in"}
+                       "breakin": "🧱 Break in", "merge": "🌀 Merge to final form"}
 
 
 def _balls_tz():
@@ -6256,6 +6314,7 @@ class BallsMakeRequest(BaseModel):
     course: Optional[str] = None
     jar: Optional[str] = None
     format: Optional[str] = None
+    pack: Optional[str] = None      # merge: "auto" (default), "emoji" or a pack id
     count: int = 1
 
 
@@ -6269,14 +6328,92 @@ def balls_make(req: BallsMakeRequest) -> dict:
         raise HTTPException(400, "unknown jar")
     if req.format and req.format not in BALLS_FORMAT_ROTATION:
         raise HTTPException(400, "unknown format")
+    if req.pack and req.pack not in ("auto", "emoji"):
+        try:
+            _ball_packs.load(req.pack)
+        except (KeyError, OSError, ValueError):
+            raise HTTPException(400, "that picture pack doesn't exist")
     waiting = sum(1 for v in _balls.videos() if v.get("status") in _BALLS_MAKING)
     count = max(1, min(int(req.count or 1), 7))
     if waiting + count > BALLS_MAX_QUEUE:
         raise HTTPException(409, f"{waiting} are already being made -- wait for some to finish first.")
     for _ in range(count):
-        _balls.new_video({"theme": req.theme, "course": req.course, "jar": req.jar, "format": req.format})
+        opts = {"theme": req.theme, "course": req.course, "jar": req.jar, "format": req.format}
+        if req.pack and req.pack != "auto":
+            opts["pack"] = req.pack
+        _balls.new_video(opts)
     _balls_start_worker()
     return balls_state()
+
+
+# ---- picture packs (the "merge" videos' pictures) ----
+
+class BallsPackItem(BaseModel):
+    name: str = ""
+    data: str                      # base64 (a data: URL is fine too)
+
+
+class BallsPackUpload(BaseModel):
+    title: str = ""
+    items: List[BallsPackItem]
+
+
+@protected.get("/api/balls/packs")
+def balls_packs() -> dict:
+    return {"packs": [_balls_pack_view(p) for p in reversed(_ball_packs.packs())],
+            "giphy": bool(os.environ.get("GIPHY_API_KEY"))}
+
+
+@protected.get("/api/balls/packs/{pid}/{name}")
+def balls_pack_file(pid: str, name: str) -> FileResponse:
+    if not re.fullmatch(r"\d{2}\.png", name):
+        raise HTTPException(404, "not there")
+    try:
+        path = _ball_packs.dir(pid) / name
+    except KeyError:
+        raise HTTPException(404, "not there")
+    if not path.is_file():
+        raise HTTPException(404, "not there")
+    return FileResponse(path, media_type="image/png")
+
+
+@protected.post("/api/balls/packs")
+def balls_pack_upload(req: BallsPackUpload) -> dict:
+    """Dean's own pictures for one video, in order (the last is the final form)."""
+    if not ball_packs.MIN_ITEMS <= len(req.items) <= ball_packs.MAX_ITEMS:
+        raise HTTPException(400, f"Pick {ball_packs.MIN_ITEMS}-{ball_packs.MAX_ITEMS} pictures.")
+    items = []
+    for k, it in enumerate(req.items, 1):
+        raw = it.data.split(",", 1)[1] if it.data.startswith("data:") else it.data
+        try:
+            items.append((it.name, ball_packs.normalize(base64.b64decode(raw))))
+        except Exception:
+            raise HTTPException(400, f"Picture {k} isn't an image the app can read.")
+    pack = _ball_packs.save(req.title, items, "upload")
+    return _balls_pack_view(pack)
+
+
+@protected.post("/api/balls/packs/auto")
+def balls_pack_auto() -> dict:
+    """Find a pack on GIPHY now (Claude plans the chain and checks every picture)."""
+    if not os.environ.get("GIPHY_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(409, "Add GIPHY_API_KEY on Railway first.")
+    try:
+        pack = _balls_auto_pack()
+    except Exception as e:
+        print(f"[balls] automatic picture pack failed: {e}", flush=True)
+        raise HTTPException(502, f"Couldn't make a pack this time ({e}) -- try again.")
+    return _balls_pack_view(pack)
+
+
+@protected.delete("/api/balls/packs/{pid}")
+def balls_pack_delete(pid: str) -> dict:
+    try:
+        _ball_packs.load(pid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "not there")
+    _ball_packs.delete(pid)
+    return balls_packs()
 
 
 class BallsEdit(BaseModel):
@@ -11363,6 +11500,18 @@ __CSS__
   .plan .when { flex: none; width: 104px; font-weight: 600; }
   .plan .what { flex: 1; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
   .day.half { border-color: var(--warn); color: var(--warn); }
+  .pk { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+  .pk-head { display: flex; gap: 8px; align-items: baseline; }
+  .pk-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .pk-tag { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
+  .pk-strip { display: flex; gap: 6px; overflow-x: auto; margin-top: 8px; padding-bottom: 4px; }
+  .pk-strip figure { margin: 0; flex: none; width: 64px; text-align: center; }
+  .pk-strip img { width: 64px; height: 64px; object-fit: contain; background: #000; border-radius: 10px; }
+  .pk-strip figcaption { font-size: 0.68rem; color: var(--muted); line-height: 1.2; margin-top: 2px; overflow-wrap: anywhere; }
+  .pk-up { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .pk-up img { width: 52px; height: 52px; object-fit: contain; background: #000; border-radius: 8px; flex: none; }
+  .pk-up input { flex: 1; min-width: 0; }
+  .pk-up button { flex: none; padding: 6px 9px; }
   @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .vcard { flex-direction: column; } .vcard .vid { width: 100%; }
     .vcard video { max-height: 460px; } .vcard .ph { max-height: 260px; aspect-ratio: auto; height: 160px; } }
 </style>
@@ -11372,7 +11521,7 @@ __CSS__
 __NAV_LINKS__
 <div class="card">
   <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
-  <p class="subtitle">Satisfying physics Shorts for their own channel, in four kinds that take turns: 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more), ✨ Touch &amp; multiply (two balls touch, a new one pops out) and 🧱 Break in (one ball finds its way into a room of bricks, and every brick it breaks makes another ball). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
+  <p class="subtitle">Satisfying physics Shorts for their own channel, in five kinds that take turns: 🌀 Merge to final form (pictures drop into a ring, two of the same merge into the next, and every bounce plays the next note of a song), 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more), ✨ Touch &amp; multiply (two balls touch, a new one pops out) and 🧱 Break in (one ball finds its way into a room of bricks, and every brick it breaks makes another ball). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
   <div id="conn" class="status"></div>
   <div id="igconn" class="status" style="margin-top:8px"></div>
 
@@ -11383,11 +11532,26 @@ __NAV_LINKS__
       <div><label for="m-theme">Theme</label><select id="m-theme"></select></div>
       <div class="evolve-only"><label for="m-course">Course</label><select id="m-course"></select></div>
       <div class="evolve-only"><label for="m-jar">Jar</label><select id="m-jar"></select></div>
+      <div class="merge-only"><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
     <button id="make" type="button">🎬 Make</button>
     <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it.</div>
+  </div>
+
+  <div class="section">
+    <h3>🖼 Picture packs</h3>
+    <div class="hint">The pictures for 🌀 Merge videos, in order from normal to the most cursed: the last one is the final form. Each pack is used for one video. Your own packs go first; when there are none, the app finds a pack on GIPHY by itself, and Claude checks every picture before it's used.</div>
+    <div class="actions"><button id="pk-auto" type="button" class="secondary">🔎 Find a pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
+    <div id="pk-form" style="display:none">
+      <label for="pk-title">Pack name</label><input id="pk-title" maxlength="60" placeholder="e.g. Cursed cats">
+      <label for="pk-files">Pictures (6–9)</label><input id="pk-files" type="file" accept="image/*" multiple>
+      <div class="hint">Put them in order with ↑ ↓: the first is the normal one, the last is the final form. The names show in the video ("NEW: Buff cat!").</div>
+      <div id="pk-list"></div>
+      <div class="actions"><button id="pk-save" type="button">💾 Save pack</button></div>
+    </div>
+    <div id="pk-packs"></div>
   </div>
 
   <div class="section">
@@ -11524,8 +11688,9 @@ $('ap-on').addEventListener('change', () => {
   saveSettings({ autopilot: on });
 });
 $('m-format').addEventListener('change', () => {
-  const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
-  for (const e of document.querySelectorAll('.evolve-only')) e.style.display = ev ? '' : 'none';
+  const kind = $('m-format').value || S.autopilot.today;
+  for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
+  for (const e of document.querySelectorAll('.merge-only')) e.style.display = kind === 'merge' ? '' : 'none';
 });
 function renderAutopilot() {
   const ap = S.autopilot, st = S.settings;
@@ -11586,8 +11751,10 @@ $('make').onclick = async () => {
   const b = $('make'); b.disabled = true;
   try {
     const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
+    const merge = ($('m-format').value || S.autopilot.today) === 'merge';
     await api('/api/balls/make', jsonOpts('POST', { format: $('m-format').value || null, theme: $('m-theme').value || null,
-      course: ev ? $('m-course').value || null : null, jar: ev ? $('m-jar').value || null : null, count: parseInt($('m-count').value, 10) }));
+      course: ev ? $('m-course').value || null : null, jar: ev ? $('m-jar').value || null : null,
+      pack: merge ? $('m-pack').value || null : null, count: parseInt($('m-count').value, 10) }));
     tab = 'todo';
     await load();
   } catch (e) { alert(e.message); }
@@ -11741,7 +11908,109 @@ $('sched-all').onclick = async () => {
 const params = new URLSearchParams(location.search);
 if (params.has('instagram_error')) alert('Connecting Instagram didn’t work: ' + params.get('instagram_error'));
 if (params.has('youtube_connected') || params.has('instagram_connected') || params.has('instagram_error')) history.replaceState(null, '', '/ball-evolution');
+// ---- picture packs ----
+let PK = { packs: [], giphy: false }, upl = [];
+async function loadPacks() { PK = await api('/api/balls/packs'); renderPacks(); }
+function renderPacks() {
+  const sel = $('m-pack'), cur = sel.value;
+  sel.innerHTML = '';
+  const opt = (v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
+  opt('auto', PK.giphy ? '🔀 Auto: your next pack, else GIPHY' : '🔀 Auto: your next pack, else emoji');
+  opt('emoji', '😀 Emoji, no pictures');
+  for (const p of PK.packs) if (!p.used_by) opt(p.id, `🖼 ${p.title}`);
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
+  $('pk-auto').disabled = !PK.giphy;
+  $('pk-auto').title = PK.giphy ? '' : 'Add GIPHY_API_KEY on Railway first';
+  const box = $('pk-packs');
+  box.innerHTML = '';
+  if (!PK.packs.length) box.appendChild(el('div', 'hint', 'No packs yet.'));
+  for (const p of PK.packs) {
+    const row = el('div', 'pk'), head = el('div', 'pk-head');
+    head.appendChild(el('b', '', p.title));
+    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : 'yours') + (p.used_by ? ' · used' : ' · not used yet')));
+    const del = el('button', 'danger-link', '🗑');
+    del.type = 'button';
+    del.onclick = async () => {
+      if (!confirm('Delete this pack?')) return;
+      try { PK = await api('/api/balls/packs/' + p.id, { method: 'DELETE' }); renderPacks(); } catch (e) { alert(e.message); }
+    };
+    head.appendChild(del);
+    row.appendChild(head);
+    const strip = el('div', 'pk-strip');
+    p.items.forEach((it, i) => {
+      const f = el('figure'), im = el('img');
+      im.src = it.url; im.alt = it.name; im.loading = 'lazy';
+      f.appendChild(im);
+      f.appendChild(el('figcaption', '', (i === p.items.length - 1 ? '👑 ' : '') + it.name));
+      strip.appendChild(f);
+    });
+    row.appendChild(strip);
+    box.appendChild(row);
+  }
+}
+// pictures are shrunk in the browser (max 512 px; PNG keeps see-through backgrounds)
+function shrink(file) {
+  return new Promise((ok, bad) => {
+    const url = URL.createObjectURL(file), im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, 512 / Math.max(im.width, im.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(im.width * k)); c.height = Math.max(1, Math.round(im.height * k));
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      ok(c.toDataURL('image/png'));
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); bad(new Error(file.name + ' is not a picture the browser can open.')); };
+    im.src = url;
+  });
+}
+function renderUpl() {
+  const box = $('pk-list');
+  box.innerHTML = '';
+  upl.forEach((u, i) => {
+    const row = el('div', 'pk-up'), im = el('img'), name = el('input');
+    im.src = u.data; im.alt = '';
+    name.value = u.name; name.maxLength = 30; name.placeholder = `Level ${i + 1}`;
+    name.oninput = () => { u.name = name.value; };
+    row.appendChild(el('span', 'pk-tag', i === upl.length - 1 ? '👑' : String(i + 1)));
+    row.appendChild(im); row.appendChild(name);
+    const b = (t, fn, dis) => { const x = el('button', 'secondary', t); x.type = 'button'; x.disabled = !!dis; x.onclick = fn; row.appendChild(x); };
+    b('↑', () => { [upl[i - 1], upl[i]] = [upl[i], upl[i - 1]]; renderUpl(); }, i === 0);
+    b('↓', () => { [upl[i + 1], upl[i]] = [upl[i], upl[i + 1]]; renderUpl(); }, i === upl.length - 1);
+    b('✕', () => { upl.splice(i, 1); renderUpl(); });
+    box.appendChild(row);
+  });
+  $('pk-save').disabled = upl.length < 6 || upl.length > 9;
+  $('pk-save').textContent = upl.length < 6 ? `💾 Save pack (${upl.length} of at least 6)` : '💾 Save pack';
+}
+$('pk-new').onclick = () => { const f = $('pk-form'); f.style.display = f.style.display === 'none' ? '' : 'none'; renderUpl(); };
+$('pk-files').onchange = async () => {
+  try {
+    for (const f of $('pk-files').files) {
+      if (upl.length >= 9) break;
+      upl.push({ name: f.name.replace(/[.][^.]+$/, '').replace(/[_-]+/g, ' ').slice(0, 30), data: await shrink(f) });
+    }
+  } catch (e) { alert(e.message); }
+  $('pk-files').value = '';
+  renderUpl();
+};
+$('pk-save').onclick = async () => {
+  const b = $('pk-save'); b.disabled = true; b.textContent = '💾 Saving…';
+  try {
+    await api('/api/balls/packs', jsonOpts('POST', { title: $('pk-title').value, items: upl.map(u => ({ name: u.name, data: u.data })) }));
+    upl = []; $('pk-title').value = ''; $('pk-form').style.display = 'none';
+    await loadPacks();
+  } catch (e) { alert(e.message); }
+  renderUpl();
+};
+$('pk-auto').onclick = async () => {
+  const b = $('pk-auto'); b.disabled = true; b.textContent = '🔎 Finding pictures… (about a minute)';
+  try { await api('/api/balls/packs/auto', { method: 'POST' }); await loadPacks(); } catch (e) { alert(e.message); }
+  b.textContent = '🔎 Find a pack now'; b.disabled = !PK.giphy;
+};
+
 load().catch(e => alert(e.message));
+loadPacks().catch(() => {});
 </script>
 </body>
 </html>

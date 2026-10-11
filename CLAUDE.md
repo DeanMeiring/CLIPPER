@@ -705,6 +705,40 @@ merge it yourself; merging stays Dean's call per the rule above.
   the ring). ~3 min to make a 34 s video. `BALLS_FORMAT_CYCLE` is 10
   slots now: escape x3, touch x3, breakin x2, evolve x2.
 
+- **Merge to final form + picture packs (Oct 2026):** Dean sent a
+  music.bouncingball reel (308K likes): cut-out meme pictures drop down a
+  chute into a rainbow ring, two of the same merge into the next, ending on
+  a final form; every bounce plays a note. He asked for meme / "cursed"
+  pictures instead of emoji ("the emoji doesn't grab attention") and a song
+  from the bounces. `clipper/ball_merge.py` (`format: "merge"`): capped
+  chute (items flew back out without the cap), gravity 900, bounce 0.92,
+  drops every 0.3 s, bigger tiers join the drops once revealed (a 9-step
+  chain needs 256 of the smallest otherwise), tier >= 3 drift to their
+  match. Every ring hit plays the next note of a public-domain tune
+  (`TUNES`: Mountain King, Ode to Joy, Fur Elise, Turkish March, Twinkle;
+  Jingle Bells in December) on a numpy piano, max ~7 notes/s
+  (`NOTE_GAP`); `be.mix_audio` adds `sim.music_track(n)` when a sim has
+  one (others unchanged), no noise bed. Dean once hated random marimba
+  notes; this is a recognisable tune, which he asked for.
+  `clipper/ball_packs.py`: packs of 6-9 pictures in order (last = final
+  form), `BASE_DIR/_balls/packs/<id>/` (pack.json + 01.png..). Uploaded
+  on the page (shrunk to 512 px in the browser, sent as base64 JSON), or
+  automatic: Claude plans an 8-step normal -> cursed chain of GIPHY
+  *sticker* searches (stickers are already cut out), the app searches
+  (`GIPHY_API_KEY`, free; rating pg), then ONE Claude vision call sees all
+  candidates (up to 6 per step) and picks one per step, rejecting nudity,
+  gore, real people, offensive text; any empty step fails the whole pack.
+  Real people / celebrity faces are excluded on purpose (likeness), and
+  Dean was told meme pictures carry copyright risk; he chose to go ahead.
+  A merge make (`_balls_pick_pack`) uses the chosen pack, else the oldest
+  unused upload, else a new GIPHY pack, else the theme's emoji; the pack id
+  is saved in the video's options so a retry/remake keeps the pictures.
+  Plain photos are drawn in a circle with a white rim, stickers as
+  cut-outs (`is_cutout`: >30% see-through edge). The sandbox can't reach
+  GIPHY, Reddit, Imgur, Wikimedia etc. (all blocked); tested with a fake
+  `requests` and a fake `_claude_json`. `BALLS_FORMAT_CYCLE` is 12 slots:
+  merge x3, escape x3, touch x2, breakin x2, evolve x2.
+
 ## Instagram posting (Oct 2026)
 
 - Dean pasted Meta's Content Publishing docs and asked to set it up, for
