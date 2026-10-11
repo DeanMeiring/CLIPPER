@@ -6174,9 +6174,15 @@ def _balls_photo_pack() -> dict:
     return ball_photos.photo_pack(_ball_packs, os.environ["ANTHROPIC_API_KEY"], log=lambda m: print(m, flush=True))
 
 
+_balls_seed_lock = threading.Lock()
+
+
 def _balls_seed_starters() -> None:
+    """Copy the bundled starter packs into the store once (~4 s the first
+    time; the lock stops two requests copying them twice)."""
     try:
-        added = ball_starters.seed_bundled(_ball_packs)
+        with _balls_seed_lock:
+            added = ball_starters.seed_bundled(_ball_packs)
         if added:
             print(f"[packs] starter packs added: {', '.join(added)}", flush=True)
     except Exception as e:
@@ -6705,6 +6711,7 @@ def _balls_autopilot_on_start() -> None:
 
 
 threading.Thread(target=_balls_autopilot_on_start, name="ball-autopilot-start", daemon=True).start()
+threading.Thread(target=_balls_seed_starters, name="ball-starter-packs", daemon=True).start()
 
 
 # Public on purpose (no app password): the cron waker calls it. The key is
