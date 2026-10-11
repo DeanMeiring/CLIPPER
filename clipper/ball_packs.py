@@ -164,13 +164,25 @@ Never pick the same picture twice.
 
 Answer with JSON only: {{"picks": [<candidate index or -1 for step 1>, ...]}}"""
 
+_PICK_ONE_PROMPT = """These are candidate stickers for one step of a "merge into final form" \
+video (pictures merge from normal to cursed): step "{name}"{final}. Pick the ONE candidate \
+that best shows it and stands out on a black background. Reject anything with nudity or \
+sexual content, gore or injury, a real human's face or body, offensive text, logos, or \
+anything disturbing rather than funny; use -1 when none is fine.
 
-def _claude_text(content, api_key: str, max_tokens: int = 1500) -> str:
+Answer with JSON only: {{"picks": [<candidate index or -1>]}}"""
+
+
+def _claude_text(content, api_key: str, max_tokens: int = 1500, log: Optional[Callable[[str], None]] = None) -> str:
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(model=DEFAULT_MODEL, max_tokens=max_tokens,
                                   messages=[{"role": "user", "content": content}])
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    if not text and log:
+        log(f"[packs] Claude gave no text (stop: {resp.stop_reason}, "
+            f"blocks: {[getattr(b, 'type', '?') for b in resp.content]})")
+    return text
 
 
 def _pick_list(raw: str, n: int) -> list:
@@ -274,15 +286,34 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
     # enough steps and its final form
     steps, cands = _drop_empty(plan["steps"], cands, log)
     n = len(steps)
+    def images(i, got):
+        out = []
+        for c, (g, im) in enumerate(got):
+            out.append({"type": "text", "text": f"step {i + 1} candidate {c}"})
+            out.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                    "data": _thumb_b64(im)}})
+        return out
+
     content: list = [{"type": "text", "text": _PICK_PROMPT.format(
         steps="\n".join(f"Step {i + 1}: {s['name']}" + (" (FINAL FORM)" if i == n - 1 else "")
                         for i, s in enumerate(steps)))}]
     for i, got in enumerate(cands):
-        for c, (g, im) in enumerate(got):
-            content.append({"type": "text", "text": f"step {i + 1} candidate {c}"})
-            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                                        "data": _thumb_b64(im)}})
-    picks = _pick_list(_claude_text(content, api_key, max_tokens=400), n)
+        content += images(i, got)
+    try:
+        picks = _pick_list(_claude_text(content, api_key, max_tokens=400, log=log), n)
+    except ValueError as e:
+        # one big check didn't come back usable: check step by step, so one
+        # step's pictures can't sink the whole pack
+        log(f"[packs] {e} -- checking step by step")
+        picks = []
+        for i, (s, got) in enumerate(zip(steps, cands)):
+            one = [{"type": "text", "text": _PICK_ONE_PROMPT.format(
+                name=s["name"], final=" (the FINAL FORM)" if i == n - 1 else "")}] + images(i, got)
+            try:
+                picks.append(_pick_list(_claude_text(one, api_key, max_tokens=200, log=log), 1)[0])
+            except ValueError as e1:
+                log(f"[packs] {s['name']}: {e1}")
+                picks.append(-1)
     # a step Claude found nothing fine for is left out the same way
     chosen = [[c[k]] if 0 <= k < len(c) else [] for c, k in zip(cands, picks)]
     steps, chosen = _drop_empty(steps, chosen, log)
