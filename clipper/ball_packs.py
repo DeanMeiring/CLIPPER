@@ -108,6 +108,8 @@ class PackStore:
     def mark_used(self, pid: str, vid: str) -> None:
         p = self.load(pid)
         p["used_by"] = vid
+        p["used_at"] = time.time()
+        p["uses"] = int(p.get("uses") or 0) + 1
         (self.dir(pid) / "pack.json").write_text(json.dumps(p, indent=1))
 
     def flag(self, pid: str, notes: str) -> None:
@@ -123,10 +125,23 @@ class PackStore:
         """The oldest uploaded pack no video has used yet."""
         return next((p for p in self.packs() if p.get("source") == "upload" and not p.get("used_by")), None)
 
+    def next_unused(self) -> Optional[dict]:
+        """The oldest pack no video has used yet: uploads first, then the rest
+        (GIPHY, starter packs). Packs Claude's check said no to are skipped."""
+        fresh = [p for p in self.packs() if not p.get("used_by") and not p.get("flagged")]
+        fresh.sort(key=lambda p: (p.get("source") != "upload", p.get("created_at") or 0))
+        return fresh[0] if fresh else None
+
+    def least_used(self) -> Optional[dict]:
+        """The pack used longest ago (to use again when nothing is new)."""
+        ok = [p for p in self.packs() if not p.get("flagged")]
+        return min(ok, key=lambda p: (p.get("used_at") or 0, p.get("created_at") or 0)) if ok else None
+
     def recipe_pack(self, pack: dict) -> dict:
         """What goes into a video's recipe: enough to draw it from disk."""
         return {"id": pack["id"], "dir": str(self.dir(pack["id"])), "title": pack["title"],
-                "source": pack.get("source"), "credits": bool(pack.get("credits")),
+                "source": pack.get("source"), "credits": bool(pack.get("credits")), "hook": pack.get("hook"),
+                "credit": pack.get("credit"), "template": pack.get("template"),
                 "items": [{"name": i["name"], "file": i["file"], "cutout": i["cutout"]} for i in pack["items"]]}
 
 
@@ -249,13 +264,14 @@ def _thumb_b64(im: Image.Image, side: int = 192) -> str:
 
 
 def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
-              log: Callable[[str], None] = print, http=None, n: int = AUTO_ITEMS) -> dict:
-    """Plan a chain, search GIPHY stickers for every step, let Claude pick a
-    safe, fitting one per step, save the pack. Raises when it can't fill
-    every step."""
+              log: Callable[[str], None] = print, http=None, n: int = AUTO_ITEMS,
+              plan: Optional[dict] = None, extra: Optional[dict] = None) -> dict:
+    """Plan a chain (or take a ready plan: ball_starters), search GIPHY
+    stickers for every step, let Claude pick a safe, fitting one per step,
+    save the pack. Raises when it can't fill enough steps."""
     import requests
     http = http or requests
-    plan = plan_chain(api_key, avoid, n)
+    plan = plan or plan_chain(api_key, avoid, n)
     log(f"[packs] plan: {plan['title']}: " + " > ".join(s["name"] for s in plan["steps"]))
     cands: List[List[tuple]] = []
     seen = set()
@@ -326,7 +342,7 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
     steps, chosen = _drop_empty(steps, chosen, log)
     items = [(s["name"], c[0][1]) for s, c in zip(steps, chosen)]
     credits = [c[0][0]["page"] for c in chosen]
-    return store.save(plan["title"], items, "giphy", {"hook": plan["hook"], "credits": credits})
+    return store.save(plan["title"], items, "giphy", {"hook": plan["hook"], "credits": credits, **(extra or {})})
 
 
 def _drop_empty(steps: list, cands: list, log: Callable[[str], None]) -> tuple:

@@ -1,0 +1,48 @@
+{
+ "key": "flags_europe",
+ "title": "Best country in Europe?",
+ "hook": "Which country wins Europe?",
+ "credit": "Flags: flag-icons (MIT)",
+ "items": [
+  {
+   "name": "Switzerland",
+   "file": "01.webp",
+   "flag": "ch"
+  },
+  {
+   "name": "Belgium",
+   "file": "02.webp",
+   "flag": "be"
+  },
+  {
+   "name": "Netherlands",
+   "file": "03.webp",
+   "flag": "nl"
+  },
+  {
+   "name": "Portugal",
+   "file": "04.webp",
+   "flag": "pt"
+  },
+  {
+   "name": "Spain",
+   "file": "05.webp",
+   "flag": "es"
+  },
+  {
+   "name": "Germany",
+   "file": "06.webp",
+   "flag": "de"
+  },
+  {
+   "name": "France",
+   "file": "07.webp",
+   "flag": "fr"
+  },
+  {
+   "name": "Italy",
+   "file": "08.webp",
+   "flag": "it"
+  }
+ ]
+}

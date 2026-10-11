@@ -1,0 +1,41 @@
+{
+ "key": "cursed_cat",
+ "title": "Cat to Cat God",
+ "hook": "What will the cat turn into?",
+ "credit": null,
+ "cursed_base": "1f431",
+ "items": [
+  {
+   "name": "Cat",
+   "file": "01.webp"
+  },
+  {
+   "name": "Long Cat",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Cat",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Cat",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Cat",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Cat",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Cat",
+   "file": "07.webp"
+  },
+  {
+   "name": "Cat God",
+   "file": "08.webp"
+  }
+ ]
+}

@@ -9,7 +9,7 @@ too quickly).
 * Every tile a ball breaks makes one more ball where it was, so once the
   first ball is in, it multiplies fast until the room is cleared. Tiles
   near the entrance break in one hit; deeper ones show how many hits they
-  still need (up to 6), which keeps the chain reaction watchable (with
+  still need (up to 8), which keeps the chain reaction watchable (with
   one hit each the whole room went in about a second).
 
 The theme's chain drives the ladder (ball count on a log scale up to the
@@ -38,9 +38,11 @@ ROOM = (60, 350, 1020, 880)          # the tile room
 COR_TOP = ROOM[3]
 BALL_R = 12
 SPEED = 520
-TILE_W, TILE_H, TILE_GAP = 80, 40, 4
-HP_NEAR, HP_DEEP = 1, 6              # hits a tile needs: the entrance row .. the far row
-MAX_BALLS = 400
+# Dean asked for a lot more bricks (11 Oct): 420 small ones (was 132 at
+# 80x40), up to 8 hits deep, so the room still takes ~11-25 s to clear
+TILE_W, TILE_H, TILE_GAP = 44, 22, 3
+HP_NEAR, HP_DEEP = 1, 8              # hits a tile needs: the entrance row .. the far row
+MAX_BALLS = 600
 END_HOLD = 4.0
 SECONDS_CAP = 75.0
 
@@ -73,7 +75,7 @@ class BreakInSim:
 
         self.pymunk = pymunk
         self.recipe = recipe
-        self.chain = be.THEMES[recipe["theme"]]["chain"]
+        self.chain = be.recipe_chain(recipe)
         self.last = len(self.chain) - 1
         self.rng = random.Random(f"breakin-{recipe['seed']}")
         sp = self.space = pymunk.Space()
@@ -228,7 +230,7 @@ class BreakInPainter(be.Painter):
         self.fade = [int(v * self.TRAIL_FADE) for v in range(256)] * 3
         self.trail_cols = [tuple(int(v * 0.75) for v in c) for c in self.colours]
         self.glow: dict = {}
-        self.f_tile = be._font(28)
+        self.f_tile = be._font(17)
         self.f_count = be._font(46)
         self.static = self._walls()
 
@@ -284,11 +286,11 @@ class BreakInPainter(be.Painter):
             hue = (t.tile["col"] / t.tile["cols"] * 0.85 + t.tile["row"] / t.tile["rows"] * 0.15) % 1
             f = t.tile["flash"]
             col = tuple(int(v * 255 + (255 - v * 255) * f) for v in colorsys.hsv_to_rgb(hue, 0.7, 1))
-            d.rounded_rectangle((x0, y0, x1, y1), 7, fill=col + (230,))
+            d.rounded_rectangle((x0, y0, x1, y1), 5, fill=col + (230,))
             if t.tile["hp"] > 1:
                 txt = str(t.tile["hp"])
                 tw = d.textlength(txt, font=self.f_tile)
-                d.text(((x0 + x1) / 2 - tw / 2, (y0 + y1) / 2 - 17), txt, font=self.f_tile, fill=(20, 16, 30, 230))
+                d.text(((x0 + x1) / 2 - tw / 2, (y0 + y1) / 2 - 11), txt, font=self.f_tile, fill=(20, 16, 30, 230))
         for b in sim.balls:
             x, y = b["body"].position
             sp = self.sprite(b["tier"], b["r"])

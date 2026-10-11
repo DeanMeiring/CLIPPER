@@ -50,6 +50,9 @@ from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_packs
 from clipper import ball_review
+from clipper import ball_starters
+from clipper import ball_cursed
+from clipper import ball_photos
 from clipper import ball_evolution
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
@@ -6001,15 +6004,13 @@ def _balls_make(vid: str) -> None:
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
-    if fmt == "merge":
-        _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
-                                              note="Finding the pictures..."))
-        pack = _balls_pick_pack(vid, opts.get("pack"))
-        if pack:
-            recipe["pack"] = _ball_packs.recipe_pack(pack)
-            if pack.get("hook"):
-                recipe["hook"] = pack["hook"]
-    else:
+    # every kind uses a picture pack now (Dean: the emoji are too generic)
+    _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
+                                          note="Finding the pictures..."))
+    pack = _balls_pick_pack(vid, opts.get("pack"))
+    if pack:
+        ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
+    if fmt != "merge":
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
     tmp = out_dir / "video.part.mp4"
@@ -6054,7 +6055,7 @@ def _balls_make(vid: str) -> None:
             return
         tmp.replace(out_dir / "video.mp4")
         text = ball_evolution.publish_text(info)
-        verdict = _balls_review(vid, info, text["title"]) if fmt == "merge" else None
+        verdict = _balls_review(vid, info, text["title"]) if recipe.get("pack") or fmt == "merge" else None
         if vid in _balls_cancelled or not out_dir.is_dir():
             return
         if verdict and _balls_redo(vid, recipe, verdict):
@@ -6132,9 +6133,12 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
 
 
 def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
-    """The pictures for a "merge" video: a chosen pack, else the oldest
-    uploaded pack nothing has used, else a new automatic GIPHY pack (when
-    the keys are there), else None = the theme's emoji."""
+    """The pictures for a video: a chosen pack, else the oldest pack no video
+    has used (your uploads first, then GIPHY and starter packs), else a new
+    cursed pack the app makes itself -- from a free (CC0) photo
+    (ball_photos, needs the Claude key), else from the bundled emoji
+    (ball_cursed) -- else the pack used longest ago, else None = the
+    theme's emoji. Packs Claude's check said no to are skipped."""
     if choice == "emoji":
         return None
     pack = None
@@ -6143,13 +6147,22 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
             pack = _ball_packs.load(choice)
         except (KeyError, OSError, ValueError):
             pack = None
-    pack = pack or _ball_packs.next_upload()
-    if pack is None and os.environ.get("GIPHY_API_KEY") and os.environ.get("ANTHROPIC_API_KEY"):
+    _balls_seed_starters()
+    pack = pack or _ball_packs.next_unused()
+    if pack is None and os.environ.get("ANTHROPIC_API_KEY"):
         try:
-            pack = _balls_auto_pack()
+            pack = _balls_photo_pack()
         except Exception as e:
-            print(f"[balls] automatic picture pack failed, using emoji: {e}", flush=True)
+            print(f"[balls] photo pack failed, using the emoji ones: {e}", flush=True)
             pack = None
+    if pack is None:
+        try:
+            pack = ball_cursed.new_pack(_ball_packs)
+            print(f"[packs] made a cursed pack: {pack['title']}", flush=True)
+        except Exception as e:
+            print(f"[balls] making a cursed pack failed: {e}", flush=True)
+            pack = None
+    pack = pack or _ball_packs.least_used()
     if pack:
         _ball_packs.mark_used(pack["id"], vid)
         # a retry or a remake of this video keeps the same pictures
@@ -6157,10 +6170,23 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
     return pack
 
 
-def _balls_auto_pack() -> dict:
-    recent = [p["title"] for p in _ball_packs.packs() if p.get("source") == "giphy"]
-    return ball_packs.auto_pack(_ball_packs, os.environ["GIPHY_API_KEY"], os.environ["ANTHROPIC_API_KEY"],
-                                recent, log=lambda m: print(m, flush=True))
+def _balls_photo_pack() -> dict:
+    return ball_photos.photo_pack(_ball_packs, os.environ["ANTHROPIC_API_KEY"], log=lambda m: print(m, flush=True))
+
+
+_balls_seed_lock = threading.Lock()
+
+
+def _balls_seed_starters() -> None:
+    """Copy the bundled starter packs into the store once (~4 s the first
+    time; the lock stops two requests copying them twice)."""
+    try:
+        with _balls_seed_lock:
+            added = ball_starters.seed_bundled(_ball_packs)
+        if added:
+            print(f"[packs] starter packs added: {', '.join(added)}", flush=True)
+    except Exception as e:
+        print(f"[packs] starter packs couldn't be added: {e}", flush=True)
 
 
 def _balls_pack_view(p: dict) -> dict:
@@ -6203,10 +6229,11 @@ def _balls_view(v: dict) -> dict:
         c["chips"] = [BALLS_FORMAT_LABELS.get(fmt, fmt), f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}"]
         if fmt == "evolve":
             c["chips"] += [r.get("course"), r.get("jar")]
+        pack = r.get("pack") or {}
+        if pack:
+            c["chips"][1] = f"🖼 {pack['title']}"
         if fmt == "merge":
-            pack = r.get("pack") or {}
-            c["chips"] = [BALLS_FORMAT_LABELS["merge"], f"🖼 {pack['title']}" if pack else c["chips"][1],
-                          r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}"]
+            c["chips"] = [c["chips"][0], c["chips"][1], r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}"]
             c["chips"] = [x for x in c["chips"] if x]
         else:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
@@ -6215,12 +6242,12 @@ def _balls_view(v: dict) -> dict:
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
-# day). Dean saw the ring videos get more views, so most are rings; then
-# 🧱 Break in, then 🌀 Merge (the music.bouncingball format, 308K likes on
-# the reel he sent), which gets the most slots. 12 slots: merge x3,
-# escape x3, touch x2, breakin x2, evolve x2.
-BALLS_FORMAT_CYCLE = ("merge", "escape", "touch", "breakin", "merge", "escape",
-                      "evolve", "touch", "merge", "escape", "breakin", "evolve")
+# day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
+# do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
+# out of the rotation (still in Make by hand). 12 slots: escape x4,
+# breakin x4, merge x2, touch x2.
+BALLS_FORMAT_CYCLE = ("escape", "breakin", "merge", "escape", "touch", "breakin",
+                      "escape", "breakin", "merge", "escape", "touch", "breakin")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form"}
 
@@ -6406,7 +6433,7 @@ def balls_make(req: BallsMakeRequest) -> dict:
     return balls_state()
 
 
-# ---- picture packs (the "merge" videos' pictures) ----
+# ---- picture packs (the videos' pictures) ----
 
 class BallsPackItem(BaseModel):
     name: str = ""
@@ -6420,8 +6447,9 @@ class BallsPackUpload(BaseModel):
 
 @protected.get("/api/balls/packs")
 def balls_packs() -> dict:
+    _balls_seed_starters()
     return {"packs": [_balls_pack_view(p) for p in reversed(_ball_packs.packs())],
-            "giphy": bool(os.environ.get("GIPHY_API_KEY"))}
+            "photos": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
 @protected.get("/api/balls/packs/{pid}/{name}")
@@ -6455,13 +6483,14 @@ def balls_pack_upload(req: BallsPackUpload) -> dict:
 
 @protected.post("/api/balls/packs/auto")
 def balls_pack_auto() -> dict:
-    """Find a pack on GIPHY now (Claude plans the chain and checks every picture)."""
-    if not os.environ.get("GIPHY_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(409, "Add GIPHY_API_KEY on Railway first.")
+    """Make a cursed pack from a free photo now (Openverse CC0, Claude picks
+    the photo and finds the face)."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(409, "Add ANTHROPIC_API_KEY on Railway first.")
     try:
-        pack = _balls_auto_pack()
+        pack = _balls_photo_pack()
     except Exception as e:
-        print(f"[balls] automatic picture pack failed: {e}", flush=True)
+        print(f"[balls] photo pack failed: {e}", flush=True)
         raise HTTPException(502, f"Couldn't make a pack this time ({e}) -- try again.")
     return _balls_pack_view(pack)
 
@@ -6682,6 +6711,7 @@ def _balls_autopilot_on_start() -> None:
 
 
 threading.Thread(target=_balls_autopilot_on_start, name="ball-autopilot-start", daemon=True).start()
+threading.Thread(target=_balls_seed_starters, name="ball-starter-packs", daemon=True).start()
 
 
 # Public on purpose (no app password): the cron waker calls it. The key is
@@ -11593,7 +11623,7 @@ __NAV_LINKS__
       <div><label for="m-theme">Theme</label><select id="m-theme"></select></div>
       <div class="evolve-only"><label for="m-course">Course</label><select id="m-course"></select></div>
       <div class="evolve-only"><label for="m-jar">Jar</label><select id="m-jar"></select></div>
-      <div class="merge-only"><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
+      <div><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
@@ -11603,8 +11633,8 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🖼 Picture packs</h3>
-    <div class="hint">The pictures for 🌀 Merge videos, in order from normal to the most cursed: the last one is the final form. Each pack is used for one video. Your own packs go first; when there are none, the app finds a pack on GIPHY by itself, and Claude checks every picture before it's used.</div>
-    <div class="actions"><button id="pk-auto" type="button" class="secondary">🔎 Find a pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
+    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself: it finds a free photo (public domain, from Openverse), Claude picks one with an animal looking at the camera, and the app edits it (Cool → Buff → Sigma or Chad → Cursed → Deep Fried → God). Without a photo it does the same with the bundled emoji, so there's always a fresh pack. Nothing is taken from Google or meme pages.</div>
+    <div class="actions"><button id="pk-auto" type="button" class="secondary">📷 Make a photo pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
     <div id="pk-form" style="display:none">
       <label for="pk-title">Pack name</label><input id="pk-title" maxlength="60" placeholder="e.g. Cursed cats">
       <label for="pk-files">Pictures (6–9)</label><input id="pk-files" type="file" accept="image/*" multiple>
@@ -11751,7 +11781,6 @@ $('ap-on').addEventListener('change', () => {
 $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
-  for (const e of document.querySelectorAll('.merge-only')) e.style.display = kind === 'merge' ? '' : 'none';
 });
 function renderAutopilot() {
   const ap = S.autopilot, st = S.settings;
@@ -11812,10 +11841,9 @@ $('make').onclick = async () => {
   const b = $('make'); b.disabled = true;
   try {
     const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
-    const merge = ($('m-format').value || S.autopilot.today) === 'merge';
     await api('/api/balls/make', jsonOpts('POST', { format: $('m-format').value || null, theme: $('m-theme').value || null,
       course: ev ? $('m-course').value || null : null, jar: ev ? $('m-jar').value || null : null,
-      pack: merge ? $('m-pack').value || null : null, count: parseInt($('m-count').value, 10) }));
+      pack: $('m-pack').value || null, count: parseInt($('m-count').value, 10) }));
     tab = 'todo';
     await load();
   } catch (e) { alert(e.message); }
@@ -11984,19 +12012,19 @@ function renderPacks() {
   const sel = $('m-pack'), cur = sel.value;
   sel.innerHTML = '';
   const opt = (v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
-  opt('auto', PK.giphy ? '🔀 Auto: your next pack, else GIPHY' : '🔀 Auto: your next pack, else emoji');
+  opt('auto', '🔀 Auto: next unused pack, else a new cursed one');
   opt('emoji', '😀 Emoji, no pictures');
-  for (const p of PK.packs) if (!p.used_by) opt(p.id, `🖼 ${p.title}`);
+  for (const p of PK.packs) if (!p.flagged) opt(p.id, `🖼 ${p.title}${p.used_by ? ' (used)' : ''}`);
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
-  $('pk-auto').disabled = !PK.giphy;
-  $('pk-auto').title = PK.giphy ? '' : 'Add GIPHY_API_KEY on Railway first';
+  $('pk-auto').disabled = !PK.photos;
+  $('pk-auto').title = PK.photos ? '' : 'Add ANTHROPIC_API_KEY on Railway first';
   const box = $('pk-packs');
   box.innerHTML = '';
   if (!PK.packs.length) box.appendChild(el('div', 'hint', 'No packs yet.'));
   for (const p of PK.packs) {
     const row = el('div', 'pk'), head = el('div', 'pk-head');
     head.appendChild(el('b', '', p.title));
-    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
+    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : p.source === 'starter' ? 'starter' : p.source === 'cursed' ? 'made by the app' : p.source === 'photo' ? 'free photo' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
     const del = el('button', 'danger-link', '🗑');
     del.type = 'button';
     del.onclick = async () => {
@@ -12073,9 +12101,9 @@ $('pk-save').onclick = async () => {
   renderUpl();
 };
 $('pk-auto').onclick = async () => {
-  const b = $('pk-auto'); b.disabled = true; b.textContent = '🔎 Finding pictures… (about a minute)';
+  const b = $('pk-auto'); b.disabled = true; b.textContent = '📷 Finding a photo… (about a minute)';
   try { await api('/api/balls/packs/auto', { method: 'POST' }); await loadPacks(); } catch (e) { alert(e.message); }
-  b.textContent = '🔎 Find a pack now'; b.disabled = !PK.giphy;
+  b.textContent = '📷 Make a photo pack now'; b.disabled = !PK.photos;
 };
 
 load().catch(e => alert(e.message));

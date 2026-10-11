@@ -702,8 +702,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   separate rng, so the other formats' recipes are unchanged (checked on
   800 recipes). Neon look like the rings, backgrounds black / space /
   blurred (`_BREAKIN_BACKDROP_DRAW`; the synthwave grid would sit behind
-  the ring). ~3 min to make a 34 s video. `BALLS_FORMAT_CYCLE` is 10
-  slots now: escape x3, touch x3, breakin x2, evolve x2.
+  the ring). (Since 11 Oct: 420 bricks, see "Rotation + Break in".)
 
 - **Merge to final form + picture packs (Oct 2026):** Dean sent a
   music.bouncingball reel (308K likes): cut-out meme pictures drop down a
@@ -757,7 +756,50 @@ merge it yourself; merging stays Dean's call per the rule above.
   a new pack, then the theme's emoji; Dean's own uploaded packs are never
   swapped. At most 2 remakes, then it goes out with the note on its card
   (`video["review"]`, past no's in `reviews`). A failed check (no key, API
-  error) lets the video through. Other formats aren't checked.
+  error) lets the video through.
+- **Pictures in every kind + starter packs (Oct 2026):** Dean found the
+  emoji "too generic" and made 4 GIPHY packs; every kind now uses a picture
+  pack. `be.recipe_chain` / `be.load_pack_images` / `be.apply_pack` (hook:
+  the pack's own, Break in's "Can one {first} clear the room?", else
+  `PACK_HOOKS`); `be.Painter` draws pack pictures for all kinds (merge's
+  own copy is gone; no-pack videos draw byte for byte as before, checked).
+  `_balls_pick_pack` for every make: chosen > oldest unused pack (uploads
+  first, then GIPHY / starter; `next_unused`) > new GIPHY pack > the pack
+  used longest ago (`least_used`) > emoji. Claude's last look now checks
+  every video with a pack (`ball_review.KINDS`).
+- **Starter + cursed packs (Oct 2026):** Dean asked for 10 cursed / chad /
+  sigma / country templates "from a source you're allowed to use or made
+  yourself". All 10 ship in `clipper/assets/packs/` and are seeded into the
+  store as source "starter" (`ball_starters.seed_bundled`): 3 countryball
+  flag packs (flag-icons SVGs, MIT, rendered with cairosvg in the sandbox
+  only, crown on the final one) and 7 packs from `clipper/ball_cursed.py`:
+  one Fluent emoji face (21 `BASES`, eye positions measured) through our
+  own edits: plain > Chubby/Long > Cool (🕶) > Buff (💪 x2) > Sigma (B&W,
+  🕶, 👔) > Cursed (👄, extra 👁, swirl) > Deep Fried (saturated, JPEG
+  crunch, red laser eyes) > God (👑, 🪽, gold glow). When every pack is
+  used the app makes a new cursed pack itself, so GIPHY is no longer used
+  (stickers belong to their makers; `ball_packs.auto_pack` is kept but
+  nothing calls it now). Dean asked about scraping Google Images for
+  chad-cat style photos; told him why not (others' copyright, real
+  people's faces, Google's terms/CAPTCHA, reused-content demonetization)
+  and he chose free real photos + our edits: `clipper/ball_photos.py`
+  searches Openverse (CC0 / public domain only) for one of 20 animal
+  faces, Claude picks a photo with one animal facing the camera (no
+  people, text, watermarks) and gives the face box + eyes as fractions,
+  `cut_face` cuts a circle centred on the eyes, and `ball_cursed.make`
+  runs `PHOTO_STEPS` on it (adds "Chad": a smooth widen + stretch from the
+  eyes down). Source "photo", credit "Photo by X, CC0 via Openverse" in
+  the description. Order when nothing is unused: photo pack (needs the
+  Claude key) > emoji cursed pack (`ball_cursed.new_pack`). "📷 Make a
+  photo pack now" (`POST /api/balls/packs/auto`). Openverse is blocked in
+  the sandbox: tested with a fake `requests`, a fake Claude and
+  skimage's `chelsea.png` cat.
+- **Rotation + Break in (11 Oct):** Dean's numbers: the gap ring and Break
+  in do best, the peg/gumball Evolve ~200 views. `BALLS_FORMAT_CYCLE` (12
+  slots): escape x4, breakin x4, merge x2, touch x2; Evolve only by hand.
+  Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
+  `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
+  12 seeds pass `pick_seed`, ~5 min to make a 34 s video.
 
 ## Instagram posting (Oct 2026)
 

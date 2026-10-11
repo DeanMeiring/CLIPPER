@@ -50,7 +50,7 @@ class CircleSim:
         self.pymunk = pymunk
         self.recipe = recipe
         self.format = recipe.get("format") or "escape"
-        self.chain = be.THEMES[recipe["theme"]]["chain"]
+        self.chain = be.recipe_chain(recipe)
         self.last = len(self.chain) - 1
         self.rng = random.Random(f"{self.format}-{recipe['seed']}")
         self.cap = capacity(self.format)

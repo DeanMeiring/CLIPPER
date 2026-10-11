@@ -1,0 +1,41 @@
+{
+ "key": "cursed_pumpkin",
+ "title": "Pumpkin to Pumpkin God",
+ "hook": "What does the pumpkin become?",
+ "credit": null,
+ "cursed_base": "1f383",
+ "items": [
+  {
+   "name": "Pumpkin",
+   "file": "01.webp"
+  },
+  {
+   "name": "Chubby Pumpkin",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Pumpkin",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Pumpkin",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Pumpkin",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Pumpkin",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Pumpkin",
+   "file": "07.webp"
+  },
+  {
+   "name": "Pumpkin God",
+   "file": "08.webp"
+  }
+ ]
+}

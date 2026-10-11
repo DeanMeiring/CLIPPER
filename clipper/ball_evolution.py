@@ -154,6 +154,63 @@ FORMATS = ("evolve", "escape", "touch", "breakin", "merge")   # escape/touch: ba
 #                                                                   merge: ball_merge.py
 
 
+def recipe_chain(recipe: dict) -> list:
+    """[(emoji code or None, name)] from the video's picture pack, else its theme."""
+    pack = recipe.get("pack")
+    if pack:
+        return [(None, i["name"]) for i in pack["items"]]
+    return THEMES[recipe["theme"]]["chain"]
+
+
+# hooks for a video whose pictures come from a pack (the theme's hooks name
+# its emoji, "Which monster is last?")
+PACK_HOOKS = ["Guess the final form", "Which one is last?", "Wait for the last one...",
+              "What does it turn into?"]
+
+
+def apply_pack(recipe: dict, pack: dict) -> dict:
+    """Put a picture pack (ball_packs.PackStore.recipe_pack) into a recipe,
+    with a hook that fits it."""
+    rng = random.Random(f"pack-hook-{recipe.get('seed')}-{pack.get('id')}")
+    recipe["pack"] = pack
+    fmt = recipe.get("format")
+    if fmt == "breakin":
+        name = pack["items"][0]["name"]
+        proper = str(pack.get("template") or "").startswith("flags")      # country names keep their capital
+        recipe["hook"] = rng.choice(BREAKIN_HOOKS).format(item=name if proper else name.lower())
+    elif pack.get("hook"):
+        recipe["hook"] = pack["hook"]
+    elif fmt != "merge":
+        recipe["hook"] = rng.choice(PACK_HOOKS)
+    return recipe
+
+
+def load_pack_images(pack: dict) -> list:
+    """The pack's pictures, square RGBA: stickers as they are, plain photos
+    as a circle with a white rim."""
+    out = []
+    for it in pack["items"]:
+        im = Image.open(Path(pack["dir"]) / it["file"]).convert("RGBA")
+        if not it.get("cutout"):
+            s = min(im.size)
+            im = im.crop(((im.width - s) // 2, (im.height - s) // 2, (im.width + s) // 2, (im.height + s) // 2))
+            im = im.resize((360, 360), Image.LANCZOS)
+            mask = Image.new("L", (360 * 3, 360 * 3), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, 360 * 3 - 1, 360 * 3 - 1), fill=255)
+            im.putalpha(mask.resize((360, 360), Image.LANCZOS))
+            rim = Image.new("RGBA", (384, 384), (0, 0, 0, 0))
+            ImageDraw.Draw(rim).ellipse((0, 0, 383, 383), fill=(255, 255, 255, 255))
+            rim.alpha_composite(im, (12, 12))
+            im = rim
+        else:
+            side = max(im.size)
+            sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            sq.alpha_composite(im, ((side - im.width) // 2, (side - im.height) // 2))
+            im = sq
+        out.append(im)
+    return out
+
+
 def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     """Everything that makes one video different, decided up front."""
     rng = random.Random(f"recipe-{seed}")
@@ -488,7 +545,7 @@ class Sim:
 
         self.pymunk = pymunk
         self.recipe = recipe
-        self.chain = THEMES[recipe["theme"]]["chain"]
+        self.chain = recipe_chain(recipe)
         self.last = len(self.chain) - 1
         self.radii = [17 * 1.29 ** k for k in range(len(self.chain))]
         self.rng, self.space, self.parts, self.pegs, self.spinners = _build(recipe)
@@ -731,7 +788,7 @@ def good_end(recipe: dict) -> tuple:
         return (18.0, 42.0)
     if recipe.get("format") == "merge":
         return (24.0, 46.0)
-    n = len(THEMES[recipe["theme"]]["chain"])
+    n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
 
@@ -830,10 +887,13 @@ class Painter:
     def __init__(self, recipe: dict):
         theme = THEMES[recipe["theme"]]
         self.recipe = recipe
-        self.chain = theme["chain"]
+        self.chain = recipe_chain(recipe)
         self.skin = recipe.get("skin") or "bubble"
-        self.emoji = [Image.open(ASSETS / "emoji" / f"{c}.webp").convert("RGBA")
-                      for c, _ in self.chain]
+        if recipe.get("pack"):
+            self.emoji = load_pack_images(recipe["pack"])
+        else:
+            self.emoji = [Image.open(ASSETS / "emoji" / f"{c}.webp").convert("RGBA")
+                          for c, _ in self.chain]
         self.colours = [_tint(e) for e in self.emoji]
         top, bot = theme.get("bg") or _auto_bg(self.colours[-1])
         g = np.linspace(0, 1, H)[:, None]
@@ -1255,25 +1315,38 @@ def emoji_char(code: str) -> str:
 def publish_text(recipe: dict) -> dict:
     """A default title and description for YouTube. The title asks the hook
     question; nothing names the last item, so the reveal isn't spoiled."""
-    theme = THEMES[recipe["theme"]]
-    first = emoji_char(theme["chain"][0][0])
-    title = f"{recipe['hook']} {first}"
-    if recipe.get("format") == "merge":
-        pack = recipe.get("pack")
-        title = recipe["hook"] if pack else f"{recipe['hook']} {first}"
+    pack = recipe.get("pack")
+    fmt = recipe.get("format")
+    if pack:
+        first = pack["items"][0]["name"]
+        first = first if str(pack.get("template") or "").startswith("flags") else first.lower()
+        title = recipe["hook"]
+    else:
+        first = emoji_char(THEMES[recipe["theme"]]["chain"][0][0])
+        title = f"{recipe['hook']} {first}"
+    if fmt == "merge":
         desc = ("Two of the same merge into the next one, all the way to the final form. "
                 "Did you guess it? 👇\n\n#satisfying #physics #meme #evolution")
-        if pack and pack.get("credits"):
-            desc += "\n\nStickers via GIPHY"
-        return {"title": title[:100], "description": desc}
-    if recipe.get("format") == "breakin":
+    elif fmt == "breakin":
         desc = (f"One {first} bounces around until it finds the way in. Every brick it breaks makes "
                 f"another one, so once it's in, there's no stopping it.\n\n"
                 f"Guess how long it takes 👇\n\n#satisfying #physics #brickbreaker #asmr")
-        return {"title": title[:100], "description": desc}
-    desc = (f"It starts with one {first}. Every gold peg sends out another, and two of the same "
-            f"merge into something bigger. Can it reach the end?\n\n"
-            f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    elif fmt == "escape":
+        desc = (f"One {first} bounces in a spinning ring. Every time one gets out through the gap, "
+                f"two more appear inside, and they keep changing on the way to the last one.\n\n"
+                f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    elif fmt == "touch":
+        desc = (f"Two {first}s bounce in a ring. Every time two touch, a new one appears, and they "
+                f"keep changing on the way to the last one.\n\n"
+                f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    else:
+        desc = (f"It starts with one {first}. Every gold peg sends out another, and two of the same "
+                f"merge into something bigger. Can it reach the end?\n\n"
+                f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    if pack and pack.get("credit"):
+        desc += "\n\n" + pack["credit"]
+    elif pack and pack.get("credits"):
+        desc += "\n\nStickers via GIPHY"
     return {"title": title[:100], "description": desc}
 
 
@@ -1315,7 +1388,7 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
                    check=True)
     video.unlink(missing_ok=True)
     wav.unlink(missing_ok=True)
-    chain = getattr(sim, "chain", None) or THEMES[recipe["theme"]]["chain"]
+    chain = getattr(sim, "chain", None) or recipe_chain(recipe)
     info = dict(recipe, seconds=round(sim.t, 1), dropped=sim.spawned,
                 done_at=sim.done_at and round(sim.done_at, 1),
                 unlocks={chain[k][1]: round(t, 1) for k, t in sorted(sim.unlocked_at.items())})
