@@ -38,6 +38,10 @@ RING_TOP = CY - math.sqrt(R ** 2 - CHUTE_HW ** 2)
 R0, GROW = 30, 1.2
 DROP_EVERY = 0.3
 MAX_DROP_TIER = 4
+# The pace per chain length (seconds between drops, biggest tier dropped),
+# measured so 6-9 pictures all reach the final form in ~26-44 s: with one
+# pace for all, a 7-picture pack finished in ~15 s and no seed was good.
+PACE = {9: (0.3, 4), 8: (0.38, 3), 7: (0.5, 2), 6: (0.85, 1)}
 BOUNCE = 0.92
 NOTE_GAP = 0.14
 END_HOLD = 4.0
@@ -115,6 +119,7 @@ class MergeSim:
         self.recipe = recipe
         self.chain = [(None, n) for n in chain_names(recipe)]
         self.last = len(self.chain) - 1
+        self.drop_every, self.max_drop_tier = PACE.get(len(self.chain), (DROP_EVERY, MAX_DROP_TIER))
         self.rng = random.Random(f"merge-{recipe['seed']}")
         sp = self.space = pymunk.Space()
         sp.gravity = (0, 900)
@@ -180,11 +185,11 @@ class MergeSim:
         dt = 1 / FPS
         if self.done_at is None and self.t >= self.next_drop:
             # small ones, plus bigger ones once they've been revealed
-            top = min(MAX_DROP_TIER, max(0, self.best - 1))
+            top = min(self.max_drop_tier, max(0, self.best - 1))
             tier = self.rng.choice([k for k in range(top + 1) for _ in range(top + 1 - k)])
             self._add((CX + self.rng.uniform(-8, 8), CHUTE_TOP + 12 + self.radius(tier)), tier,
                       (self.rng.uniform(-40, 40), 200))
-            self.next_drop = self.t + DROP_EVERY
+            self.next_drop = self.t + self.drop_every
         for _ in range(3):
             # the bigger ones drift toward their nearest match (forces reset every substep)
             for b in self.balls:
