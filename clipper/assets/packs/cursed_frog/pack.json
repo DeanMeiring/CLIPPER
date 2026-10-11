@@ -1,0 +1,41 @@
+{
+ "key": "cursed_frog",
+ "title": "Frog to Frog God",
+ "hook": "Guess the final frog",
+ "credit": null,
+ "cursed_base": "1f438",
+ "items": [
+  {
+   "name": "Frog",
+   "file": "01.webp"
+  },
+  {
+   "name": "Long Frog",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Frog",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Frog",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Frog",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Frog",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Frog",
+   "file": "07.webp"
+  },
+  {
+   "name": "Frog God",
+   "file": "08.webp"
+  }
+ ]
+}

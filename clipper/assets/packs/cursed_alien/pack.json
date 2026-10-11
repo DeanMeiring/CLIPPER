@@ -1,0 +1,41 @@
+{
+ "key": "cursed_alien",
+ "title": "Alien to Alien God",
+ "hook": "What will the alien turn into?",
+ "credit": null,
+ "cursed_base": "1f47d",
+ "items": [
+  {
+   "name": "Alien",
+   "file": "01.webp"
+  },
+  {
+   "name": "Long Alien",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Alien",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Alien",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Alien",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Alien",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Alien",
+   "file": "07.webp"
+  },
+  {
+   "name": "Alien God",
+   "file": "08.webp"
+  }
+ ]
+}

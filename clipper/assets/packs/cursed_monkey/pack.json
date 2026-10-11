@@ -1,0 +1,41 @@
+{
+ "key": "cursed_monkey",
+ "title": "Monkey to Monkey God",
+ "hook": "Wait for the final monkey...",
+ "credit": null,
+ "cursed_base": "1f435",
+ "items": [
+  {
+   "name": "Monkey",
+   "file": "01.webp"
+  },
+  {
+   "name": "Long Monkey",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Monkey",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Monkey",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Monkey",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Monkey",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Monkey",
+   "file": "07.webp"
+  },
+  {
+   "name": "Monkey God",
+   "file": "08.webp"
+  }
+ ]
+}

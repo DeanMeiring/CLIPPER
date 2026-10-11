@@ -766,18 +766,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_balls_pick_pack` for every make: chosen > oldest unused pack (uploads
   first, then GIPHY / starter; `next_unused`) > new GIPHY pack > the pack
   used longest ago (`least_used`) > emoji. Claude's last look now checks
-  every video with a pack (`ball_review.KINDS`). Starter packs
-  (`clipper/ball_starters.py`, Dean asked for 10 cursed / chad / sigma /
-  country templates): 3 countryball flag packs bundled in
-  `clipper/assets/packs/` (flag-icons SVGs, MIT, rendered with cairosvg in
-  the sandbox only, crown on the final one; seeded into the store as
-  source "starter") and 7 meme plans (`MEME_PLANS`: sigma cat, doge,
-  wojak to chad, Italian brainrot, frog king, capybara, cursed smiley)
-  that `_balls_auto_pack` builds from GIPHY before asking Claude for a new
-  chain (`note_try` orders failed ones last). GIPHY can't be reached from
-  the sandbox, so meme pictures can't be committed. Left out on purpose:
-  real people (Gigachad is a photo, sigma edits use actors), Pepe, company
-  characters (Skibidi Toilet, Grimace, Labubu, Minions), the "chud" wojak.
+  every video with a pack (`ball_review.KINDS`).
+- **Starter + cursed packs (Oct 2026):** Dean asked for 10 cursed / chad /
+  sigma / country templates "from a source you're allowed to use or made
+  yourself". All 10 ship in `clipper/assets/packs/` and are seeded into the
+  store as source "starter" (`ball_starters.seed_bundled`): 3 countryball
+  flag packs (flag-icons SVGs, MIT, rendered with cairosvg in the sandbox
+  only, crown on the final one) and 7 packs from `clipper/ball_cursed.py`:
+  one Fluent emoji face (21 `BASES`, eye positions measured) through our
+  own edits: plain > Chubby/Long > Cool (🕶) > Buff (💪 x2) > Sigma (B&W,
+  🕶, 👔) > Cursed (👄, extra 👁, swirl) > Deep Fried (saturated, JPEG
+  crunch, red laser eyes) > God (👑, 🪽, gold glow). When every pack is
+  used the app makes a new cursed pack itself (`ball_cursed.new_pack`,
+  source "cursed", a face not used lately), so GIPHY is no longer used
+  automatically (stickers belong to their makers); "🔎 Find a pack now"
+  still searches GIPHY when pressed. Dean asked about scraping Google
+  Images for chad-cat style photos; told him why not (others' copyright,
+  real people's faces, Google's terms/CAPTCHA, reused-content
+  demonetization) and he chose free real photos + our edits instead.
 - **Rotation + Break in (11 Oct):** Dean's numbers: the gap ring and Break
   in do best, the peg/gumball Evolve ~200 views. `BALLS_FORMAT_CYCLE` (12
   slots): escape x4, breakin x4, merge x2, touch x2; Evolve only by hand.

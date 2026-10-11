@@ -1,0 +1,41 @@
+{
+ "key": "cursed_dog",
+ "title": "Dog to Dog God",
+ "hook": "What will the dog turn into?",
+ "credit": null,
+ "cursed_base": "1f436",
+ "items": [
+  {
+   "name": "Dog",
+   "file": "01.webp"
+  },
+  {
+   "name": "Chubby Dog",
+   "file": "02.webp"
+  },
+  {
+   "name": "Cool Dog",
+   "file": "03.webp"
+  },
+  {
+   "name": "Buff Dog",
+   "file": "04.webp"
+  },
+  {
+   "name": "Sigma Dog",
+   "file": "05.webp"
+  },
+  {
+   "name": "Cursed Dog",
+   "file": "06.webp"
+  },
+  {
+   "name": "Deep Fried Dog",
+   "file": "07.webp"
+  },
+  {
+   "name": "Dog God",
+   "file": "08.webp"
+  }
+ ]
+}

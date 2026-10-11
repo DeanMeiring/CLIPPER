@@ -51,6 +51,7 @@ from clipper import ball_channel
 from clipper import ball_packs
 from clipper import ball_review
 from clipper import ball_starters
+from clipper import ball_cursed
 from clipper import ball_evolution
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
@@ -6133,9 +6134,10 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
 def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
     """The pictures for a video: a chosen pack, else the oldest pack no video
     has used (your uploads first, then GIPHY and starter packs), else a new
-    automatic GIPHY pack (when the keys are there), else the pack used
-    longest ago, else None = the theme's emoji. Packs Claude's check said
-    no to are skipped."""
+    cursed pack the app makes itself (ball_cursed: our own edits of the
+    bundled MIT emoji, so nothing taken from GIPHY or meme pages), else the
+    pack used longest ago, else None = the theme's emoji. Packs Claude's
+    check said no to are skipped."""
     if choice == "emoji":
         return None
     pack = None
@@ -6146,11 +6148,12 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
             pack = None
     _balls_seed_starters()
     pack = pack or _ball_packs.next_unused()
-    if pack is None and os.environ.get("GIPHY_API_KEY") and os.environ.get("ANTHROPIC_API_KEY"):
+    if pack is None:
         try:
-            pack = _balls_auto_pack()
+            pack = ball_cursed.new_pack(_ball_packs)
+            print(f"[packs] made a cursed pack: {pack['title']}", flush=True)
         except Exception as e:
-            print(f"[balls] automatic picture pack failed: {e}", flush=True)
+            print(f"[balls] making a cursed pack failed: {e}", flush=True)
             pack = None
     pack = pack or _ball_packs.least_used()
     if pack:
@@ -6161,23 +6164,9 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
 
 
 def _balls_auto_pack() -> dict:
-    """A new GIPHY pack: the next meme starter plan not built yet
-    (ball_starters), else a chain Claude plans."""
     recent = [p["title"] for p in _ball_packs.packs() if p.get("source") == "giphy"]
-    log = lambda m: print(m, flush=True)
-    nxt = ball_starters.next_meme_plan(_ball_packs)
-    if nxt:
-        key, plan = nxt
-        try:
-            pack = ball_packs.auto_pack(_ball_packs, os.environ["GIPHY_API_KEY"], os.environ["ANTHROPIC_API_KEY"],
-                                        recent, log=log, plan=plan, extra={"template": key})
-            ball_starters.note_try(_ball_packs, key, True)
-            return pack
-        except Exception as e:
-            ball_starters.note_try(_ball_packs, key, False)
-            log(f"[packs] starter pack {key} failed ({e}), planning a new one")
     return ball_packs.auto_pack(_ball_packs, os.environ["GIPHY_API_KEY"], os.environ["ANTHROPIC_API_KEY"],
-                                recent, log=log)
+                                recent, log=lambda m: print(m, flush=True))
 
 
 def _balls_seed_starters() -> None:
@@ -11631,7 +11620,7 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🖼 Picture packs</h3>
-    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app finds a new pack on GIPHY by itself (the meme starter packs first), and Claude checks every picture before it's used. If nothing is new, the pack used longest ago is used again.</div>
+    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself from the bundled emoji (free to use: Cat → Long Cat → Cool Cat → Buff Cat → Sigma Cat → Cursed Cat → Deep Fried Cat → Cat God), so there's always a fresh one. 🔎 Find a pack now still searches GIPHY, but only when you press it: GIPHY stickers belong to the people who made them.</div>
     <div class="actions"><button id="pk-auto" type="button" class="secondary">🔎 Find a pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
     <div id="pk-form" style="display:none">
       <label for="pk-title">Pack name</label><input id="pk-title" maxlength="60" placeholder="e.g. Cursed cats">
@@ -12022,7 +12011,7 @@ function renderPacks() {
   for (const p of PK.packs) {
     const row = el('div', 'pk'), head = el('div', 'pk-head');
     head.appendChild(el('b', '', p.title));
-    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : p.source === 'starter' ? 'starter' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
+    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : p.source === 'starter' ? 'starter' : p.source === 'cursed' ? 'made by the app' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
     const del = el('button', 'danger-link', '🗑');
     del.type = 'button';
     del.onclick = async () => {
