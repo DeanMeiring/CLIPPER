@@ -1267,7 +1267,75 @@ class ZenPainter(ArenaPainter):
         return self.finish(im, d, sim, f"{n} didn't make it")
 
 
+# ---- With every bounce, the ball evolves (trail) ------------------------------------------
+
+T_R = 470               # the ring
+T_BALL0, T_BALL_STEP = 22.0, 4.0
+T_END = 0.46            # done when the ball's radius reaches this share of the ring's
+T_GRAVITY, T_MIN_SPEED = 800.0, 760.0
+
+
+class TrailSim(OneBallSim):
+    """One ball in a ring; every bounce it grows a little and its colour
+    moves on, and it leaves a permanent trail of itself, so the ring fills
+    with a rainbow coil. The pictures change every few bounces."""
+
+    def __init__(self, recipe: dict):
+        super().__init__(recipe, T_BALL0, T_GRAVITY, T_MIN_SPEED)
+        self.wobble = 0.05
+        self.target = (T_R * T_END - T_BALL0) / T_BALL_STEP
+
+    def step(self):
+        dt = 1 / FPS
+        b = self.ball
+        if self.done_at is None:
+            for _ in range(4):
+                self.move(dt / 4)
+                dx, dy = b["x"] - CX, b["y"] - CY
+                dist = math.hypot(dx, dy) or 1e-6
+                if dist + b["r"] > T_R:
+                    before = self.bounces
+                    self._kick(-dx / dist, -dy / dist)
+                    if self.bounces > before:
+                        b["r"] += T_BALL_STEP
+                    room = max(0.0, T_R - b["r"])
+                    k = room / dist if dist > room else 1.0
+                    b["x"], b["y"] = CX + dx * k, CY + dy * k
+            b["tier"] = min(self.last, int(self.bounces / self.target * (self.last + 0.999)))
+            self.reveal(b["tier"])
+            if b["r"] >= T_R * T_END:
+                self.finish(ok=True)
+        self.spawned = self.bounces
+        self.t += dt
+
+
+class TrailPainter(ArenaPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(recipe)
+        self.ring = rainbow_ring(T_R)
+        self.stamps = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        self.hue0 = random.Random(f"trail-{recipe.get('seed')}").random()
+
+    def frame(self, sim: TrailSim) -> Image.Image:
+        b = sim.ball
+        if sim.done_at is None:
+            # the trail: the ball stamped where it is, in this bounce's colour
+            r = b["r"]
+            hue = (self.hue0 + sim.bounces * 0.071) % 1
+            rr, gg, bb = colorsys.hsv_to_rgb(hue, 0.85, 1)
+            ImageDraw.Draw(self.stamps).ellipse((b["x"] - r, b["y"] - r, b["x"] + r, b["y"] + r),
+                                                fill=(int(rr * 255), int(gg * 255), int(bb * 255), 255),
+                                                outline=(255, 255, 255, 200), width=2)
+        im = self.bg.copy()
+        im.paste(self.ring, (CX - self.ring.width // 2, CY - self.ring.height // 2), self.ring)
+        im.paste(self.stamps, (0, 0), self.stamps)
+        d = ImageDraw.Draw(im, "RGBA")
+        self.balls(im, sim)
+        n = sim.bounces
+        return self.finish(im, d, sim, f"{n} bounce{'s' if n != 1 else ''}")
+
+
 PARTS = {"center": (CenterSim, CenterPainter), "spikes": (SpikesSim, SpikesPainter),
          "shrink": (ShrinkSim, ShrinkPainter), "jaws": (JawsSim, JawsPainter),
          "spiral": (SpiralSim, SpiralPainter), "rays": (RaysSim, RaysPainter),
-         "box": (BoxSim, BoxPainter), "zen": (ZenSim, ZenPainter)}
+         "box": (BoxSim, BoxPainter), "zen": (ZenSim, ZenPainter), "trail": (TrailSim, TrailPainter)}

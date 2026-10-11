@@ -6242,7 +6242,8 @@ def _balls_view(v: dict) -> dict:
         if pack:
             c["chips"][1] = f"🖼 {pack['title']}"
         if fmt == "merge" or fmt in ball_evolution.ARENA_HOOKS:
-            c["chips"] = [c["chips"][0], c["chips"][1], r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}"]
+            sound = {"meow": "🐱 cursed meow", "phonk": "🥁 phonk"}.get(r.get("bounce_sound") or "")
+            c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
             c["chips"] = [x for x in c["chips"] if x]
         else:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
@@ -6250,23 +6251,26 @@ def _balls_view(v: dict) -> dict:
 
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-                         "spiral", "rays", "box", "zen")
+                         "spiral", "rays", "box", "zen", "trail")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
 # out of the rotation (still in Make by hand). Then (11 Oct) he asked for
 # four more music.bouncingball kinds, rotated in (clipper/ball_arenas.py).
 # Then four more he sent with big numbers (spiral 809K likes, rays 570K,
-# box +3 360K, spike jaw 106K). 20 slots: escape x3, breakin x2, spiral x2,
-# center x2, rays x2, box x2, zen x2, merge, spikes, shrink, jaws, touch.
-BALLS_FORMAT_CYCLE = ("escape", "spiral", "center", "breakin", "rays", "box", "merge", "escape", "zen", "spikes",
-                      "spiral", "breakin", "center", "rays", "shrink", "box", "escape", "jaws", "touch", "zen")
+# box +3 360K, spike jaw 106K, "every bounce it evolves" 150K). 22 slots:
+# escape x3, breakin x2, spiral x2, center x2, rays x2, box x2, zen x2,
+# trail x2, merge, spikes, shrink, jaws, touch.
+BALLS_FORMAT_CYCLE = ("escape", "spiral", "trail", "center", "breakin", "rays", "box", "merge", "escape", "zen",
+                      "spikes", "spiral", "breakin", "trail", "center", "rays", "shrink", "box", "escape", "jaws",
+                      "touch", "zen")
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
                        "shrink": "🔴 Ball grows, circle shrinks", "jaws": "⏱ 4 seconds to escape",
                        "spiral": "🌀 Will the ball multiply?", "rays": "🌈 Rays in a parabola",
-                       "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something"}
+                       "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something",
+                       "trail": "🌈 Every bounce, it evolves"}
 
 
 def _balls_tz():

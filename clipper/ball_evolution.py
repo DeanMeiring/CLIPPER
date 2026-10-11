@@ -108,11 +108,13 @@ ARENA_HOOKS = {
     "rays": ["Watch where the rays meet", "Every ray hits the same spot", "More rays, same spot"],
     "box": ["+3 balls after each escape", "Every escape adds 3 balls", "How fast does it fill up?"],
     "zen": ["Reminds me of something...", "Only one makes it out", "Which one escapes?"],
+    "trail": ["With every bounce, the ball evolves", "Every bounce, it grows", "Watch it fill the circle"],
 }
 ARENA_ENDINGS = {"center": ["WINNER!", "THE BEST!", "CHAMPION!"], "spikes": ["SURVIVED!", "FINAL FORM!"],
                  "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"],
                  "spiral": ["MULTIPLIED!", "SPIRAL GONE!", "FINAL FORM!"], "rays": ["PERFECT FOCUS!", "FINAL FORM!"],
-                 "box": ["OVERFLOW!", "FINAL FORM!"], "zen": ["IT ESCAPED!", "FINAL FORM!"]}
+                 "box": ["OVERFLOW!", "FINAL FORM!"], "zen": ["IT ESCAPED!", "FINAL FORM!"],
+                 "trail": ["FINAL FORM!", "FULLY EVOLVED!"]}
 SOUNDS = ["marble", "glass", "wood", "plastic", "rubber", "water", "metal", "pop"]   # the bounce sound
 # Dean found the box course + narrow neck + jar hard to follow and picked
 # the gumball (one round globe under a short neck) from five mockups; the
@@ -168,7 +170,7 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 # ---- recipes -----------------------------------------------------------
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-           "spiral", "rays", "box", "zen")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
+           "spiral", "rays", "box", "zen", "trail")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
 #                                                                   merge: ball_merge.py
 
 
@@ -273,6 +275,11 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
         recipe.update(backdrop=a.choice(_BREAKIN_BACKDROP_DRAW), hook=a.choice(ARENA_HOOKS[fmt]),
                       ending=a.choice(ARENA_ENDINGS[fmt]), tune=a.choice(tunes), bed="off", skin="plain")
+    if fmt == "merge" or fmt in ARENA_HOOKS:
+        # what the bounces play (ball_sounds): the piano tune, a cursed meow
+        # that gets deeper, or an original phonk cowbell riff
+        recipe["bounce_sound"] = random.Random(f"bounce-sound-{seed}").choices(
+            ("tune", "meow", "phonk"), weights=(2, 1, 1))[0]
     return recipe
 
 
@@ -1396,6 +1403,9 @@ def publish_text(recipe: dict) -> dict:
     elif fmt == "box":
         desc = ("Every ball that falls out of the box adds three more.\n\nGuess the last one 👇\n\n"
                 "#satisfying #physics #bouncingball")
+    elif fmt == "trail":
+        desc = (f"With every bounce the {first} grows and changes colour, and its trail stays, until "
+                f"the circle is full.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
     elif fmt == "zen":
         desc = ("A ring full of spikes with one way out. Every ball that touches a spike stays there, "
                 "grey, and the next one drops in. Which one gets out?\n\n#satisfying #physics #bouncingball")

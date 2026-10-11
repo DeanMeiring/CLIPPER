@@ -54,6 +54,8 @@ KINDS = {
            "and each one adds three more at the top; new ones come out as the next picture",
     "zen": "a 'reminds me of something' video: a ring of spikes with one gap; each picture drops in, and "
            "one that touches the spikes turns grey and stays there; the last picture gets out the gap",
+    "trail": "a 'with every bounce, the ball evolves' video: one ball with a picture grows on every bounce "
+             "and leaves a permanent rainbow trail that fills the ring; it changes pictures up to the final one",
 }
 
 _PROMPT = """These are 4 frames from a vertical YouTube Short, {kind}. \
