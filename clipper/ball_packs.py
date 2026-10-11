@@ -164,13 +164,26 @@ Never pick the same picture twice.
 Answer with JSON only: {{"picks": [<candidate index or -1 for step 1>, ...]}}"""
 
 
-def _claude_json(content, api_key: str, max_tokens: int = 1500):
+def _claude_text(content, api_key: str, max_tokens: int = 1500) -> str:
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(model=DEFAULT_MODEL, max_tokens=max_tokens,
                                   messages=[{"role": "user", "content": content}])
-    raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-    raw = raw.strip("`")
+    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+
+
+def _pick_list(raw: str, n: int) -> list:
+    """The picks from Claude's answer, read leniently: the numbers inside
+    "picks": [...] (comments or stray text around them don't matter)."""
+    m = re.search(r'"?picks"?\s*:\s*\[([^\]]*)\]', raw)
+    nums = re.findall(r"-?\d+", m.group(1) if m else "")
+    if len(nums) < n:
+        raise ValueError(f"couldn't read the picture choices: {raw[:200]!r}")
+    return [int(x) for x in nums[:n]]
+
+
+def _claude_json(content, api_key: str, max_tokens: int = 1500):
+    raw = _claude_text(content, api_key, max_tokens).strip("`")
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
     m = re.search(r"\{.*\}", raw, re.S)
@@ -195,11 +208,13 @@ def giphy_search(query: str, key: str, limit: int = 4, http=None) -> List[dict]:
     out = []
     for g in r.json().get("data") or []:
         imgs = g.get("images") or {}
-        urls = [((imgs.get(k) or {}).get(f)) for k, f in (("original", "webp"), ("fixed_height", "webp"),
-                                                            ("original_still", "url"), ("original", "url"))]
-        url = next((u for u in urls if u), None)
-        if url:
-            out.append({"id": g.get("id"), "title": g.get("title") or "", "url": url,
+        # still versions first (a plain picture is all that's needed), then the animated ones
+        urls = [((imgs.get(k) or {}).get(f)) for k, f in (("original_still", "url"), ("fixed_height_still", "url"),
+                                                            ("original", "webp"), ("fixed_height", "webp"),
+                                                            ("original", "url"))]
+        urls = [u for u in dict.fromkeys(urls) if u]
+        if urls:
+            out.append({"id": g.get("id"), "title": g.get("title") or "", "urls": urls,
                         "page": g.get("url") or ""})
     return out
 
@@ -226,24 +241,33 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
     cands: List[List[tuple]] = []
     seen = set()
     for s in plan["steps"]:
-        got = []
+        got, found, last_err = [], 0, None
         for q in s["queries"][:2]:
             try:
-                for g in giphy_search(q, giphy_key, http=http):
-                    if g["id"] in seen or len(got) >= 6:
-                        continue
-                    try:
-                        r = http.get(g["url"], timeout=20)
-                        r.raise_for_status()
-                        im = normalize(r.content)
-                    except Exception:
-                        continue
-                    if min(im.size) < 48:
-                        continue
-                    seen.add(g["id"])
-                    got.append((g, im))
+                results = giphy_search(q, giphy_key, http=http)
             except Exception as e:
                 log(f"[packs] search '{q}' failed: {e}")
+                continue
+            found += len(results)
+            for g in results:
+                if g["id"] in seen or len(got) >= 6:
+                    continue
+                im = None
+                for url in g["urls"]:
+                    try:
+                        r = http.get(url, timeout=20)
+                        r.raise_for_status()
+                        im = normalize(r.content)
+                        break
+                    except Exception as e:
+                        last_err = f"{type(e).__name__}: {e}"
+                if im is None or min(im.size) < 48:
+                    continue
+                seen.add(g["id"])
+                got.append((g, im))
+        log(f"[packs] {s['name']}: {found} found, {len(got)} usable" + (f" (last error: {last_err})" if last_err else ""))
+        if not got:
+            raise ValueError(f"GIPHY had no usable sticker for '{s['name']}'")
         cands.append(got)
     content: list = [{"type": "text", "text": _PICK_PROMPT.format(
         steps="\n".join(f"Step {i + 1}: {s['name']}" + (" (FINAL FORM)" if i == n - 1 else "")
@@ -253,7 +277,7 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
             content.append({"type": "text", "text": f"step {i + 1} candidate {c}"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                         "data": _thumb_b64(im)}})
-    picks = _claude_json(content, api_key, max_tokens=300).get("picks") or []
+    picks = _pick_list(_claude_text(content, api_key, max_tokens=400), n)
     items, credits = [], []
     for i, s in enumerate(plan["steps"]):
         k = picks[i] if i < len(picks) else -1
