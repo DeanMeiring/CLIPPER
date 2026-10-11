@@ -210,7 +210,8 @@ class ArenaPainter(be.Painter):
 C_R = 430              # the ring
 C_BALL = 46            # the pictures are big here: they're the contestants
 C_SPEED = 470
-C_HOLE0, C_HOLE_GROW, C_HOLE_MAX = 20.0, 2.6, 230.0
+C_HOLE0, C_HOLE_GROW, C_HOLE_MAX = 40.0, 1.7, 230.0
+C_FIRST_OUT = 8.0      # a good run has its first one fall in by then (no dead start)
 C_IN = 0.8             # how far in (in ball radii) a picture must get to fall
 
 
@@ -282,7 +283,8 @@ class CenterSim(ArenaSim):
                 self.banner = (f"OUT: {self.chain[b['tier']][1]}!", self.t)
         self.spawned = len(self.balls)
         if self.done_at is None and len(self.balls) == 1:
-            self.finish(ok=self.balls[0]["tier"] == self.last)
+            first = self.unlocked_at.get(1, 99.0)
+            self.finish(ok=self.balls[0]["tier"] == self.last and first <= C_FIRST_OUT)
         self.t += dt
 
 

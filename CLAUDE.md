@@ -810,7 +810,8 @@ merge it yourself; merging stays Dean's call per the rule above.
   picture bounces around a black hole that grows; falling in = out,
   crossed out in the ladder; last one wins; `simulate` now returns `ok`
   and `is_good` needs it: the seed must make the pack's final picture win,
-  ~1 in 8, so `pick_seed` tries 240 seeds for center/spikes; a pack whose
+  ~1 in 8, and the first one must fall in by 8 s (`C_FIRST_OUT`: no dead
+  start), so `pick_seed` tries 240 seeds for center/spikes; a pack whose
   title is a question, "Which country is the best?", is the hook),
   `spikes` Spikes will grow (one ball, steady speed, no gravity, in an
   octagon; a solid spike grows where it hits a wall once it has moved off;
