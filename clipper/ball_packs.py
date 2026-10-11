@@ -110,6 +110,12 @@ class PackStore:
         p["used_by"] = vid
         (self.dir(pid) / "pack.json").write_text(json.dumps(p, indent=1))
 
+    def flag(self, pid: str, notes: str) -> None:
+        """Claude's check said no to a video with these pictures."""
+        p = self.load(pid)
+        p["flagged"] = notes or "Claude's check of the video said no"
+        (self.dir(pid) / "pack.json").write_text(json.dumps(p, indent=1))
+
     def delete(self, pid: str) -> None:
         shutil.rmtree(self.dir(pid), ignore_errors=True)
 

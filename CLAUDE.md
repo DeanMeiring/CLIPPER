@@ -746,6 +746,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   by step when the one big check fails. The model behind `CLIPPER_MODEL`
   thinks before answering: a 400-token limit returned only a thinking
   block, so the pack calls allow 4000-8000 tokens.
+  **Claude's last look (Oct 2026, Dean asked "have Claude look at the
+  ending, that it looks good"):** after a merge video renders,
+  `clipper/ball_review.py` sends 4 frames (start, 40%, 70%, the ending
+  1.2 s after the final form) + the pictures' names to Claude: does the
+  ending work, does anything look broken, are the pictures fine to post.
+  The prompt says the ending text over the pile is normal (it always is).
+  `_balls_redo`: a "looks" no gets one new run with the same pictures; a
+  "pictures" no on a GIPHY pack flags it (`pack["flagged"]`) and swaps in
+  a new pack, then the theme's emoji; Dean's own uploaded packs are never
+  swapped. At most 2 remakes, then it goes out with the note on its card
+  (`video["review"]`, past no's in `reviews`). A failed check (no key, API
+  error) lets the video through. Other formats aren't checked.
 
 ## Instagram posting (Oct 2026)
 
