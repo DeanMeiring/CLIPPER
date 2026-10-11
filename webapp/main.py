@@ -49,6 +49,7 @@ from clipper import ranking
 from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_packs
+from clipper import ball_review
 from clipper import ball_evolution
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
@@ -6053,12 +6054,18 @@ def _balls_make(vid: str) -> None:
             return
         tmp.replace(out_dir / "video.mp4")
         text = ball_evolution.publish_text(info)
+        verdict = _balls_review(vid, info, text["title"]) if fmt == "merge" else None
+        if vid in _balls_cancelled or not out_dir.is_dir():
+            return
+        if verdict and _balls_redo(vid, recipe, verdict):
+            (out_dir / "video.mp4").unlink(missing_ok=True)
+            return
 
         def done(v: dict) -> None:
             v["recipe"] = {k: info.get(k) for k in recipe} | {"seed": info.get("seed"),
                                                              "expected_end": info.get("expected_end")}
             v.update(status="ready", progress=1.0, made_at=time.time(), seconds=info.get("seconds"),
-                     unlocks=info.get("unlocks"), dropped=info.get("dropped"))
+                     unlocks=info.get("unlocks"), dropped=info.get("dropped"), checking=False, review=verdict)
             v["title"] = v.get("title") or text["title"]
             v["description"] = v.get("description") if v.get("description") is not None else text["description"]
         _balls.update(vid, done)
@@ -6069,6 +6076,59 @@ def _balls_make(vid: str) -> None:
         _balls_cancelled.discard(vid)
         if proc.poll() is None:
             proc.kill()
+
+
+def _balls_review(vid: str, info: dict, title: str) -> Optional[dict]:
+    """Claude's last look at a finished merge video (ball_review). None when
+    there's no key or the check itself fails: a failed check never blocks."""
+    if not ball_review.enabled():
+        return None
+    _balls.update(vid, lambda v: v.update(checking=True))
+    try:
+        verdict = ball_review.review(_balls.video_dir(vid) / "video.mp4", info, title,
+                                     os.environ["ANTHROPIC_API_KEY"], log=lambda m: print(m, flush=True))
+    except Exception as e:
+        print(f"[balls] Claude's check of {vid} failed, letting it through: {e}", flush=True)
+        return None
+    print(f"[balls] Claude's check of {vid}: {verdict}", flush=True)
+    return verdict
+
+
+def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
+    """After a "no" from Claude: queue the video again (True) or let it
+    through with the note shown (False). At most two remakes: a "looks"
+    problem gets a new run with the same pictures; a "pictures" problem on
+    a GIPHY pack gets a new pack, then the theme's emoji. Dean's own
+    uploaded pictures are never swapped -- he sees the note instead."""
+    if verdict.get("ok"):
+        return False
+    before = len((_balls.load(vid).get("reviews") or []))
+    if before >= 2:
+        return False
+    pack = recipe.get("pack") or {}
+    change = None                       # keep the options as they are
+    if verdict.get("problem") == "pictures" and pack:
+        if pack.get("source") == "upload":
+            return False
+        try:
+            _ball_packs.flag(pack["id"], verdict.get("notes") or "")
+        except (KeyError, OSError, ValueError):
+            pass
+        change = "emoji" if before else "auto"
+    elif before:
+        return False                    # a second "looks" no: post it, note shown
+
+    def requeue(v: dict) -> None:
+        v.setdefault("reviews", []).append(verdict)
+        if change == "auto":
+            v.setdefault("options", {}).pop("pack", None)
+        elif change:
+            v.setdefault("options", {})["pack"] = change
+        v.update(status="queued", progress=0.0, tried=0, recipe=None, checking=False, error=None)
+    _balls.update(vid, requeue)
+    print(f"[balls] {vid} made again after Claude's check ({verdict.get('problem')}, pictures: {change or 'same'})",
+          flush=True)
+    return True
 
 
 def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
@@ -6105,7 +6165,7 @@ def _balls_auto_pack() -> dict:
 
 def _balls_pack_view(p: dict) -> dict:
     return {"id": p["id"], "title": p["title"], "source": p.get("source"), "used_by": p.get("used_by"),
-            "created_at": p.get("created_at"), "hook": p.get("hook"),
+            "created_at": p.get("created_at"), "hook": p.get("hook"), "flagged": p.get("flagged"),
             "items": [{"name": i["name"], "url": f"/api/balls/packs/{p['id']}/{i['file']}"} for i in p["items"]]}
 
 
@@ -6115,7 +6175,7 @@ def _balls_resume() -> None:
     resume = False
     for v in _balls.videos():
         if v.get("status") in ("picking", "rendering") and v["id"] not in _balls_active:
-            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None))
+            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None, checking=False))
         if v.get("status") == "queued":
             resume = True
     if resume:
@@ -6438,7 +6498,8 @@ def balls_retry(vid: str) -> dict:
     v = _balls_video(vid)
     if v.get("status") != "error":
         raise HTTPException(409, "only a failed video can be made again")
-    _balls.update(vid, lambda x: x.update(status="queued", progress=0.0, recipe=None, error=None))
+    _balls.update(vid, lambda x: x.update(status="queued", progress=0.0, recipe=None, error=None,
+                                          checking=False, reviews=[], review=None))
     _balls_start_worker()
     return balls_state()
 
@@ -6705,7 +6766,7 @@ def _balls_remake(vid: str) -> None:
     (_balls.video_dir(vid) / "video.mp4").unlink(missing_ok=True)
     _balls.update(vid, lambda v: v.update(status="queued", progress=0.0, tried=0, recipe=None, error=None,
                                           title=None, description=None, made_at=None, seconds=None,
-                                          unlocks=None, dropped=None))
+                                          unlocks=None, dropped=None, checking=False, reviews=[], review=None))
 
 
 @protected.post("/api/balls/remake-upcoming")
@@ -11836,6 +11897,7 @@ function card(v) {
   let msg;
   if (v.status === 'queued') msg = ['wait', '⏳ Waiting its turn…'];
   else if (v.status === 'picking') msg = ['wait', `🧪 Testing runs for one that reaches the end at a good pace… (${v.tried || 0} tried)`];
+  else if (v.status === 'rendering' && v.checking) msg = ['wait', '👀 Claude is checking the ending…'];
   else if (v.status === 'rendering') msg = ['wait', `🎬 Making the video… ${Math.round((v.progress || 0) * 100)}%`];
   else if (v.status === 'uploading') msg = ['wait', '⏳ Uploading…'];
   else if (v.status === 'ready' && (v.options || {}).slot && S.autopilot.on) msg = ['ok', `✅ Ready. 🤖 The autopilot uploads it for ${slotText((v.options || {}).slot + ':00+02:00')}.`];
@@ -11846,6 +11908,13 @@ function card(v) {
   const sl = el('div', 'st ' + msg[0], msg[1]);
   if (yt.url) { sl.appendChild(document.createTextNode(' ')); const a = el('a', '', 'Open on YouTube'); a.href = yt.url; a.target = '_blank'; sl.appendChild(a); }
   f.appendChild(sl);
+  const rv = v.review, past = v.reviews || [], sent = t => (t && !/[.!?]$/.test(t) ? t + '.' : t);
+  if (making && past.length) {
+    const last = past[past.length - 1];
+    f.appendChild(el('div', 'st wait', `👀 Claude said no to the last try${last.notes ? ': ' + sent(last.notes) : '.'} Making it again${last.problem === 'pictures' ? ' with other pictures' : ''}.`));
+  } else if (rv && !making && v.status !== 'error') {
+    f.appendChild(el('div', 'st ' + (rv.ok ? 'ok' : 'bad'), rv.ok ? '👀 Claude checked the ending: looks good.' : `⚠️ Claude's check: ${sent(rv.notes) || 'something looks off.'} Watch it before it posts.`));
+  }
   const ig = v.instagram || {};
   if (ig.status) {
     const im = ig.status === 'posting' ? ['wait', '📸 Posting to Instagram… (Instagram takes a minute or two)']
@@ -11927,7 +11996,7 @@ function renderPacks() {
   for (const p of PK.packs) {
     const row = el('div', 'pk'), head = el('div', 'pk-head');
     head.appendChild(el('b', '', p.title));
-    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : 'yours') + (p.used_by ? ' · used' : ' · not used yet')));
+    head.appendChild(el('span', 'pk-tag', (p.source === 'giphy' ? 'GIPHY' : 'yours') + (p.flagged ? ' · 👀 Claude said no: ' + p.flagged : p.used_by ? ' · used' : ' · not used yet')));
     const del = el('button', 'danger-link', '🗑');
     del.type = 'button';
     del.onclick = async () => {

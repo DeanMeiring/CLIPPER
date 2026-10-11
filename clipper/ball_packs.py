@@ -110,6 +110,12 @@ class PackStore:
         p["used_by"] = vid
         (self.dir(pid) / "pack.json").write_text(json.dumps(p, indent=1))
 
+    def flag(self, pid: str, notes: str) -> None:
+        """Claude's check said no to a video with these pictures."""
+        p = self.load(pid)
+        p["flagged"] = notes or "Claude's check of the video said no"
+        (self.dir(pid) / "pack.json").write_text(json.dumps(p, indent=1))
+
     def delete(self, pid: str) -> None:
         shutil.rmtree(self.dir(pid), ignore_errors=True)
 
@@ -205,7 +211,7 @@ def _claude_json(content, api_key: str, max_tokens: int = 1500):
 
 def plan_chain(api_key: str, avoid: List[str], n: int = AUTO_ITEMS) -> dict:
     av = ("- Don't repeat these recent packs: " + "; ".join(avoid[-20:])) if avoid else ""
-    plan = _claude_json(_PLAN_PROMPT.format(n=n, avoid=av), api_key)
+    plan = _claude_json(_PLAN_PROMPT.format(n=n, avoid=av), api_key, max_tokens=6000)
     steps = [s for s in plan.get("steps") or [] if s.get("name") and s.get("queries")]
     if len(steps) != n:
         raise ValueError(f"the plan had {len(steps)} steps, not {n}")
@@ -300,7 +306,8 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
     for i, got in enumerate(cands):
         content += images(i, got)
     try:
-        picks = _pick_list(_claude_text(content, api_key, max_tokens=400, log=log), n)
+        # room to think first: with 400 the model's thinking used it all up
+        picks = _pick_list(_claude_text(content, api_key, max_tokens=8000, log=log), n)
     except ValueError as e:
         # one big check didn't come back usable: check step by step, so one
         # step's pictures can't sink the whole pack
@@ -310,7 +317,7 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
             one = [{"type": "text", "text": _PICK_ONE_PROMPT.format(
                 name=s["name"], final=" (the FINAL FORM)" if i == n - 1 else "")}] + images(i, got)
             try:
-                picks.append(_pick_list(_claude_text(one, api_key, max_tokens=200, log=log), 1)[0])
+                picks.append(_pick_list(_claude_text(one, api_key, max_tokens=4000, log=log), 1)[0])
             except ValueError as e1:
                 log(f"[packs] {s['name']}: {e1}")
                 picks.append(-1)

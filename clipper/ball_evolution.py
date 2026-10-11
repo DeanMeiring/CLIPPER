@@ -730,7 +730,7 @@ def good_end(recipe: dict) -> tuple:
         # with MAX_UNLOCK_GAP this also keeps the wait to get in to ~6-18 s
         return (18.0, 42.0)
     if recipe.get("format") == "merge":
-        return (26.0, 46.0)
+        return (24.0, 46.0)
     n = len(THEMES[recipe["theme"]]["chain"])
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
