@@ -103,7 +103,7 @@ ARENA_HOOKS = {
     "spikes": ["Spikes grow on every bounce!", "Will it survive the spikes?", "Every bounce grows a spike"],
     "shrink": ["The ball grows, the circle shrinks", "Every bounce: bigger ball, smaller circle",
                "How big can it get?"],
-    "jaws": ["Each ball has 4 seconds to escape", "Escape the jaws in 4 seconds", "Can they escape the jaws?"],
+    "jaws": ["Each ball has 4 seconds to escape", "4 seconds to escape", "Can they escape in 4 seconds?"],
 }
 ARENA_ENDINGS = {"center": ["WINNER!", "THE BEST!", "CHAMPION!"], "spikes": ["SURVIVED!", "FINAL FORM!"],
                  "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"]}
@@ -1377,8 +1377,8 @@ def publish_text(recipe: dict) -> dict:
         desc = (f"Every bounce makes the {first} bigger and the circle smaller, until there's no room "
                 f"left.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
     elif fmt == "jaws":
-        desc = ("Each ball has 4 seconds to get out of the turning jaws. A tooth or the clock pops it, "
-                "and every ball that escapes makes two more.\n\nGuess the last one 👇\n\n"
+        desc = ("Each ball has 4 seconds to get out of the turning ring before it pops, and every ball "
+                "that escapes makes two more.\n\nGuess the last one 👇\n\n"
                 "#satisfying #physics #bouncingball")
     elif fmt == "escape":
         desc = (f"One {first} bounces in a spinning ring. Every time one gets out through the gap, "
