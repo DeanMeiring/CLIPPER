@@ -140,7 +140,8 @@ Rules:
 streamers, no faces of actual humans), no nudity, gore, drugs, weapons, \
 slurs, politics or religion.
 - Search words must be short and common sticker words (2-4 words), so GIPHY \
-actually finds stickers. Give two different searches per step.
+actually finds stickers. Give three searches per step: two specific ones \
+and a third, broader one that is sure to find stickers (e.g. "funny cat").
 - Names are what the viewer sees ("NEW: Buff cat!"): 1-3 words.
 {avoid}
 Answer with JSON only:
@@ -242,7 +243,9 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
     seen = set()
     for s in plan["steps"]:
         got, found, last_err = [], 0, None
-        for q in s["queries"][:2]:
+        for q in s["queries"][:3]:
+            if len(got) >= 6:
+                break
             try:
                 results = giphy_search(q, giphy_key, http=http)
             except Exception as e:
@@ -266,24 +269,38 @@ def auto_pack(store: PackStore, giphy_key: str, api_key: str, avoid: List[str],
                 seen.add(g["id"])
                 got.append((g, im))
         log(f"[packs] {s['name']}: {found} found, {len(got)} usable" + (f" (last error: {last_err})" if last_err else ""))
-        if not got:
-            raise ValueError(f"GIPHY had no usable sticker for '{s['name']}'")
         cands.append(got)
+    # a step GIPHY has nothing for is left out, as long as the pack keeps
+    # enough steps and its final form
+    steps, cands = _drop_empty(plan["steps"], cands, log)
+    n = len(steps)
     content: list = [{"type": "text", "text": _PICK_PROMPT.format(
         steps="\n".join(f"Step {i + 1}: {s['name']}" + (" (FINAL FORM)" if i == n - 1 else "")
-                        for i, s in enumerate(plan["steps"])))}]
+                        for i, s in enumerate(steps)))}]
     for i, got in enumerate(cands):
         for c, (g, im) in enumerate(got):
             content.append({"type": "text", "text": f"step {i + 1} candidate {c}"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                         "data": _thumb_b64(im)}})
     picks = _pick_list(_claude_text(content, api_key, max_tokens=400), n)
-    items, credits = [], []
-    for i, s in enumerate(plan["steps"]):
-        k = picks[i] if i < len(picks) else -1
-        if not isinstance(k, int) or not 0 <= k < len(cands[i]):
-            raise ValueError(f"no usable sticker for step {i + 1} ({s['name']})")
-        g, im = cands[i][k]
-        items.append((s["name"], im))
-        credits.append(g["page"])
+    # a step Claude found nothing fine for is left out the same way
+    chosen = [[c[k]] if 0 <= k < len(c) else [] for c, k in zip(cands, picks)]
+    steps, chosen = _drop_empty(steps, chosen, log)
+    items = [(s["name"], c[0][1]) for s, c in zip(steps, chosen)]
+    credits = [c[0][0]["page"] for c in chosen]
     return store.save(plan["title"], items, "giphy", {"hook": plan["hook"], "credits": credits})
+
+
+def _drop_empty(steps: list, cands: list, log: Callable[[str], None]) -> tuple:
+    """Leave out steps with no candidate. Fails when the final form is one
+    of them or fewer than MIN_ITEMS steps would be left."""
+    if not cands[-1]:
+        raise ValueError(f"no usable sticker for the final form ('{steps[-1]['name']}')")
+    keep = [i for i, c in enumerate(cands) if c]
+    if len(keep) < MIN_ITEMS:
+        missing = ", ".join(steps[i]["name"] for i, c in enumerate(cands) if not c)
+        raise ValueError(f"too many steps without a usable sticker ({missing})")
+    for i, c in enumerate(cands):
+        if not c:
+            log(f"[packs] leaving out '{steps[i]['name']}'")
+    return [steps[i] for i in keep], [cands[i] for i in keep]
