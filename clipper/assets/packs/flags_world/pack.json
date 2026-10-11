@@ -1,0 +1,48 @@
+{
+ "key": "flags_world",
+ "title": "Which country is the best?",
+ "hook": "Which country is the final form?",
+ "credit": "Flags: flag-icons (MIT)",
+ "items": [
+  {
+   "name": "Canada",
+   "file": "01.webp",
+   "flag": "ca"
+  },
+  {
+   "name": "Brazil",
+   "file": "02.webp",
+   "flag": "br"
+  },
+  {
+   "name": "Japan",
+   "file": "03.webp",
+   "flag": "jp"
+  },
+  {
+   "name": "Australia",
+   "file": "04.webp",
+   "flag": "au"
+  },
+  {
+   "name": "Germany",
+   "file": "05.webp",
+   "flag": "de"
+  },
+  {
+   "name": "UK",
+   "file": "06.webp",
+   "flag": "gb"
+  },
+  {
+   "name": "USA",
+   "file": "07.webp",
+   "flag": "us"
+  },
+  {
+   "name": "South Africa",
+   "file": "08.webp",
+   "flag": "za"
+  }
+ ]
+}

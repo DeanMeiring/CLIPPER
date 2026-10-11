@@ -21,9 +21,23 @@ from .ball_evolution import _ffmpeg
 
 PROBLEMS = ("none", "looks", "pictures")
 
-_PROMPT = """These are 4 frames from a vertical YouTube Short, a "merge into final form" \
-video: pictures drop into a ring, two of the same merge into the next one, and the last \
-one is the final form. Its title is: {title!r}. The pictures, in order (the last is the \
+KINDS = {
+    "merge": 'a "merge into final form" video: pictures drop into a ring, two of the same merge '
+             'into the next one, and the last one is the final form',
+    "escape": "a ring video: balls with pictures bounce in a spinning ring; each one that gets out "
+              "through the gap makes two more inside, and new ones come out as the next picture, "
+              "up to the final one",
+    "touch": "a ring video: balls with pictures bounce in a closed ring; two that touch make a new "
+             "one, and new ones come out as the next picture, up to the final one",
+    "breakin": "a brick-breaker video: a ball with a picture bounces in a ring at the bottom, gets "
+               "through a corridor into a room of bricks, and every broken brick makes another "
+               "ball; new ones come out as the next picture, up to the final one",
+    "evolve": "a ball-drop video: pictures fall through pegs into a jar, two of the same merge "
+              "into the next one, up to the final one",
+}
+
+_PROMPT = """These are 4 frames from a vertical YouTube Short, {kind}. \
+Its title is: {title!r}. The pictures, in order (the last is the \
 final form): {names}.
 
 Frame 1 is the start, frames 2 and 3 are along the way, frame 4 is the ending (the final \
@@ -74,7 +88,8 @@ def review(video: Path, info: dict, title: str, api_key: str,
         content.append({"type": "text", "text": f"Frame {k}:"})
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                     "data": base64.b64encode(jpg).decode()}})
-    content.append({"type": "text", "text": _PROMPT.format(title=title or "", names=" > ".join(names))})
+    content.append({"type": "text", "text": _PROMPT.format(kind=KINDS.get(info.get("format"), KINDS["merge"]), title=title or "",
+                                                         names=" > ".join(names))})
     raw = ball_packs._claude_text(content, api_key, max_tokens=4000, log=log)
     return parse(raw)
 

@@ -702,8 +702,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   separate rng, so the other formats' recipes are unchanged (checked on
   800 recipes). Neon look like the rings, backgrounds black / space /
   blurred (`_BREAKIN_BACKDROP_DRAW`; the synthwave grid would sit behind
-  the ring). ~3 min to make a 34 s video. `BALLS_FORMAT_CYCLE` is 10
-  slots now: escape x3, touch x3, breakin x2, evolve x2.
+  the ring). (Since 11 Oct: 420 bricks, see "Rotation + Break in".)
 
 - **Merge to final form + picture packs (Oct 2026):** Dean sent a
   music.bouncingball reel (308K likes): cut-out meme pictures drop down a
@@ -757,7 +756,34 @@ merge it yourself; merging stays Dean's call per the rule above.
   a new pack, then the theme's emoji; Dean's own uploaded packs are never
   swapped. At most 2 remakes, then it goes out with the note on its card
   (`video["review"]`, past no's in `reviews`). A failed check (no key, API
-  error) lets the video through. Other formats aren't checked.
+  error) lets the video through.
+- **Pictures in every kind + starter packs (Oct 2026):** Dean found the
+  emoji "too generic" and made 4 GIPHY packs; every kind now uses a picture
+  pack. `be.recipe_chain` / `be.load_pack_images` / `be.apply_pack` (hook:
+  the pack's own, Break in's "Can one {first} clear the room?", else
+  `PACK_HOOKS`); `be.Painter` draws pack pictures for all kinds (merge's
+  own copy is gone; no-pack videos draw byte for byte as before, checked).
+  `_balls_pick_pack` for every make: chosen > oldest unused pack (uploads
+  first, then GIPHY / starter; `next_unused`) > new GIPHY pack > the pack
+  used longest ago (`least_used`) > emoji. Claude's last look now checks
+  every video with a pack (`ball_review.KINDS`). Starter packs
+  (`clipper/ball_starters.py`, Dean asked for 10 cursed / chad / sigma /
+  country templates): 3 countryball flag packs bundled in
+  `clipper/assets/packs/` (flag-icons SVGs, MIT, rendered with cairosvg in
+  the sandbox only, crown on the final one; seeded into the store as
+  source "starter") and 7 meme plans (`MEME_PLANS`: sigma cat, doge,
+  wojak to chad, Italian brainrot, frog king, capybara, cursed smiley)
+  that `_balls_auto_pack` builds from GIPHY before asking Claude for a new
+  chain (`note_try` orders failed ones last). GIPHY can't be reached from
+  the sandbox, so meme pictures can't be committed. Left out on purpose:
+  real people (Gigachad is a photo, sigma edits use actors), Pepe, company
+  characters (Skibidi Toilet, Grimace, Labubu, Minions), the "chud" wojak.
+- **Rotation + Break in (11 Oct):** Dean's numbers: the gap ring and Break
+  in do best, the peg/gumball Evolve ~200 views. `BALLS_FORMAT_CYCLE` (12
+  slots): escape x4, breakin x4, merge x2, touch x2; Evolve only by hand.
+  Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
+  `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
+  12 seeds pass `pick_seed`, ~5 min to make a 34 s video.
 
 ## Instagram posting (Oct 2026)
 

@@ -1,0 +1,48 @@
+{
+ "key": "flags_football",
+ "title": "Best football nation?",
+ "hook": "Which football nation is the final form?",
+ "credit": "Flags: flag-icons (MIT)",
+ "items": [
+  {
+   "name": "USA",
+   "file": "01.webp",
+   "flag": "us"
+  },
+  {
+   "name": "Mexico",
+   "file": "02.webp",
+   "flag": "mx"
+  },
+  {
+   "name": "Netherlands",
+   "file": "03.webp",
+   "flag": "nl"
+  },
+  {
+   "name": "Portugal",
+   "file": "04.webp",
+   "flag": "pt"
+  },
+  {
+   "name": "Germany",
+   "file": "05.webp",
+   "flag": "de"
+  },
+  {
+   "name": "France",
+   "file": "06.webp",
+   "flag": "fr"
+  },
+  {
+   "name": "Argentina",
+   "file": "07.webp",
+   "flag": "ar"
+  },
+  {
+   "name": "Brazil",
+   "file": "08.webp",
+   "flag": "br"
+  }
+ ]
+}

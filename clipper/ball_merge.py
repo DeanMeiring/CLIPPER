@@ -250,50 +250,11 @@ class MergeSim:
         return out
 
 
-def _load_pack_images(pack: dict) -> list:
-    out = []
-    for it in pack["items"]:
-        im = Image.open(Path(pack["dir"]) / it["file"]).convert("RGBA")
-        if not it.get("cutout"):
-            # a plain photo: a circle with a white rim
-            s = min(im.size)
-            im = im.crop(((im.width - s) // 2, (im.height - s) // 2, (im.width + s) // 2, (im.height + s) // 2))
-            im = im.resize((360, 360), Image.LANCZOS)
-            mask = Image.new("L", (360 * 3, 360 * 3), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, 360 * 3 - 1, 360 * 3 - 1), fill=255)
-            im.putalpha(mask.resize((360, 360), Image.LANCZOS))
-            rim = Image.new("RGBA", (384, 384), (0, 0, 0, 0))
-            ImageDraw.Draw(rim).ellipse((0, 0, 383, 383), fill=(255, 255, 255, 255))
-            rim.alpha_composite(im, (12, 12))
-            im = rim
-        else:
-            side = max(im.size)
-            sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
-            sq.alpha_composite(im, ((side - im.width) // 2, (side - im.height) // 2))
-            im = sq
-        out.append(im)
-    return out
-
-
 class MergePainter(be.Painter):
     TRAIL_FADE = 0.78
 
     def __init__(self, recipe: dict):
-        super().__init__(recipe)
-        pack = recipe.get("pack")
-        if pack:
-            # the pack's pictures replace the theme's emoji everywhere (ladder too)
-            self.emoji = _load_pack_images(pack)
-            self.colours = [be._tint(e) for e in self.emoji]
-            self.chain = [(None, i["name"]) for i in pack["items"]]
-            cell = min(104, (W - 40) // len(self.chain))
-            self.cell, self.icon = cell, int(cell * 0.75)
-            self.icons = [e.resize((self.icon, self.icon), Image.LANCZOS) for e in self.emoji]
-            self.sils = []
-            for e in self.icons:
-                sil = Image.new("RGBA", e.size, (40, 32, 70, 0))
-                sil.putalpha(e.getchannel("A").point(lambda v: int(v * 0.85)))
-                self.sils.append(sil)
+        super().__init__(recipe)      # the pack's pictures, when it has one (be.Painter)
         self.bg = Image.new("RGB", (W, H), (0, 0, 0))
         self.trail = Image.new("RGB", (W, H))
         self.fade = [int(v * self.TRAIL_FADE) for v in range(256)] * 3
