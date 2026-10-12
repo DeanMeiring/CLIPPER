@@ -525,10 +525,12 @@ class SpikesPainter(ArenaPainter):
         return self.finish(im, d, sim, f"{n} spike{'s' if n != 1 else ''}")
 
 
-# ---- The ball grows, the circle shrinks ----------------------------------------------
+# ---- The ball grows with every bounce ("shrink") -----------------------------------------
+# The circle used to shrink 4 px a bounce too; Dean (12 Oct) wanted it to stay
+# the same size, so the ball grows faster instead (~the same 70 bounces).
 
-G_R0, G_RING_STEP = 470.0, 4.0
-G_BALL0, G_BALL_STEP = 34.0, 2.3
+G_R0, G_RING_STEP = 470.0, 0.0
+G_BALL0, G_BALL_STEP = 34.0, 6.0
 G_GRAVITY, G_MIN_SPEED, G_WOBBLE = 800.0, 760.0, 0.06
 
 
@@ -538,7 +540,7 @@ class ShrinkSim(OneBallSim):
         self.wobble = G_WOBBLE
         self.ring = G_R0
         # where ball and ring meet: every tier gets an equal share of the way
-        self.meet = (G_R0 - G_BALL0) / (G_RING_STEP + G_BALL_STEP)
+        self.meet = (G_R0 - 8 - G_BALL0) / (G_RING_STEP + G_BALL_STEP)
 
     def step(self):
         dt = 1 / FPS
@@ -557,7 +559,7 @@ class ShrinkSim(OneBallSim):
                         b["r"] += G_BALL_STEP
                         self.effects.append([b["x"] - nx * b["r"], b["y"] - ny * b["r"], 26, 1.0, b["tier"]])
                     room = max(0.0, self.ring - b["r"])
-                    # keep it inside the (smaller) ring
+                    # keep it inside the ring (the ball just got bigger)
                     k = room / dist if dist > room else 1.0
                     b["x"], b["y"] = CX + dx * k, CY + dy * k
                 if b["r"] >= self.ring - 8:
@@ -580,8 +582,10 @@ class ShrinkPainter(ArenaPainter):
 
     def frame(self, sim: ShrinkSim) -> Image.Image:
         im = self.base(sim)
-        s = sim.ring / G_R0
-        ring = self.ring_full.resize((max(8, int(self.ring_full.width * s)),) * 2, Image.BILINEAR)
+        ring = self.ring_full
+        if sim.ring != G_R0:
+            s = sim.ring / G_R0
+            ring = ring.resize((max(8, int(ring.width * s)),) * 2, Image.BILINEAR)
         im.paste(ring, (int(CX - ring.width / 2), int(CY - ring.height / 2)), ring)
         d = ImageDraw.Draw(im, "RGBA")
         self.balls(im, sim)

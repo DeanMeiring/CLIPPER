@@ -6285,7 +6285,7 @@ BALLS_FORMAT_CYCLE = ("escape", "spiral", "trail", "center", "breakin", "rays", 
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
-                       "shrink": "🔴 Ball grows, circle shrinks", "jaws": "⏱ 4 seconds to escape",
+                       "shrink": "🔴 Ball grows every bounce", "jaws": "⏱ 4 seconds to escape",
                        "spiral": "🌀 Will the ball multiply?", "rays": "🌈 Rays in a parabola",
                        "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something",
                        "trail": "🌈 Every bounce, it evolves"}

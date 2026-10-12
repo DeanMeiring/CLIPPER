@@ -101,7 +101,7 @@ MERGE_ENDINGS = ["FINAL FORM!", "IT EVOLVED!", "MAXED OUT!"]
 ARENA_HOOKS = {
     "center": ["Last one standing wins", "Who holds the center?", "Which one survives the hole?"],
     "spikes": ["Spikes grow on every bounce!", "Will it survive the spikes?", "Every bounce grows a spike"],
-    "shrink": ["The ball grows, the circle shrinks", "Every bounce: bigger ball, smaller circle",
+    "shrink": ["The ball grows with every bounce", "Every bounce makes it bigger",
                "How big can it get?"],
     "jaws": ["Each ball has 4 seconds to escape", "4 seconds to escape", "Can they escape in 4 seconds?"],
     "spiral": ["Will the ball multiply?", "Can one ball break the spiral?", "How many balls does it take?"],
@@ -1436,8 +1436,8 @@ def publish_text(recipe: dict) -> dict:
                 f"can it reach its final form before a spike gets it?\n\nGuess the last one 👇\n\n"
                 f"#satisfying #physics #bouncingball")
     elif fmt == "shrink":
-        desc = (f"Every bounce makes the {first} bigger and the circle smaller, until there's no room "
-                f"left.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
+        desc = (f"Every bounce makes the {first} a little bigger, until it fills the whole circle.\n\n"
+                f"Guess the last one 👇\n\n#satisfying #physics #bouncingball")
     elif fmt == "jaws":
         desc = ("Each ball has 4 seconds to get out of the turning ring before it pops, and every ball "
                 "that escapes makes two more.\n\nGuess the last one 👇\n\n"

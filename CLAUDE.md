@@ -900,7 +900,12 @@ merge it yourself; merging stays Dean's call per the rule above.
   goes once the ball stops: `ZenPainter` draws a 7 px line that never
   fades while the ball moves, and when it turns grey that line fades out
   (x0.8 a frame) while the next ball starts a new one. Spikes will grow
-  keeps the normal fading trail.
+  keeps the normal fading trail. Then Dean asked for the circle to stop
+  shrinking: `shrink` ("🔴 Ball grows every bounce") keeps the ring at
+  `G_R0` (`G_RING_STEP` 0) and the ball grows 6 px a bounce (was 2.3 with
+  the ring -4), so it fills the ring in about the same ~70 bounces (good
+  seeds 12/12 for 6, 8 and 9 pictures, 25-35 s); new hooks ("The ball
+  grows with every bounce"...) and description.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.
