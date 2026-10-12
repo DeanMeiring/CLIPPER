@@ -6023,7 +6023,7 @@ def _balls_make(vid: str) -> None:
     pack = _balls_pick_pack(vid, opts.get("pack"))
     if pack:
         ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
-    _balls_pick_song(recipe)
+    _balls_pick_song(recipe, opts.get("song"))
     if fmt != "merge":
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -6441,6 +6441,7 @@ class BallsMakeRequest(BaseModel):
     jar: Optional[str] = None
     format: Optional[str] = None
     pack: Optional[str] = None      # merge: "auto" (default), "emoji" or a pack id
+    song: Optional[str] = None      # "auto" (default: your songs in turn), "none" or a song id
     count: int = 1
 
 
@@ -6459,6 +6460,8 @@ def balls_make(req: BallsMakeRequest) -> dict:
             _ball_packs.load(req.pack)
         except (KeyError, OSError, ValueError):
             raise HTTPException(400, "that picture pack doesn't exist")
+    if req.song and req.song not in ("auto", "none") and not any(t["id"] == req.song for t in _balls.tracks()):
+        raise HTTPException(400, "that song isn't there any more")
     waiting = sum(1 for v in _balls.videos() if v.get("status") in _BALLS_MAKING)
     count = max(1, min(int(req.count or 1), 7))
     if waiting + count > BALLS_MAX_QUEUE:
@@ -6467,6 +6470,8 @@ def balls_make(req: BallsMakeRequest) -> dict:
         opts = {"theme": req.theme, "course": req.course, "jar": req.jar, "format": req.format}
         if req.pack and req.pack != "auto":
             opts["pack"] = req.pack
+        if req.song and req.song != "auto":
+            opts["song"] = req.song
         _balls.new_video(opts)
     _balls_start_worker()
     return balls_state()
@@ -6652,15 +6657,16 @@ def balls_song_audio(tid: str) -> FileResponse:
     return FileResponse(_balls.music_dir() / t["file"])
 
 
-def _balls_pick_song(recipe: dict) -> None:
+def _balls_pick_song(recipe: dict, choice: Optional[str] = None) -> None:
     """A video whose bounces play music (Merge and the circle kinds) plays
     one of Dean's songs, when he has added any, in rotation (the least used
     one). Dean (12 Oct): always his songs, not the piano tune, the cursed
     meow or the built-in phonk riff; those are left for when there are no
-    songs."""
-    if not recipe.get("bounce_sound"):
+    songs. A Make can pick one song (`choice` = its id) to test it, or
+    "none" for the built-in sounds."""
+    if not recipe.get("bounce_sound") or choice == "none":
         return
-    t = _balls.next_track()
+    t = _balls.next_track(choice)
     if not t:
         return
     start = t.get("start") if t.get("start") is not None else t.get("start_auto") or 0.0
@@ -11803,11 +11809,12 @@ __NAV_LINKS__
       <div class="evolve-only"><label for="m-course">Course</label><select id="m-course"></select></div>
       <div class="evolve-only"><label for="m-jar">Jar</label><select id="m-jar"></select></div>
       <div><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
+      <div class="song-pick"><label for="m-song">Song</label><select id="m-song"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
     <button id="make" type="button">🎬 Make</button>
-    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it.</div>
+    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it. Song: pick one of yours to test it (Merge and the circle kinds; the others play ball sounds).</div>
   </div>
 
   <div class="section">
@@ -11976,9 +11983,17 @@ $('ap-on').addEventListener('change', () => {
   if (on && !S.connected) { alert('Connect the YouTube channel first (top of this page).'); $('ap-on').checked = false; return; }
   saveSettings({ autopilot: on });
 });
+const NO_BOUNCE_MUSIC = ['evolve', 'escape', 'touch', 'breakin'];   // their balls make sounds, not music
+function songPickState() {
+  const kind = $('m-format').value || (S && S.autopilot.today), sel = $('m-song');
+  const off = NO_BOUNCE_MUSIC.includes(kind);
+  sel.disabled = off;
+  sel.title = off ? 'This kind plays ball sounds, not a song. Pick Merge or a circle kind to test a song.' : '';
+}
 $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
+  songPickState();
 });
 function renderAutopilot() {
   const ap = S.autopilot, st = S.settings;
@@ -12041,7 +12056,7 @@ $('make').onclick = async () => {
     const ev = !$('m-format').value ? S.autopilot.today === 'evolve' : $('m-format').value === 'evolve';
     await api('/api/balls/make', jsonOpts('POST', { format: $('m-format').value || null, theme: $('m-theme').value || null,
       course: ev ? $('m-course').value || null : null, jar: ev ? $('m-jar').value || null : null,
-      pack: $('m-pack').value || null, count: parseInt($('m-count').value, 10) }));
+      pack: $('m-pack').value || null, song: $('m-song').value || null, count: parseInt($('m-count').value, 10) }));
     tab = 'todo';
     await load();
   } catch (e) { alert(e.message); }
@@ -12328,6 +12343,15 @@ function renderTracks() {
   const rl = $('rl-music');
   rl.style.display = SG.rl_new ? '' : 'none';
   rl.textContent = `🚗 Add my ${SG.rl_new} Rocket League song${SG.rl_new === 1 ? '' : 's'}`;
+  // the Make box's song choice (to test one song)
+  const sel = $('m-song'), cur = sel.value;
+  sel.innerHTML = '';
+  const opt = (v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
+  opt('auto', SG.songs.length ? '🔀 Auto: your songs in turn' : '🎹 Auto (no songs yet)');
+  for (const t of SG.songs) opt(t.id, `🎵 ${t.name}`);
+  opt('none', '🎹 No song: piano, meow or phonk riff');
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
+  if (typeof S !== 'undefined' && S) songPickState();
 }
 async function editSong(id, body) { try { SG = await api('/api/balls/music/' + id, jsonOpts('PUT', body)); renderTracks(); } catch (e) { alert(e.message); } }
 $('add-music').onclick = () => $('music-files').click();

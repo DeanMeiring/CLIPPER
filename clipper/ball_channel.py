@@ -111,14 +111,16 @@ class Store:
         tmp.write_text(json.dumps(tracks), encoding="utf-8")
         tmp.replace(p)
 
-    def next_track(self) -> dict | None:
-        """The song used least (then longest ago), marked as used now; None
-        when there are none."""
+    def next_track(self, tid: str | None = None) -> dict | None:
+        """The song `tid` if it's there, else the one used least (then
+        longest ago), marked as used now; None when there are none."""
         with self.lock:
             tracks = [t for t in self.tracks() if (self.music_dir() / t["file"]).is_file()]
             if not tracks:
                 return None
-            t = min(tracks, key=lambda x: (x.get("uses") or 0, x.get("used_at") or 0, x.get("added_at") or 0))
+            chosen = [t for t in tracks if tid and t["id"] == tid]
+            t = chosen[0] if chosen else min(
+                tracks, key=lambda x: (x.get("uses") or 0, x.get("used_at") or 0, x.get("added_at") or 0))
             all_tracks = self.tracks()
             for x in all_tracks:
                 if x["id"] == t["id"]:
