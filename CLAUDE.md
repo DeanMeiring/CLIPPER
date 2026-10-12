@@ -700,6 +700,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   were made twice; it now re-checks inside `_balls.update`, and
   `_balls_making` covers the minute of picking the pictures before the
   render process starts.
+  Then Dean asked for the autopilot to post directly, like Instagram, so
+  changes and Remakes stop costing uploads: the tick no longer uploads
+  ahead with `publishAt`; a ready video is uploaded public once its slot
+  has come (up to 3 h late), so it costs one upload only when it posts and
+  Remake can swap anything not yet posted. It relies on the Railway waker
+  (`ball-autopilot-waker`, cron `5 6,7,8,13 * * *` UTC = 08:05, 09:05,
+  10:05, 15:05 SA): posts go out ~5 min after 08:00 / 15:00. Changing the
+  slot times on the page needs that cron changed too. The manual
+  "📅 Schedule" button still schedules ahead with `publishAt`.
 
 - **Break in (Oct 2026):** Dean's idea, from two sandbox prototypes. The
   first (ring on top, corridor packed with tiles, doubling on each return,
