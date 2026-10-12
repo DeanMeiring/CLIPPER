@@ -883,6 +883,29 @@ merge it yourself; merging stays Dean's call per the rule above.
   editable). The credit goes under "Music:" in the description. Links on
   the page: YouTube Audio Library (never claimed), NCS (credit), Pixabay
   (keep the license certificate). Labels' songs aren't offered: claimed.
+  **Rainbow trails (12 Oct):** Dean asked for the balls to leave a
+  colourful trail. Every kind but Evolve now gets `recipe["trail"] =
+  "rainbow"` (`make_recipe`), and the trail loops in the arena, merge,
+  circle and Break in painters draw through `be.draw_trail` /
+  `trail_segments`: the colour moves through the rainbow with distance
+  (a full rainbow every ~320 px, each ball starting at its own hue), in
+  ~7 px steps so it blends instead of striping (3 steps max when > 40
+  balls), with a round joint at each bounce; arena trails last longer
+  (`RAINBOW_TRAIL_FADE` 0.92, was 0.82; Box keeps 0.6). Recipes without
+  the field (every video made before) draw byte for byte as before
+  (checked on 240 frames of 7 kinds). Then (same day) Dean asked for
+  the shrinking-circle trail to stay for the whole video:
+  `ShrinkPainter.KEEP_TRAIL` (no fade at all; paint outside the shrunk
+  ring stays too), and on the zen spike ring "just a normal line" that
+  goes once the ball stops: `ZenPainter` draws a 7 px line that never
+  fades while the ball moves, and when it turns grey that line fades out
+  (x0.8 a frame) while the next ball starts a new one. Spikes will grow
+  keeps the normal fading trail. Then Dean asked for the circle to stop
+  shrinking: `shrink` ("🔴 Ball grows every bounce") keeps the ring at
+  `G_R0` (`G_RING_STEP` 0) and the ball grows 6 px a bounce (was 2.3 with
+  the ring -4), so it fills the ring in about the same ~70 bounces (good
+  seeds 12/12 for 6, 8 and 9 pictures, 25-35 s); new hooks ("The ball
+  grows with every bounce"...) and description.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

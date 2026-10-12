@@ -138,9 +138,12 @@ class ArenaPainter(be.Painter):
     picture balls, the shared header and ending."""
 
     TRAIL_FADE = 0.82
+    KEEP_TRAIL = False      # a rainbow trail that never fades (Dean 12 Oct: the shrinking circle)
+    TRAIL_WIDTH = 0         # 0 = as wide as the ball (x1.2)
 
     def __init__(self, recipe: dict):
         super().__init__(recipe)
+        self.keep_trail = self.KEEP_TRAIL and recipe.get("trail") == "rainbow"
         kind, seed = recipe.get("backdrop"), recipe.get("seed") or 0
         if kind == "space":
             self.bg = bc._space(seed)
@@ -149,7 +152,10 @@ class ArenaPainter(be.Painter):
         else:
             self.bg = Image.new("RGB", (W, H), (0, 0, 0))
         self.trail = Image.new("RGB", (W, H))
-        self.fade = [int(v * self.TRAIL_FADE) for v in range(256)] * 3
+        fade = self.TRAIL_FADE
+        if recipe.get("trail") == "rainbow" and fade >= 0.8:
+            fade = be.RAINBOW_TRAIL_FADE
+        self.fade = [int(v * fade) for v in range(256)] * 3
         self.trail_cols = [tuple(int(v * 0.7) for v in c) for c in self.colours]
         self.glow: dict = {}
         self.f_count = be._font(64)
@@ -170,15 +176,17 @@ class ArenaPainter(be.Painter):
         return self.glow[key]
 
     def base(self, sim) -> Image.Image:
-        self.trail = self.trail.point(self.fade)
+        if not self.keep_trail:
+            self.trail = self.trail.point(self.fade)
         d = ImageDraw.Draw(self.trail)
         for b in sim.balls:
             x, y = _pos(b)
             r = b["r"] * 0.6
-            col = self.trail_cols[b["tier"]]
             px, py = b.get("trail_at") or (x, y)
             if (px - x) ** 2 + (py - y) ** 2 > 4:
-                d.line([(px, py), (x, y)], fill=col, width=max(2, int(2 * r)))
+                width = self.TRAIL_WIDTH if self.TRAIL_WIDTH and self.keep_trail else max(2, int(2 * r))
+                be.draw_trail(d, self.recipe, b, self.trail_cols[b["tier"]], px, py, x, y, width,
+                              fine=len(sim.balls) <= 40)
             b["trail_at"] = (x, y)
         return ImageChops.add(self.bg, self.trail)
 
@@ -517,10 +525,12 @@ class SpikesPainter(ArenaPainter):
         return self.finish(im, d, sim, f"{n} spike{'s' if n != 1 else ''}")
 
 
-# ---- The ball grows, the circle shrinks ----------------------------------------------
+# ---- The ball grows with every bounce ("shrink") -----------------------------------------
+# The circle used to shrink 4 px a bounce too; Dean (12 Oct) wanted it to stay
+# the same size, so the ball grows faster instead (~the same 70 bounces).
 
-G_R0, G_RING_STEP = 470.0, 4.0
-G_BALL0, G_BALL_STEP = 34.0, 2.3
+G_R0, G_RING_STEP = 470.0, 0.0
+G_BALL0, G_BALL_STEP = 34.0, 6.0
 G_GRAVITY, G_MIN_SPEED, G_WOBBLE = 800.0, 760.0, 0.06
 
 
@@ -530,7 +540,7 @@ class ShrinkSim(OneBallSim):
         self.wobble = G_WOBBLE
         self.ring = G_R0
         # where ball and ring meet: every tier gets an equal share of the way
-        self.meet = (G_R0 - G_BALL0) / (G_RING_STEP + G_BALL_STEP)
+        self.meet = (G_R0 - 8 - G_BALL0) / (G_RING_STEP + G_BALL_STEP)
 
     def step(self):
         dt = 1 / FPS
@@ -549,7 +559,7 @@ class ShrinkSim(OneBallSim):
                         b["r"] += G_BALL_STEP
                         self.effects.append([b["x"] - nx * b["r"], b["y"] - ny * b["r"], 26, 1.0, b["tier"]])
                     room = max(0.0, self.ring - b["r"])
-                    # keep it inside the (smaller) ring
+                    # keep it inside the ring (the ball just got bigger)
                     k = room / dist if dist > room else 1.0
                     b["x"], b["y"] = CX + dx * k, CY + dy * k
                 if b["r"] >= self.ring - 8:
@@ -564,14 +574,18 @@ class ShrinkSim(OneBallSim):
 
 
 class ShrinkPainter(ArenaPainter):
+    KEEP_TRAIL = True
+
     def __init__(self, recipe: dict):
         super().__init__(recipe)
         self.ring_full = rainbow_ring(G_R0)
 
     def frame(self, sim: ShrinkSim) -> Image.Image:
         im = self.base(sim)
-        s = sim.ring / G_R0
-        ring = self.ring_full.resize((max(8, int(self.ring_full.width * s)),) * 2, Image.BILINEAR)
+        ring = self.ring_full
+        if sim.ring != G_R0:
+            s = sim.ring / G_R0
+            ring = ring.resize((max(8, int(ring.width * s)),) * 2, Image.BILINEAR)
         im.paste(ring, (int(CX - ring.width / 2), int(CY - ring.height / 2)), ring)
         d = ImageDraw.Draw(im, "RGBA")
         self.balls(im, sim)
@@ -1218,9 +1232,17 @@ class ZenSim(ArenaSim):
 
 
 class ZenPainter(ArenaPainter):
+    # Dean (12 Oct): a plain line behind the ball that stays while it
+    # moves and goes once it stops on the spikes
+    KEEP_TRAIL = True
+    TRAIL_WIDTH = 7
+
     def __init__(self, recipe: dict):
         super().__init__(recipe)
         self.ring = None
+        self.dead_seen = 0
+        self.old_trail = None
+        self.quick_fade = [int(v * 0.8) for v in range(256)] * 3
 
     def _jaw(self, sim: ZenSim) -> Image.Image:
         """The whole spiked ring, drawn once; frame() cuts the open mouth out."""
@@ -1247,7 +1269,17 @@ class ZenPainter(ArenaPainter):
         if self.ring is None:
             self.ring = self._jaw(sim)
             self.ring_alpha = self.ring.getchannel("A")
+        if self.keep_trail and len(sim.dead) != self.dead_seen:
+            # the ball stopped (grey): its line fades out, the next ball starts a new one
+            self.dead_seen = len(sim.dead)
+            self.old_trail = self.trail if self.old_trail is None else ImageChops.add(self.old_trail, self.trail)
+            self.trail = Image.new("RGB", (W, H))
         im = self.base(sim)
+        if self.old_trail is not None:
+            self.old_trail = self.old_trail.point(self.quick_fade)
+            im = ImageChops.add(im, self.old_trail)
+            if not self.old_trail.getbbox():
+                self.old_trail = None
         w = math.degrees(sim.mouth_w())
         if w > 0.5:
             cut = Image.new("L", (W, H), 255)

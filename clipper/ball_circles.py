@@ -358,12 +358,12 @@ class CirclePainter(be.Painter):
             x, y = b["body"].position
             y -= top
             r = b["r"] * 0.7
-            col = self.trail_cols[b["tier"]]
             # a line from where it was last frame, so fast balls leave a
             # streak instead of a row of dots
             px, py = b.get("trail_at") or (x, y)
+            col = self.trail_cols[b["tier"]]
             if (px - x) ** 2 + (py - y) ** 2 > 4:
-                d.line([(px, py), (x, y)], fill=col, width=int(2 * r))
+                col = be.draw_trail(d, self.recipe, b, col, px, py, x, y, int(2 * r), fine=len(sim.balls) <= 40)
             d.ellipse((x - r, y - r, x + r, y + r), fill=col)
             b["trail_at"] = (x, y)
         box = (0, top, W, H)

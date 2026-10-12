@@ -309,10 +309,10 @@ class MergePainter(be.Painter):
         td = ImageDraw.Draw(self.trail)
         for b in sim.balls:
             x, y = b["body"].position
-            col = self.trail_cols[b["tier"]]
             px, py = b.get("trail_at") or (x, y)
             if (px - x) ** 2 + (py - y) ** 2 > 4:
-                td.line([(px, py), (x, y)], fill=col, width=int(b["r"]))
+                be.draw_trail(td, self.recipe, b, self.trail_cols[b["tier"]], px, py, x, y, int(b["r"]),
+                              fine=len(sim.balls) <= 40)
             b["trail_at"] = (x, y)
         im = ImageChops.add(self.bg, self.trail)
         im.paste(self.static, (0, 0), self.static)

@@ -101,7 +101,7 @@ MERGE_ENDINGS = ["FINAL FORM!", "IT EVOLVED!", "MAXED OUT!"]
 ARENA_HOOKS = {
     "center": ["Last one standing wins", "Who holds the center?", "Which one survives the hole?"],
     "spikes": ["Spikes grow on every bounce!", "Will it survive the spikes?", "Every bounce grows a spike"],
-    "shrink": ["The ball grows, the circle shrinks", "Every bounce: bigger ball, smaller circle",
+    "shrink": ["The ball grows with every bounce", "Every bounce makes it bigger",
                "How big can it get?"],
     "jaws": ["Each ball has 4 seconds to escape", "4 seconds to escape", "Can they escape in 4 seconds?"],
     "spiral": ["Will the ball multiply?", "Can one ball break the spiral?", "How many balls does it take?"],
@@ -280,6 +280,11 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         # that gets deeper, or an original phonk cowbell riff
         recipe["bounce_sound"] = random.Random(f"bounce-sound-{seed}").choices(
             ("tune", "meow", "phonk"), weights=(2, 1, 1))[0]
+    if fmt and fmt != "evolve":
+        # Dean (12 Oct): the balls leave a colourful trail -- every colour of
+        # the rainbow along the path, not one dim colour per picture. A
+        # recipe field, so videos made before draw exactly as they did.
+        recipe["trail"] = "rainbow"
     return recipe
 
 
@@ -1355,6 +1360,49 @@ def mix_audio(sim: Sim) -> np.ndarray:
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
 
 
+def trail_segments(recipe: dict, b: dict, col: tuple, px: float, py: float, x: float, y: float,
+                   fine: bool = True) -> list:
+    """The pieces of a ball's trail from (px, py) to (x, y), as
+    ((x0, y0), (x1, y1), colour). Normally one piece in its picture's
+    colour. For a "rainbow" recipe the colour moves through the rainbow
+    with the distance travelled (a full rainbow every ~320 px, each ball
+    starting somewhere else on it), in short steps so it blends instead of
+    striping (`fine=False`, for crowded kinds, takes fewer steps)."""
+    if recipe.get("trail") != "rainbow":
+        return [((px, py), (x, y), col)]
+    import colorsys
+    h = b.get("trail_h")
+    if h is None:
+        h = ((x * 0.37 + y * 0.61) / 900) % 1.0
+    dist = math.hypot(x - px, y - py)
+    n = max(1, min(24 if fine else 3, int(dist / 7)))
+    out = []
+    for k in range(n):
+        h0 = (h + dist * (k + 0.5) / n / 320) % 1.0
+        r, g, bl = colorsys.hsv_to_rgb(h0, 0.9, 0.95)
+        out.append(((px + (x - px) * k / n, py + (y - py) * k / n),
+                    (px + (x - px) * (k + 1) / n, py + (y - py) * (k + 1) / n),
+                    (int(r * 255), int(g * 255), int(bl * 255))))
+    b["trail_h"] = (h + dist / 320) % 1.0
+    return out
+
+
+def draw_trail(d, recipe: dict, b: dict, col: tuple, px: float, py: float, x: float, y: float,
+               width: int, fine: bool = True) -> tuple:
+    """Draw a ball's trail piece; returns the colour it ended on."""
+    segs = trail_segments(recipe, b, col, px, py, x, y, fine)
+    for p0, p1, c in segs:
+        d.line([p0, p1], fill=c, width=width)
+    if len(segs) > 1 or recipe.get("trail") == "rainbow":
+        r = width / 2                       # a round joint where it turned (a bounce)
+        (sx, sy), _, c0 = segs[0]
+        d.ellipse((sx - r, sy - r, sx + r, sy + r), fill=c0)
+    return segs[-1][2]
+
+
+RAINBOW_TRAIL_FADE = 0.92       # longer than the old trails (0.82): the colours need room
+
+
 # ---- publish text --------------------------------------------------------------
 
 def emoji_char(code: str) -> str:
@@ -1388,8 +1436,8 @@ def publish_text(recipe: dict) -> dict:
                 f"can it reach its final form before a spike gets it?\n\nGuess the last one 👇\n\n"
                 f"#satisfying #physics #bouncingball")
     elif fmt == "shrink":
-        desc = (f"Every bounce makes the {first} bigger and the circle smaller, until there's no room "
-                f"left.\n\nGuess the last one 👇\n\n#satisfying #physics #bouncingball")
+        desc = (f"Every bounce makes the {first} a little bigger, until it fills the whole circle.\n\n"
+                f"Guess the last one 👇\n\n#satisfying #physics #bouncingball")
     elif fmt == "jaws":
         desc = ("Each ball has 4 seconds to get out of the turning ring before it pops, and every ball "
                 "that escapes makes two more.\n\nGuess the last one 👇\n\n"
