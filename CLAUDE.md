@@ -854,6 +854,17 @@ merge it yourself; merging stays Dean's call per the rule above.
   to" -- those are labels' phonk tracks that Content ID would claim on
   every video, so it's an original 808 cowbell riff + 808 bass in the same
   style; Dean was told. The card chip shows "🐱 cursed meow" / "🥁 phonk".
+  **Rainbow trails (12 Oct):** Dean asked for the balls to leave a
+  colourful trail. Every kind but Evolve now gets `recipe["trail"] =
+  "rainbow"` (`make_recipe`), and the trail loops in the arena, merge,
+  circle and Break in painters draw through `be.draw_trail` /
+  `trail_segments`: the colour moves through the rainbow with distance
+  (a full rainbow every ~320 px, each ball starting at its own hue), in
+  ~7 px steps so it blends instead of striping (3 steps max when > 40
+  balls), with a round joint at each bounce; arena trails last longer
+  (`RAINBOW_TRAIL_FADE` 0.92, was 0.82; Box keeps 0.6). Recipes without
+  the field (every video made before) draw byte for byte as before
+  (checked on 240 frames of 7 kinds).
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

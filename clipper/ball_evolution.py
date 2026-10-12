@@ -280,6 +280,11 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         # that gets deeper, or an original phonk cowbell riff
         recipe["bounce_sound"] = random.Random(f"bounce-sound-{seed}").choices(
             ("tune", "meow", "phonk"), weights=(2, 1, 1))[0]
+    if fmt and fmt != "evolve":
+        # Dean (12 Oct): the balls leave a colourful trail -- every colour of
+        # the rainbow along the path, not one dim colour per picture. A
+        # recipe field, so videos made before draw exactly as they did.
+        recipe["trail"] = "rainbow"
     return recipe
 
 
@@ -1353,6 +1358,49 @@ def mix_audio(sim: Sim) -> np.ndarray:
     if track is not None:                 # "merge": a tune played by the bounces
         mix = mix * 0.7 + track(n)
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
+
+
+def trail_segments(recipe: dict, b: dict, col: tuple, px: float, py: float, x: float, y: float,
+                   fine: bool = True) -> list:
+    """The pieces of a ball's trail from (px, py) to (x, y), as
+    ((x0, y0), (x1, y1), colour). Normally one piece in its picture's
+    colour. For a "rainbow" recipe the colour moves through the rainbow
+    with the distance travelled (a full rainbow every ~320 px, each ball
+    starting somewhere else on it), in short steps so it blends instead of
+    striping (`fine=False`, for crowded kinds, takes fewer steps)."""
+    if recipe.get("trail") != "rainbow":
+        return [((px, py), (x, y), col)]
+    import colorsys
+    h = b.get("trail_h")
+    if h is None:
+        h = ((x * 0.37 + y * 0.61) / 900) % 1.0
+    dist = math.hypot(x - px, y - py)
+    n = max(1, min(24 if fine else 3, int(dist / 7)))
+    out = []
+    for k in range(n):
+        h0 = (h + dist * (k + 0.5) / n / 320) % 1.0
+        r, g, bl = colorsys.hsv_to_rgb(h0, 0.9, 0.95)
+        out.append(((px + (x - px) * k / n, py + (y - py) * k / n),
+                    (px + (x - px) * (k + 1) / n, py + (y - py) * (k + 1) / n),
+                    (int(r * 255), int(g * 255), int(bl * 255))))
+    b["trail_h"] = (h + dist / 320) % 1.0
+    return out
+
+
+def draw_trail(d, recipe: dict, b: dict, col: tuple, px: float, py: float, x: float, y: float,
+               width: int, fine: bool = True) -> tuple:
+    """Draw a ball's trail piece; returns the colour it ended on."""
+    segs = trail_segments(recipe, b, col, px, py, x, y, fine)
+    for p0, p1, c in segs:
+        d.line([p0, p1], fill=c, width=width)
+    if len(segs) > 1 or recipe.get("trail") == "rainbow":
+        r = width / 2                       # a round joint where it turned (a bounce)
+        (sx, sy), _, c0 = segs[0]
+        d.ellipse((sx - r, sy - r, sx + r, sy + r), fill=c0)
+    return segs[-1][2]
+
+
+RAINBOW_TRAIL_FADE = 0.92       # longer than the old trails (0.82): the colours need room
 
 
 # ---- publish text --------------------------------------------------------------

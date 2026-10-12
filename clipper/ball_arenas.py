@@ -149,7 +149,10 @@ class ArenaPainter(be.Painter):
         else:
             self.bg = Image.new("RGB", (W, H), (0, 0, 0))
         self.trail = Image.new("RGB", (W, H))
-        self.fade = [int(v * self.TRAIL_FADE) for v in range(256)] * 3
+        fade = self.TRAIL_FADE
+        if recipe.get("trail") == "rainbow" and fade >= 0.8:
+            fade = be.RAINBOW_TRAIL_FADE
+        self.fade = [int(v * fade) for v in range(256)] * 3
         self.trail_cols = [tuple(int(v * 0.7) for v in c) for c in self.colours]
         self.glow: dict = {}
         self.f_count = be._font(64)
@@ -175,10 +178,10 @@ class ArenaPainter(be.Painter):
         for b in sim.balls:
             x, y = _pos(b)
             r = b["r"] * 0.6
-            col = self.trail_cols[b["tier"]]
             px, py = b.get("trail_at") or (x, y)
             if (px - x) ** 2 + (py - y) ** 2 > 4:
-                d.line([(px, py), (x, y)], fill=col, width=max(2, int(2 * r)))
+                be.draw_trail(d, self.recipe, b, self.trail_cols[b["tier"]], px, py, x, y, max(2, int(2 * r)),
+                              fine=len(sim.balls) <= 40)
             b["trail_at"] = (x, y)
         return ImageChops.add(self.bg, self.trail)
 

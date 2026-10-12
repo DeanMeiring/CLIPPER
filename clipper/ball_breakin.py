@@ -272,10 +272,10 @@ class BreakInPainter(be.Painter):
         for b in sim.balls:
             x, y = b["body"].position
             r = b["r"] * 0.7
-            col = self.trail_cols[b["tier"]]
             px, py = b.get("trail_at") or (x, y)
+            col = self.trail_cols[b["tier"]]
             if (px - x) ** 2 + (py - y) ** 2 > 4:
-                td.line([(px, py), (x, y)], fill=col, width=int(2 * r))
+                col = be.draw_trail(td, self.recipe, b, col, px, py, x, y, int(2 * r), fine=len(sim.balls) <= 40)
             td.ellipse((x - r, y - r, x + r, y + r), fill=col)
             b["trail_at"] = (x, y)
         im = ImageChops.add(self.bg, self.trail)
