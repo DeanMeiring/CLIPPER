@@ -683,6 +683,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   use: Dean hid Saturday's two that way, the button skipped hidden ones,
   and Saturday stayed blocked); a hidden one still on YouTube is listed as
   "removed from this list, still on YouTube" because it will still post.
+  12 Oct: the 08:00 video missed its slot again. The logs showed no
+  upload attempt after yesterday's three Remakes (13:19, 14:12, 17:55
+  UTC): the same five videos were made three times and none went up, so
+  YouTube's day (09:00 SA 11 Oct to 09:00 SA 12 Oct) had already used its
+  `BALLS_UPLOADS_PER_DAY` (videos deleted in Studio still count: YouTube
+  charged for them), and an 08:00 video must be uploaded before 08:00,
+  inside that same day. It goes up late via the 09:05 waker. The tick
+  used to be silent about this; it now logs every upload ("[autopilot]
+  uploaded ...") and a wait for a slot under 12 h away ("... waits"),
+  so the next miss can be read straight from the logs. Same day:
+  `_balls_resume` (run on every /api/balls poll) requeued a video that
+  had just finished between reading the list and writing it, so videos
+  were made twice; it now re-checks inside `_balls.update`, and
+  `_balls_making` covers the minute of picking the pictures before the
+  render process starts.
 
 - **Break in (Oct 2026):** Dean's idea, from two sandbox prototypes. The
   first (ring on top, corridor packed with tiles, doubling on each return,
