@@ -655,7 +655,9 @@ merge it yourself; merging stays Dean's call per the rule above.
   the 08:00 upload has to happen before 08:00, still in that same day
   (it resets 09:00/10:00 SA). Fixes: the waker also runs at 09:05 and
   10:05 SA (cron `5 6,7,8,13 * * *` UTC) so a missed slot posts late
-  within the 3 h window, and `BALLS_UPLOADS_PER_DAY` is 3 so the backlog
+  within the 3 h window, and `BALLS_UPLOADS_PER_DAY` is 3 (4 since 12 Oct,
+  Dean's call after a Remake day used them up; the API budget is ~6
+  uploads/day across all channels, so it's tight on busy days) so the backlog
   can catch up (with 2 it would stay a day behind for good).
   9 Oct: the first ring video (escape, 1.1k views in a day) beat the
   evolve one (~250), and Dean asked for more ring videos: the kind now

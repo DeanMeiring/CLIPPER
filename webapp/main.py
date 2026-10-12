@@ -5943,8 +5943,12 @@ BALLS_PROFILE = "balls"
 # The YouTube upload quota is shared with every other channel here. Two
 # posts a day need 2; the third is catch-up room: a slot missed because the
 # day's uploads were used (e.g. a manual post) goes up late, and without a
-# spare upload every later 08:00 post would then stay a day behind.
-BALLS_UPLOADS_PER_DAY = 3
+# spare upload every later 08:00 post would then stay a day behind. 4 since
+# 12 Oct (Dean): a Remake re-uploads, and with 3 one Remake plus the
+# autopilot used the day up. YouTube's budget is ~6 uploads a day for every
+# channel together (1,600 of 10,000 units each), so on a day with 4 ball
+# uploads, more than 2 clips + Rocket League uploads would be refused.
+BALLS_UPLOADS_PER_DAY = 4
 BALLS_KEEP_DAYS = 3         # a posted Short's video is kept this long, then deleted to save space
 BALLS_MAX_QUEUE = 10
 BALLS_TIMEOUT = 40 * 60     # a make that runs longer than this is stuck
