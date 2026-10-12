@@ -1469,6 +1469,9 @@ def publish_text(recipe: dict) -> dict:
         desc = (f"It starts with one {first}. Every gold peg sends out another, and two of the same "
                 f"merge into something bigger. Can it reach the end?\n\n"
                 f"Guess the last one before it shows up 👇\n\n#satisfying #physics #evolution #asmr")
+    song = recipe.get("song") or {}
+    if recipe.get("bounce_sound") == "song" and (song.get("credit") or "").strip():
+        desc += "\n\nMusic:\n" + song["credit"].strip()
     if pack and pack.get("credit"):
         desc += "\n\n" + pack["credit"]
     elif pack and pack.get("credits"):

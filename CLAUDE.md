@@ -683,6 +683,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   use: Dean hid Saturday's two that way, the button skipped hidden ones,
   and Saturday stayed blocked); a hidden one still on YouTube is listed as
   "removed from this list, still on YouTube" because it will still post.
+  12 Oct: the 08:00 video missed its slot again. The logs showed no
+  upload attempt after yesterday's three Remakes (13:19, 14:12, 17:55
+  UTC): the same five videos were made three times and none went up, so
+  YouTube's day (09:00 SA 11 Oct to 09:00 SA 12 Oct) had already used its
+  `BALLS_UPLOADS_PER_DAY` (videos deleted in Studio still count: YouTube
+  charged for them), and an 08:00 video must be uploaded before 08:00,
+  inside that same day. It goes up late via the 09:05 waker. The tick
+  used to be silent about this; it now logs every upload ("[autopilot]
+  uploaded ...") and a wait for a slot under 12 h away ("... waits"),
+  so the next miss can be read straight from the logs. Same day:
+  `_balls_resume` (run on every /api/balls poll) requeued a video that
+  had just finished between reading the list and writing it, so videos
+  were made twice; it now re-checks inside `_balls.update`, and
+  `_balls_making` covers the minute of picking the pictures before the
+  render process starts.
 
 - **Break in (Oct 2026):** Dean's idea, from two sandbox prototypes. The
   first (ring on top, corridor packed with tiles, doubling on each return,
@@ -854,6 +869,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   to" -- those are labels' phonk tracks that Content ID would claim on
   every video, so it's an original 808 cowbell riff + 808 bass in the same
   style; Dean was told. The card chip shows "🐱 cursed meow" / "🥁 phonk".
+  **Songs for the bounces (11 Oct):** Dean found the piano tunes "just
+  standard piano" and asked for non-copyright songs. /ball-evolution has a
+  "🎵 Songs for the bounces" box (store `BASE_DIR/_balls/music/` +
+  `music.json`, routes `/api/balls/music*`, same pattern as Rocket League's
+  music; "🚗 Add my Rocket League songs" copies those with their credits).
+  A video whose recipe drew `bounce_sound` "tune" plays a song instead
+  when there are any (`_balls_pick_song` in `_balls_make`: least-used,
+  `recipe["song"] = {path, start, name, credit}`), so meow/phonk keep
+  their 1 in 4 each. `ball_sounds.song_track`: each bounce lets the song
+  play on for `SONG_OPEN` 0.42 s (it only moves while the ball bounces,
+  like the reels), starting at its drop (`rocket_league.find_drop`,
+  editable). The credit goes under "Music:" in the description. Links on
+  the page: YouTube Audio Library (never claimed), NCS (credit), Pixabay
+  (keep the license certificate). Labels' songs aren't offered: claimed.
   **Rainbow trails (12 Oct):** Dean asked for the balls to leave a
   colourful trail. Every kind but Evolve now gets `recipe["trail"] =
   "rainbow"` (`make_recipe`), and the trail loops in the arena, merge,
@@ -864,7 +893,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   balls), with a round joint at each bounce; arena trails last longer
   (`RAINBOW_TRAIL_FADE` 0.92, was 0.82; Box keeps 0.6). Recipes without
   the field (every video made before) draw byte for byte as before
-  (checked on 240 frames of 7 kinds).
+  (checked on 240 frames of 7 kinds). Then (same day) Dean asked for
+  the shrinking-circle trail to stay for the whole video:
+  `ShrinkPainter.KEEP_TRAIL` (no fade at all; paint outside the shrunk
+  ring stays too), and on the zen spike ring "just a normal line" that
+  goes once the ball stops: `ZenPainter` draws a 7 px line that never
+  fades while the ball moves, and when it turns grey that line fades out
+  (x0.8 a frame) while the next ball starts a new one. Spikes will grow
+  keeps the normal fading trail.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

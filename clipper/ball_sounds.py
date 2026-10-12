@@ -12,16 +12,26 @@ Both are made here from nothing (numpy only), so nothing can be claimed:
   cowbell melody in a minor key, one note per bounce, with an 808 bass hit
   every other note. The actual songs are labels' tracks: Content ID would
   claim every video, so none of them is used.
+
+And ``song`` (Dean, 11 Oct: "better songs" than the piano): a free song he
+uploaded on the page (NCS, YouTube Audio Library...). Every bounce lets the
+song play on for a moment, so it only moves forward while the ball bounces,
+the way the bouncing-ball reels do it.
 """
 from __future__ import annotations
+
+import os
+import subprocess
 
 import numpy as np
 
 from .ball_evolution import SR
 
-KINDS = ("tune", "meow", "phonk")
+KINDS = ("tune", "meow", "phonk", "song")
 MEOW_GAP = 0.22         # seconds between meows at most
 PHONK_GAP = 0.12
+SONG_OPEN = 0.42        # how long the song plays on after each bounce
+SONG_FADE_IN, SONG_FADE_OUT = 0.006, 0.05
 
 
 def meow(slow: float = 1.0) -> np.ndarray:
@@ -119,4 +129,61 @@ def track(kind: str, hits: list, n: int) -> np.ndarray:
                 put(t, wb, 0.8)
         last = t
         k += 1
+    return out
+
+
+def load_song(path: str, start: float, seconds: float) -> np.ndarray:
+    """`seconds` of the song from `start`, mono at SR (ffmpeg); it wraps back
+    to the beginning if the song ends first."""
+    ff = os.environ.get("CLIPPER_FFMPEG", "ffmpeg")
+
+    def read(at: float, dur: float) -> np.ndarray:
+        r = subprocess.run([ff, "-v", "error", "-ss", f"{max(0.0, at):.2f}", "-t", f"{dur:.2f}", "-i", str(path),
+                            "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"], capture_output=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"couldn't read the song: {r.stderr.decode(errors='replace')[-300:]}")
+        return np.frombuffer(r.stdout, dtype=np.float32)
+
+    out = read(start, seconds)
+    need = int(SR * seconds)
+    while len(out) < need:
+        more = read(0.0, seconds)
+        if not len(more):
+            break
+        out = np.concatenate([out, more])
+    if not len(out):
+        raise RuntimeError("the song has no sound")
+    return out[:need]
+
+
+def song_track(song: dict, hits: list, n: int) -> np.ndarray:
+    """The song, heard only around the bounces: each one keeps it playing for
+    SONG_OPEN s; between bounces it stops, and it picks up where it stopped."""
+    gates = []                                   # (start, end) in samples
+    for t, _vol in hits:
+        a, b = int(t * SR), int((t + SONG_OPEN) * SR)
+        if gates and a <= gates[-1][1]:
+            gates[-1] = (gates[-1][0], max(gates[-1][1], b))
+        else:
+            gates.append((a, b))
+    gates = [(a, min(b, n)) for a, b in gates if a < n]
+    out = np.zeros(n, dtype=np.float32)
+    total = sum(b - a for a, b in gates)
+    if not total:
+        return out
+    audio = load_song(song["path"], float(song.get("start") or 0.0), total / SR + 0.5)
+    peak = float(np.max(np.abs(audio))) or 1.0
+    audio = audio / peak * 0.9
+    fi, fo = int(SR * SONG_FADE_IN), int(SR * SONG_FADE_OUT)
+    cur = 0
+    for a, b in gates:
+        piece = audio[cur:cur + (b - a)].copy()
+        cur += len(piece)
+        if not len(piece):
+            break
+        k = min(fi, len(piece))
+        piece[:k] *= np.linspace(0, 1, k, dtype=np.float32)
+        k = min(fo, len(piece))
+        piece[-k:] *= np.linspace(1, 0, k, dtype=np.float32)
+        out[a:a + len(piece)] = piece
     return out
