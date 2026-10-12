@@ -879,7 +879,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   `recipe["song"] = {path, start, name, credit}`). 12 Oct: Dean wants his
   (phonk) songs on every one, in rotation, so any `bounce_sound` (tune,
   meow, phonk riff) becomes a song when songs exist; the others are only
-  the fallback without songs. `ball_sounds.song_track`: each bounce lets the song
+  the fallback without songs. The Make box has a "Song" menu (Dean wanted
+  to test one song): Auto (rotation), any one song, or "No song"; it goes
+  in the video's `options["song"]` (so a retry keeps it) and is greyed
+  out for kinds without bounce music (evolve, escape, touch, breakin). `ball_sounds.song_track`: each bounce lets the song
   play on for `SONG_OPEN` 0.42 s (it only moves while the ball bounces,
   like the reels), starting at its drop (`rocket_league.find_drop`,
   editable). The credit goes under "Music:" in the description. Links on
