@@ -5952,6 +5952,7 @@ _BALLS_MAKING = ("queued", "picking", "rendering")
 _balls_worker: Optional[threading.Thread] = None
 _balls_worker_lock = threading.Lock()
 _balls_active: dict = {}    # video id -> the running generator process
+_balls_making: set = set()  # the video the worker is on (also while it picks the pictures, before the process starts)
 _balls_uploading: set = set()
 _balls_cancelled: set = set()
 
@@ -5982,6 +5983,7 @@ def _balls_work() -> None:
             queued = [v for v in _balls.videos() if v.get("status") == "queued"]
             if not queued:
                 return
+            _balls_making.add(queued[0]["id"])
             try:
                 _balls_make(queued[0]["id"])
             except Exception:
@@ -5990,6 +5992,8 @@ def _balls_work() -> None:
                     _balls.update(queued[0]["id"], lambda v: v.update(status="error", error="Something went wrong making this one."))
                 except (KeyError, OSError, ValueError):
                     pass
+            finally:
+                _balls_making.discard(queued[0]["id"])
             if _balls.settings().get("autopilot"):
                 threading.Thread(target=_balls_autopilot_tick, args=("made",), daemon=True).start()
     finally:
@@ -6208,10 +6212,21 @@ def _balls_pack_view(p: dict) -> dict:
 def _balls_resume() -> None:
     """Start the worker for queued videos, and queue again from scratch any
     a restart (a deploy, Railway waking the app) cut off mid-way."""
+    def cut_off(x: dict) -> bool:
+        return (x.get("status") in ("picking", "rendering") and x["id"] not in _balls_active
+                and x["id"] not in _balls_making)
+
+    def requeue(x: dict) -> None:
+        # checked again on the saved video: the list above can be seconds
+        # old, and a video that finished in between was being made twice
+        # (12 Oct: the page's polling requeued one just as it got ready)
+        if cut_off(x):
+            x.update(status="queued", progress=0.0, recipe=None, checking=False)
+
     resume = False
     for v in _balls.videos():
-        if v.get("status") in ("picking", "rendering") and v["id"] not in _balls_active:
-            v = _balls.update(v["id"], lambda x: x.update(status="queued", progress=0.0, recipe=None, checking=False))
+        if cut_off(v):
+            v = _balls.update(v["id"], requeue)
         if v.get("status") == "queued":
             resume = True
     if resume:
@@ -6801,9 +6816,15 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
                 try:
                     _balls_upload(v["id"], when)
                     out["scheduled"] += 1
+                    print(f"[autopilot] uploaded {v['id']} for the {slot} slot"
+                          + (f" (publishes {when:%H:%M})" if when else " (public now, the slot has passed)"), flush=True)
                 except HTTPException as e:
                     if e.status_code == 409 and "uploads today" in str(e.detail):
                         out["quota_wait"] = True    # normal: the rest go up after YouTube's day resets
+                        out["waiting"] = slot
+                        if dt < now + datetime.timedelta(hours=12):
+                            print(f"[autopilot] the {slot} video waits: {BALLS_UPLOADS_PER_DAY} uploads already in "
+                                  f"YouTube's day (it resets at midnight California time)", flush=True)
                         break
                     out["errors"].append(f"{slot}: {e.detail}")
         # 3. Instagram, once the YouTube video is public
