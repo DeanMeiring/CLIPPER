@@ -6653,9 +6653,12 @@ def balls_song_audio(tid: str) -> FileResponse:
 
 
 def _balls_pick_song(recipe: dict) -> None:
-    """A video whose bounces would play the piano tune plays one of Dean's
-    free songs instead, when he has added any (the least used one)."""
-    if recipe.get("bounce_sound") != "tune":
+    """A video whose bounces play music (Merge and the circle kinds) plays
+    one of Dean's songs, when he has added any, in rotation (the least used
+    one). Dean (12 Oct): always his songs, not the piano tune, the cursed
+    meow or the built-in phonk riff; those are left for when there are no
+    songs."""
+    if not recipe.get("bounce_sound"):
         return
     t = _balls.next_track()
     if not t:
@@ -11823,7 +11826,7 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🎵 Songs for the bounces</h3>
-    <div class="hint">Free songs for the videos where every bounce plays music (Merge and the circle kinds). Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). Without songs those videos play a piano tune. About 1 in 4 still gets the cursed meow and 1 in 4 the phonk riff.</div>
+    <div class="hint">Free songs for the videos where every bounce plays music (Merge and the circle kinds). Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). Every one of those videos uses your songs, taking turns. Without songs they play a piano tune, the cursed meow or a phonk riff.</div>
     <div class="music-links">
       <b>Where to get free songs</b>
       <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
