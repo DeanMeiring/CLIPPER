@@ -854,6 +854,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   to" -- those are labels' phonk tracks that Content ID would claim on
   every video, so it's an original 808 cowbell riff + 808 bass in the same
   style; Dean was told. The card chip shows "🐱 cursed meow" / "🥁 phonk".
+  **Songs for the bounces (11 Oct):** Dean found the piano tunes "just
+  standard piano" and asked for non-copyright songs. /ball-evolution has a
+  "🎵 Songs for the bounces" box (store `BASE_DIR/_balls/music/` +
+  `music.json`, routes `/api/balls/music*`, same pattern as Rocket League's
+  music; "🚗 Add my Rocket League songs" copies those with their credits).
+  A video whose recipe drew `bounce_sound` "tune" plays a song instead
+  when there are any (`_balls_pick_song` in `_balls_make`: least-used,
+  `recipe["song"] = {path, start, name, credit}`), so meow/phonk keep
+  their 1 in 4 each. `ball_sounds.song_track`: each bounce lets the song
+  play on for `SONG_OPEN` 0.42 s (it only moves while the ball bounces,
+  like the reels), starting at its drop (`rocket_league.find_drop`,
+  editable). The credit goes under "Music:" in the description. Links on
+  the page: YouTube Audio Library (never claimed), NCS (credit), Pixabay
+  (keep the license certificate). Labels' songs aren't offered: claimed.
   Break in has 420 bricks (44x22, was 132 at 80x40), up to 8 hits deep,
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.

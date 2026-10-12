@@ -93,6 +93,40 @@ class Store:
         """Recipes of every video made, oldest first."""
         return [v["recipe"] for v in self.videos() if v.get("recipe")]
 
+    # songs for the bounces (music/<id>.<ext> + music.json)
+    def music_dir(self) -> Path:
+        d = self.root / "music"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def tracks(self) -> List[dict]:
+        try:
+            return json.loads((self.music_dir() / "music.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def save_tracks(self, tracks: List[dict]) -> None:
+        p = self.music_dir() / "music.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tracks), encoding="utf-8")
+        tmp.replace(p)
+
+    def next_track(self) -> dict | None:
+        """The song used least (then longest ago), marked as used now; None
+        when there are none."""
+        with self.lock:
+            tracks = [t for t in self.tracks() if (self.music_dir() / t["file"]).is_file()]
+            if not tracks:
+                return None
+            t = min(tracks, key=lambda x: (x.get("uses") or 0, x.get("used_at") or 0, x.get("added_at") or 0))
+            all_tracks = self.tracks()
+            for x in all_tracks:
+                if x["id"] == t["id"]:
+                    x["uses"] = (x.get("uses") or 0) + 1
+                    x["used_at"] = time.time()
+            self.save_tracks(all_tracks)
+            return t
+
     def settings(self) -> dict:
         try:
             data = json.loads((self.root / "settings.json").read_text(encoding="utf-8"))

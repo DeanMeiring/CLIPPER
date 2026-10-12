@@ -23,6 +23,7 @@ from __future__ import annotations
 import colorsys
 import math
 import random
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,12 @@ class MergeSim:
         if kind in ("meow", "phonk"):
             from clipper import ball_sounds
             return ball_sounds.track(kind, self.hits, n)
+        if kind == "song" and self.recipe.get("song"):
+            from clipper import ball_sounds
+            try:
+                return ball_sounds.song_track(self.recipe["song"], self.hits, n)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                print(f"song failed, playing the tune instead: {e}", flush=True)
         out = np.zeros(n, dtype=np.float32)
         notes = TUNES.get(self.recipe.get("tune") or "", TUNES["mountain_king"])
         k, last, cache = 0, -1.0, {}

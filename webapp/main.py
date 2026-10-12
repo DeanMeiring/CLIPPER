@@ -6019,6 +6019,7 @@ def _balls_make(vid: str) -> None:
     pack = _balls_pick_pack(vid, opts.get("pack"))
     if pack:
         ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
+    _balls_pick_song(recipe)
     if fmt != "merge":
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -6243,6 +6244,8 @@ def _balls_view(v: dict) -> dict:
             c["chips"][1] = f"🖼 {pack['title']}"
         if fmt == "merge" or fmt in ball_evolution.ARENA_HOOKS:
             sound = {"meow": "🐱 cursed meow", "phonk": "🥁 phonk"}.get(r.get("bounce_sound") or "")
+            if r.get("bounce_sound") == "song" and r.get("song"):
+                sound = f"🎵 {r['song'].get('name') or 'song'}"
             c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
             c["chips"] = [x for x in c["chips"] if x]
         else:
@@ -6524,6 +6527,128 @@ def balls_pack_delete(pid: str) -> dict:
         raise HTTPException(404, "not there")
     _ball_packs.delete(pid)
     return balls_packs()
+
+
+# ---- songs for the bounces (Dean, 11 Oct: "better songs" than the piano) ----
+
+_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm", ".mp4")
+
+
+def _balls_songs() -> dict:
+    rl_ids = {t.get("from_rl") for t in _balls.tracks()}
+    return {"songs": _balls.tracks(),
+            "rl_new": sum(1 for t in _rl.tracks() if t["id"] not in rl_ids and (_rl.music_dir() / t["file"]).is_file())}
+
+
+def _balls_song_info(path: Path) -> dict:
+    drop = rocket_league.find_drop(path)
+    return {"start": drop if drop is not None else 0.0, "duration": round(longform.audio_duration(path), 1)}
+
+
+@protected.get("/api/balls/music")
+def balls_songs() -> dict:
+    return _balls_songs()
+
+
+@protected.post("/api/balls/music")
+async def balls_upload_song(request: Request) -> dict:
+    name = Path(request.headers.get("x-filename") or "song.mp3").name[:120]
+    ext = Path(name).suffix.lower()
+    if ext not in _AUDIO_EXTS:
+        raise HTTPException(400, "Upload an audio file (mp3, m4a, wav...).")
+    tid = uuid.uuid4().hex[:8]
+    dest = _balls.music_dir() / f"{tid}{ext}"
+    await _rl_receive(request, dest)
+    try:
+        info = await run_in_threadpool(_balls_song_info, dest)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "That file isn't audio the app can read.")
+    track = {"id": tid, "file": dest.name, "name": Path(name).stem[:80], "credit": "", "added_at": time.time(),
+             "start_auto": info["start"], **info}
+    with _balls.lock:
+        _balls.save_tracks(_balls.tracks() + [track])
+    return _balls_songs()
+
+
+@protected.post("/api/balls/music/from-rl")
+def balls_songs_from_rl() -> dict:
+    """Copy the Rocket League page's songs (with their credits) over, so they
+    don't have to be uploaded twice."""
+    import shutil
+    rl_ids = {t.get("from_rl") for t in _balls.tracks()}
+    added = []
+    for t in _rl.tracks():
+        src = _rl.music_dir() / t["file"]
+        if t["id"] in rl_ids or not src.is_file():
+            continue
+        tid = uuid.uuid4().hex[:8]
+        dest = _balls.music_dir() / f"{tid}{src.suffix.lower()}"
+        shutil.copyfile(src, dest)
+        start = t.get("drop") if t.get("drop") is not None else t.get("drop_auto") or 0.0
+        added.append({"id": tid, "file": dest.name, "name": t.get("name") or "Song", "credit": t.get("credit") or "",
+                      "added_at": time.time(), "start_auto": start, "start": start,
+                      "duration": t.get("duration") or 0.0, "from_rl": t["id"]})
+    with _balls.lock:
+        _balls.save_tracks(_balls.tracks() + added)
+    return _balls_songs()
+
+
+class BallsSongEdit(BaseModel):
+    name: Optional[str] = None
+    credit: Optional[str] = None
+    start: Optional[float] = None
+
+
+@protected.put("/api/balls/music/{tid}")
+def balls_edit_song(tid: str, req: BallsSongEdit) -> dict:
+    with _balls.lock:
+        tracks = _balls.tracks()
+        t = next((x for x in tracks if x["id"] == tid), None)
+        if t is None:
+            raise HTTPException(404, "song not found")
+        if req.name is not None:
+            t["name"] = " ".join(req.name.split())[:80] or t["name"]
+        if req.credit is not None:
+            t["credit"] = req.credit.strip()[:600]
+        if req.start is not None:
+            t["start"] = round(max(0.0, min(float(req.start), float(t.get("duration") or 0))), 1)
+        _balls.save_tracks(tracks)
+    return _balls_songs()
+
+
+@protected.delete("/api/balls/music/{tid}")
+def balls_delete_song(tid: str) -> dict:
+    with _balls.lock:
+        tracks = _balls.tracks()
+        t = next((x for x in tracks if x["id"] == tid), None)
+        if t is None:
+            raise HTTPException(404, "song not found")
+        (_balls.music_dir() / t["file"]).unlink(missing_ok=True)
+        _balls.save_tracks([x for x in tracks if x["id"] != tid])
+    return _balls_songs()
+
+
+@protected.get("/api/balls/music/{tid}/audio")
+def balls_song_audio(tid: str) -> FileResponse:
+    t = next((x for x in _balls.tracks() if x["id"] == tid), None)
+    if t is None or not (_balls.music_dir() / t["file"]).is_file():
+        raise HTTPException(404, "song not found")
+    return FileResponse(_balls.music_dir() / t["file"])
+
+
+def _balls_pick_song(recipe: dict) -> None:
+    """A video whose bounces would play the piano tune plays one of Dean's
+    free songs instead, when he has added any (the least used one)."""
+    if recipe.get("bounce_sound") != "tune":
+        return
+    t = _balls.next_track()
+    if not t:
+        return
+    start = t.get("start") if t.get("start") is not None else t.get("start_auto") or 0.0
+    recipe["bounce_sound"] = "song"
+    recipe["song"] = {"id": t["id"], "name": t.get("name") or "", "credit": t.get("credit") or "",
+                      "path": str((_balls.music_dir() / t["file"]).resolve()), "start": float(start)}
 
 
 class BallsEdit(BaseModel):
@@ -11624,6 +11749,15 @@ __CSS__
   .pk-up img { width: 52px; height: 52px; object-fit: contain; background: #000; border-radius: 8px; flex: none; }
   .pk-up input { flex: 1; min-width: 0; }
   .pk-up button { flex: none; padding: 6px 9px; }
+  .track { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin-top: 8px; }
+  .track input { margin-top: 0; }
+  .track .nm { flex: 2 1 160px; }
+  .track .dp { width: 84px; flex: none; }
+  .track .cr { flex: 3 1 220px; font-size: 0.8rem; }
+  .track button { margin-top: 0; padding: 7px 12px; }
+  .music-links { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+  .music-links a { display: block; font-weight: 700; margin-top: 8px; text-decoration: none; }
+  .music-links .hint { margin-top: 2px; }
   @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .vcard { flex-direction: column; } .vcard .vid { width: 100%; }
     .vcard video { max-height: 460px; } .vcard .ph { max-height: 260px; aspect-ratio: auto; height: 160px; } }
 </style>
@@ -11664,6 +11798,25 @@ __NAV_LINKS__
       <div class="actions"><button id="pk-save" type="button">💾 Save pack</button></div>
     </div>
     <div id="pk-packs"></div>
+  </div>
+
+  <div class="section">
+    <h3>🎵 Songs for the bounces</h3>
+    <div class="hint">Free songs for the videos where every bounce plays music (Merge and the circle kinds). Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). Without songs those videos play a piano tune. About 1 in 4 still gets the cursed meow and 1 in 4 the phonk riff.</div>
+    <div class="music-links">
+      <b>Where to get free songs</b>
+      <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
+      <div class="hint">YouTube's own free music: never claimed, so the safest. Some songs ask for a credit: paste it into the song's credit box.</div>
+      <a href="https://ncs.io/" target="_blank" rel="noopener">🎧 NCS (NoCopyrightSounds) →</a>
+      <div class="hint">Free with a credit: copy it from the song's page into the credit box here and it's added to every description.</div>
+      <a href="https://pixabay.com/music/" target="_blank" rel="noopener">🎧 Pixabay Music →</a>
+      <div class="hint">Free, no credit needed. Download the license certificate with the song: if one ever gets claimed, it's your proof.</div>
+    </div>
+    <div id="tracks"></div>
+    <div class="actions"><button id="add-music" type="button" class="secondary">⬆ Add songs</button><button id="rl-music" type="button" class="secondary" style="display:none"></button></div>
+    <input type="file" id="music-files" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac" multiple style="display:none">
+    <div class="hint" id="music-up" style="display:none"></div>
+    <audio id="player" preload="none"></audio>
   </div>
 
   <div class="section">
@@ -12127,8 +12280,52 @@ $('pk-auto').onclick = async () => {
   b.textContent = '📷 Make a photo pack now'; b.disabled = !PK.photos;
 };
 
+// ---- songs for the bounces ----
+let SG = { songs: [], rl_new: 0 };
+async function loadSongs() { SG = await api('/api/balls/music'); renderTracks(); }
+function renderTracks() {
+  const box = $('tracks'); box.innerHTML = '';
+  if (!SG.songs.length) box.appendChild(el('div', 'hint', 'No songs yet: the bounces play a piano tune.'));
+  for (const t of SG.songs) {
+    const r = el('div', 'track');
+    const nm = el('input', 'nm'); nm.value = t.name; nm.onchange = () => editSong(t.id, { name: nm.value });
+    const dp = el('input', 'dp'); dp.type = 'number'; dp.step = '0.1'; dp.min = '0'; dp.value = t.start ?? t.start_auto ?? 0; dp.title = 'Start at (seconds)';
+    dp.onchange = () => editSong(t.id, { start: parseFloat(dp.value) || 0 });
+    const pl = el('button', 'secondary', '▶'); pl.type = 'button'; pl.title = 'Play from the start second';
+    pl.onclick = () => { const a = $('player'); if (!a.paused && a.dataset.t === t.id) { a.pause(); return; } a.src = `/api/balls/music/${t.id}/audio`; a.dataset.t = t.id; a.currentTime = parseFloat(dp.value) || 0; a.play(); };
+    const cr = el('input', 'cr'); cr.placeholder = 'Credit (paste from the song’s page, if it asks for one)'; cr.value = t.credit || '';
+    cr.onchange = () => editSong(t.id, { credit: cr.value });
+    const del = el('button', 'danger-link', 'Remove'); del.type = 'button';
+    del.onclick = async () => { if (confirm(`Remove “${t.name}”?`)) { try { SG = await api('/api/balls/music/' + t.id, { method: 'DELETE' }); renderTracks(); } catch (e) { alert(e.message); } } };
+    r.appendChild(nm); r.appendChild(el('span', 'hint', 'start at (s)')); r.appendChild(dp); r.appendChild(pl); r.appendChild(cr); r.appendChild(del);
+    if (t.uses) r.appendChild(el('span', 'hint', `used in ${t.uses} video${t.uses === 1 ? '' : 's'}`));
+    box.appendChild(r);
+  }
+  const rl = $('rl-music');
+  rl.style.display = SG.rl_new ? '' : 'none';
+  rl.textContent = `🚗 Add my ${SG.rl_new} Rocket League song${SG.rl_new === 1 ? '' : 's'}`;
+}
+async function editSong(id, body) { try { SG = await api('/api/balls/music/' + id, jsonOpts('PUT', body)); renderTracks(); } catch (e) { alert(e.message); } }
+$('add-music').onclick = () => $('music-files').click();
+$('music-files').onchange = async () => {
+  const files = [...$('music-files').files]; $('music-files').value = '';
+  const up = $('music-up'); up.style.display = '';
+  for (const [i, f] of files.entries()) {
+    up.textContent = `Uploading ${f.name} (${i + 1} of ${files.length})… stay on this page.`;
+    try { SG = await api('/api/balls/music', { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-Filename': f.name }, body: f }); renderTracks(); }
+    catch (e) { alert(`${f.name}: ${e.message}`); }
+  }
+  up.style.display = 'none';
+};
+$('rl-music').onclick = async () => {
+  const b = $('rl-music'); b.disabled = true;
+  try { SG = await api('/api/balls/music/from-rl', { method: 'POST' }); renderTracks(); } catch (e) { alert(e.message); }
+  b.disabled = false;
+};
+
 load().catch(e => alert(e.message));
 loadPacks().catch(() => {});
+loadSongs().catch(() => {});
 </script>
 </body>
 </html>
