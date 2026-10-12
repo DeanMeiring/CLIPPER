@@ -6812,28 +6812,31 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
             out["planned"] += 1
         if out["planned"]:
             _balls_start_worker()
-        # 2. upload finished ones for their slot (or right away if it just passed)
+        # 2. post finished ones once their slot has come (public right away,
+        # like Instagram). Dean (12 Oct): they used to go up ahead, scheduled
+        # with publishAt, so every Remake or change spent another of the
+        # day's uploads; now a video costs an upload only when it posts. The
+        # Railway waker wakes the app a few minutes after each slot.
         if _youtube_token_stores[BALLS_PROFILE].is_connected():
             for v in sorted(_balls.videos(), key=lambda v: (v.get("options") or {}).get("slot") or ""):
                 slot = (v.get("options") or {}).get("slot")
                 if not slot or v.get("youtube") or _balls_view(v)["status"] != "ready":
                     continue
                 dt = datetime.datetime.strptime(slot, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
-                when = dt if dt > now + datetime.timedelta(minutes=15) else None
-                if when is None and now - dt > datetime.timedelta(hours=3):
+                if dt > now + datetime.timedelta(minutes=1):
+                    continue        # not its time yet
+                if now - dt > datetime.timedelta(hours=3):
                     continue        # long missed: leave it for a manual post
                 try:
-                    _balls_upload(v["id"], when)
+                    _balls_upload(v["id"], None)
                     out["scheduled"] += 1
-                    print(f"[autopilot] uploaded {v['id']} for the {slot} slot"
-                          + (f" (publishes {when:%H:%M})" if when else " (public now, the slot has passed)"), flush=True)
+                    print(f"[autopilot] posted {v['id']} for the {slot} slot (public now)", flush=True)
                 except HTTPException as e:
                     if e.status_code == 409 and "uploads today" in str(e.detail):
                         out["quota_wait"] = True    # normal: the rest go up after YouTube's day resets
                         out["waiting"] = slot
-                        if dt < now + datetime.timedelta(hours=12):
-                            print(f"[autopilot] the {slot} video waits: {BALLS_UPLOADS_PER_DAY} uploads already in "
-                                  f"YouTube's day (it resets at midnight California time)", flush=True)
+                        print(f"[autopilot] the {slot} video waits: {BALLS_UPLOADS_PER_DAY} uploads already in "
+                              f"YouTube's day (it resets at midnight California time)", flush=True)
                         break
                     out["errors"].append(f"{slot}: {e.detail}")
         # 3. Instagram, once the YouTube video is public
@@ -12003,7 +12006,7 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
   $('ap-hint').textContent = ap.on
-    ? `It makes the next ${st.ahead_days || 2} days' videos ahead, schedules each on YouTube for its time (YouTube posts it even while this app sleeps) and posts it to Instagram once it's public. Mostly ring videos: 8 in 10 are ⭕ / ✨ / 🧱, every 5th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
+    ? `It makes the next ${st.ahead_days || 2} days' videos ahead and posts each one to YouTube (public) and Instagram a few minutes after its time. Nothing goes to YouTube before then, so Remake and changes don't use up the day's uploads. Mostly ring videos: 8 in 10 are ⭕ / ✨ / 🧱, every 5th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
     : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, mostly ring videos (8 in 10) with 🧬 Evolve every 5th.`;
   const plan = $('ap-plan'); plan.innerHTML = '';
   plan.style.display = ap.on ? '' : 'none';
