@@ -893,7 +893,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   the fallback without songs. The Make box has a "Song" menu (Dean wanted
   to test one song): Auto (rotation), any one song, or "No song"; it goes
   in the video's `options["song"]` (so a retry keeps it) and is greyed
-  out for kinds without bounce music (evolve, escape, touch, breakin). `ball_sounds.song_track`: each bounce lets the song
+  out for kinds without bounce music (evolve, escape, touch, breakin).
+  14 Oct: a song video did very well and Dean asked for music on every
+  video, so those four get songs too (`_balls_pick_song` no longer needs
+  a `bounce_sound`; the menu is enabled for every kind). `be.mix_audio`:
+  a sim without `music_track` whose recipe has a song plays it gated by
+  its ball hits (tick / knock / thud events, `ball_sounds.song_track`),
+  over the ball sounds at half level and with no noise bed. Recipes
+  without a song mix exactly as before. `ball_sounds.song_track`: each bounce lets the song
   play on for `SONG_OPEN` 0.42 s (it only moves while the ball bounces,
   like the reels), starting at its drop (`rocket_league.find_drop`,
   editable). The credit goes under "Music:" in the description. Links on

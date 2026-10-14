@@ -6267,6 +6267,8 @@ def _balls_view(v: dict) -> dict:
                 sound = f"🎵 {r['song'].get('name') or 'song'}"
             c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
             c["chips"] = [x for x in c["chips"] if x]
+        elif r.get("bounce_sound") == "song" and r.get("song"):
+            c["chips"] += [x for x in (r.get("skin"), f"🎵 {r['song'].get('name') or 'song'}") if x]
         else:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
     return c
@@ -6662,13 +6664,14 @@ def balls_song_audio(tid: str) -> FileResponse:
 
 
 def _balls_pick_song(recipe: dict, choice: Optional[str] = None) -> None:
-    """A video whose bounces play music (Merge and the circle kinds) plays
-    one of Dean's songs, when he has added any, in rotation (the least used
-    one). Dean (12 Oct): always his songs, not the piano tune, the cursed
-    meow or the built-in phonk riff; those are left for when there are no
-    songs. A Make can pick one song (`choice` = its id) to test it, or
-    "none" for the built-in sounds."""
-    if not recipe.get("bounce_sound") or choice == "none":
+    """Every video plays one of Dean's songs, when he has added any, in
+    rotation (the least used one). Dean (12 Oct): always his songs, not the
+    piano tune, the cursed meow or the built-in phonk riff; (14 Oct) on every
+    kind, the ball-sound ones (Escape, Touch, Break in, Evolve) too -- a song
+    video did very well. Without songs each kind keeps its own sounds. A
+    Make can pick one song (`choice` = its id) to test it, or "none" for the
+    built-in sounds."""
+    if choice == "none":
         return
     t = _balls.next_track(choice)
     if not t:
@@ -11821,7 +11824,7 @@ __NAV_LINKS__
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
     <button id="make" type="button">🎬 Make</button>
-    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it. Song: pick one of yours to test it (Merge and the circle kinds; the others play ball sounds).</div>
+    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it. Song: pick one of yours to test it.</div>
   </div>
 
   <div class="section">
@@ -11840,7 +11843,7 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🎵 Songs for the bounces</h3>
-    <div class="hint">Free songs for the videos where every bounce plays music (Merge and the circle kinds). Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). Every one of those videos uses your songs, taking turns. Without songs they play a piano tune, the cursed meow or a phonk riff.</div>
+    <div class="hint">Free songs for every video. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The videos take turns with your songs. Without songs, the bounce kinds play a piano tune, the cursed meow or a phonk riff, and the others their ball sounds.</div>
     <div class="music-links">
       <b>Where to get free songs</b>
       <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
@@ -11990,7 +11993,7 @@ $('ap-on').addEventListener('change', () => {
   if (on && !S.connected) { alert('Connect the YouTube channel first (top of this page).'); $('ap-on').checked = false; return; }
   saveSettings({ autopilot: on });
 });
-const NO_BOUNCE_MUSIC = ['evolve', 'escape', 'touch', 'breakin'];   // their balls make sounds, not music
+const NO_BOUNCE_MUSIC = [];   // every kind plays your songs now (14 Oct)
 function songPickState() {
   const kind = $('m-format').value || (S && S.autopilot.today), sel = $('m-song');
   const off = NO_BOUNCE_MUSIC.includes(kind);
