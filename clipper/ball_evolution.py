@@ -1352,11 +1352,26 @@ def mix_audio(sim: Sim) -> np.ndarray:
         seg = fx[i:i + len(w)]
         seg += w[:len(seg)] * (0.35 + 0.65 * vol)
     fx = np.tanh(fx * 1.4) * 0.85
+    track = getattr(sim, "music_track", None)
+    song = sim.recipe.get("song") if sim.recipe.get("bounce_sound") == "song" else None
+    if track is None and song:
+        # Dean (14 Oct): every kind gets his songs, not only the bounce-music
+        # ones. The song plays on with every ball hit (like the other kinds),
+        # over the balls' own sounds, with no noise bed under it.
+        from clipper import ball_sounds
+        hits = [(et, vol) for et, kind, _val, vol in sim.events if kind in ("tick", "knock", "thud")]
+        try:
+            return _normalise(fx * 0.5 + ball_sounds.song_track(song, hits, n))
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"song failed, keeping the ball sounds: {e}", flush=True)
     bed = v.music(sim.t + 1)[:n]
     mix = fx + bed
-    track = getattr(sim, "music_track", None)
     if track is not None:                 # "merge": a tune played by the bounces
         mix = mix * 0.7 + track(n)
+    return _normalise(mix)
+
+
+def _normalise(mix: np.ndarray) -> np.ndarray:
     return mix / max(1e-6, float(np.max(np.abs(mix)))) * 0.89
 
 
