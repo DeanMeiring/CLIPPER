@@ -45,6 +45,14 @@ _RED_FLAG_RE = re.compile(
 )
 
 
+def _sent_size(w: int, h: int) -> Tuple[int, int]:
+    """The size a frame is actually sent to the model at -- what any pixel
+    coordinates the model gives back are measured in."""
+    if w > _MAX_FRAME_WIDTH:
+        return _MAX_FRAME_WIDTH, int(h * (_MAX_FRAME_WIDTH / w))
+    return w, h
+
+
 def _extract_frames_b64(video_path: Path, start: float, end: float) -> List[str]:
     import cv2
 
@@ -60,9 +68,9 @@ def _extract_frames_b64(video_path: Path, start: float, end: float) -> List[str]
         if not ok:
             continue
         h, w = frame.shape[:2]
-        if w > _MAX_FRAME_WIDTH:
-            scale = _MAX_FRAME_WIDTH / w
-            frame = cv2.resize(frame, (_MAX_FRAME_WIDTH, int(h * scale)))
+        sent_w, sent_h = _sent_size(w, h)
+        if (sent_w, sent_h) != (w, h):
+            frame = cv2.resize(frame, (sent_w, sent_h))
         ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok2:
             out.append(base64.b64encode(buf.tobytes()).decode("ascii"))
@@ -120,12 +128,14 @@ is highlighted, spotlighted, or duplicated elsewhere on screen (e.g. an
 single box best represents their main camera window and skip the rest. Never
 return two overlapping or near-identical boxes for the same person.
 
-Respond with ONLY a JSON array (no other text), one entry per distinct
-facecam overlay found, in this exact shape:
-[{"x": 0.0, "y": 0.62, "w": 0.18, "h": 0.20, "what": "person wearing headphones, real camera feed"}]
+Each frame is {width}x{height} pixels. Respond with ONLY a JSON array (no
+other text), one entry per distinct facecam overlay found, in this exact
+shape:
+[{{"x": 0, "y": 335, "w": 173, "h": 108, "what": "person wearing headphones, real camera feed"}}]
 
-x/y/w/h are fractions of the frame's width/height (0 to 1), covering the
-visible facecam window as tightly as reasonable. "what" is a short (under 10
+x/y are the pixel coordinates of the window's top-left corner and w/h its
+size in pixels, in that {width}x{height} image, covering the visible facecam
+window as tightly as reasonable. "what" is a short (under 10
 words) description of what's actually in the box -- answering it forces you
 to look closely before committing to a box, and it must describe an actual
 person's live video, not a graphic. Return an empty array [] if there's no
@@ -342,7 +352,15 @@ def detect_facecams(
     if not frames_b64:
         return None
 
-    content: List[dict] = [{"type": "text", "text": _PROMPT}]
+    # Boxes come back in pixels of the image the model actually saw, not as
+    # fractions of it. Asked for fractions, it put every facecam's y at
+    # ~9/16 of where it really was (x was fine) -- job after job, the box
+    # drawn by hand afterwards sat at 1.73-1.77x the detected y, i.e. y
+    # measured against the frame's width instead of its height. The crop
+    # then took the gameplay above each cam, and the post-render check
+    # rightly rejected every one of those renders.
+    sent_w, sent_h = _sent_size(src_w, src_h)
+    content: List[dict] = [{"type": "text", "text": _PROMPT.format(width=sent_w, height=sent_h)}]
     for b64 in frames_b64:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
 
@@ -374,10 +392,10 @@ def detect_facecams(
     boxes: List[Tuple[int, int, int, int]] = []
     for item in data:
         try:
-            x = float(item["x"]) * src_w
-            y = float(item["y"]) * src_h
-            w = float(item["w"]) * src_w
-            h = float(item["h"]) * src_h
+            x = float(item["x"]) * src_w / sent_w
+            y = float(item["y"]) * src_h / sent_h
+            w = float(item["w"]) * src_w / sent_w
+            h = float(item["h"]) * src_h / sent_h
         except (KeyError, TypeError, ValueError):
             continue
         if w <= 1 or h <= 1:
