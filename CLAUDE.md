@@ -98,6 +98,30 @@ merge it yourself; merging stays Dean's call per the rule above.
   21-60 s median ~1.3-1.5k. Clip length now defaults to 10-20 s
   (`JobRequest` / `RegenerateRequest` / Generate more / the Home boxes);
   the picker prompt only changes in those two numbers.
+- **Your take at the end (Oct 2026, standard):** after the 1 Oct change Dean
+  wanted his own commentary on every clip without showing his face. Each
+  clip ends with Pixel -- a retro-TV mascot in the channel's colours
+  (yellow case, black screen with the viewfinder corners, white pixel face,
+  red mouth; chosen from 4 sandbox designs) -- popping in small at the
+  bottom left over the clip's held last frame and saying one short line in
+  Dean's cloned voice, 1-4 words of it in a bubble. The clip itself is
+  rendered exactly as before; `clipper/mascot_take.py` appends the tail
+  (`apply`: clip + tail re-encoded into the same file, the take-free clip
+  kept as `<job>/_takes/<clip>.notake.mp4` so takes never stack and
+  `remove` restores it; voice in `_takes/<clip>.wav`). Claude suggests the
+  line (`suggest`: `say` <= 10 words, his opinion or a question to viewers,
+  never a description of the clip; `text` <= 4 words; a separate prompt,
+  the picker's prompts are untouched; no stock fallback line -- the same
+  line on every clip is the template YouTube doesn't count).
+  `JobRequest.mascot_take` (default on, Home checkbox "📺 Your take at the
+  end"); `_queue_takes` runs after a job's / Generate more's new clips are
+  done, one at a time under `_voice_busy`, and after a facecam / card-style
+  re-render (`redo=True`: same words and voice put back, nothing new
+  generated). `clip["take"]` = {status queued/working/done/error/off/
+  removed, say, text, tail, base_duration}; `clip["duration"]` includes the
+  tail. Home clip cards: ✏️ Change take (his own words), 🔄 New suggestion,
+  🗑 Remove take; nothing changes once posted. Without a voice sample the
+  take is skipped ("off"). Mascot sizes: 380 px box, bottom at y 1650.
 - YouTube announced on 1 Oct 2026 that the Shorts feed will cut reach for
   channels that mainly re-upload others' clips without significant changes
   (voice-over describing the clip, minor edits and templates don't count;

@@ -38,6 +38,7 @@ from clipper import documentary
 from clipper import longform
 from clipper import longform_video
 from clipper import voice_clone
+from clipper import mascot_take
 from clipper import clip_search
 from clipper import visual_sources
 from clipper import longform_lessons
@@ -300,6 +301,10 @@ class JobRequest(BaseModel):
     # handle, the hook as the post text, then the video; see
     # captions.build_card_ass). Any clip can be switched back by hand.
     card_style: bool = True
+    # Dean's take at the end of each clip: Pixel the mascot says one short
+    # line in his cloned voice (clipper/mascot_take.py). Added after the
+    # clips are done; any clip's take can be changed or removed.
+    mascot_take: bool = True
     # Which tracked-streamer list / YouTube account / on-clip brand this job
     # belongs to (see CHANNEL_PROFILES). Defaults to the original channel so
     # every existing client that doesn't send this keeps working unchanged.
@@ -493,7 +498,8 @@ def _run_job(job_id: str) -> None:
     req.max_len = min(req.max_len, MAX_SHORT_SECONDS)
     profile = _profile_or_default(req.channel_profile)
     _set(job_id, hook_text=req.hook_text, pacing=req.pacing, teaser=req.teaser, branding=req.branding,
-         channel_profile=profile, irl_layout=req.irl_layout, card_style=req.card_style)
+         channel_profile=profile, irl_layout=req.irl_layout, card_style=req.card_style,
+         mascot_take=req.mascot_take)
     out_dir = BASE_DIR / job_id
     raw_dir = out_dir / "_source"
     cancel = lambda: _check_cancel(job_id)  # noqa: E731
@@ -603,6 +609,7 @@ def _run_job(job_id: str) -> None:
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s).")
+    _queue_takes(job_id, [c["file"] for c in clips_meta])
 
 
 def _render_atomic(
@@ -1485,6 +1492,9 @@ def _run_regenerate(job_id: str, req: dict) -> None:
     )
     _progress(job_id, 1.0)
     _set(job_id, state="done", message=f"Done. {len(clips_meta)} clip(s) total.")
+    # Only the new clips: the earlier ones already have (or chose not to have) a take.
+    old_files = {c.get("file") for c in existing_clips}
+    _queue_takes(job_id, [c["file"] for c in clips_meta if c.get("file") not in old_files])
 
 
 def _run_manual_facecam_render(job_id: str, req: dict) -> None:
@@ -1550,6 +1560,7 @@ def _run_manual_facecam_render(job_id: str, req: dict) -> None:
     if failed:
         message += " Skipped " + "; ".join(failed)
     _set(job_id, state="done", message=message)
+    _queue_takes(job_id, updated, redo=True)  # the re-render dropped the take; put it back
 
 
 def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
@@ -1625,6 +1636,7 @@ def _run_manual_letterbox_render(job_id: str, req: dict) -> None:
     if failed:
         message += " Skipped " + "; ".join(failed)
     _set(job_id, state="done", message=message)
+    _queue_takes(job_id, updated, redo=True)  # the re-render dropped the take; put it back
 
 
 def _keepalive_loop(stop_event: threading.Event) -> None:
@@ -7091,6 +7103,190 @@ def balls_settings(req: BallsSettings) -> dict:
         threading.Thread(target=_balls_autopilot_tick, args=("settings",), daemon=True).start()
     return out
 
+# ---- Dean's take at the end of each clip (clipper/mascot_take.py): Pixel,
+# the retro-TV mascot, says one short line in Dean's cloned voice after the
+# clip. Added on its own after a job's clips are done (JobRequest.mascot_take,
+# on by default), and put back after a facecam / card-style re-render, which
+# rewrites the clip without it. Files: <job>/_takes/<clip>.wav (the voice)
+# and <clip>.notake.mp4 (the clip as rendered, so a take never stacks and
+# can be removed).
+_take_threads_lock = threading.Lock()
+
+
+def _take_paths(job_id: str, filename: str) -> tuple:
+    d = BASE_DIR / job_id / "_takes"
+    stem = Path(filename).stem
+    return d, d / f"{stem}.wav", d / f"{stem}.notake.mp4"
+
+
+def _set_take(job_id: str, filename: str, **take) -> Optional[dict]:
+    """Merge `take` into the clip's take record (and set its duration when
+    given). Returns the clip, or None if it's gone."""
+    duration = take.pop("_duration", None)
+    found = None
+    with jobs_lock:
+        for c in (jobs.get(job_id) or {}).get("clips") or []:
+            if c.get("file") == filename:
+                c["take"] = {**(c.get("take") or {}), **take}
+                if duration is not None:
+                    c["duration"] = duration
+                found = dict(c)
+    _persist(job_id)
+    return found
+
+
+def _take_line_for(job_id: str, clip: dict) -> dict:
+    """Claude's suggested line for a clip, from its title, why it was
+    picked and what was said in it."""
+    with jobs_lock:
+        source_title = (jobs.get(job_id) or {}).get("source_title") or ""
+    words = _cached_words(BASE_DIR / job_id / "_source").get(clip.get("window_index")) or []
+    a, b = float(clip.get("start") or 0), float(clip.get("end") or 0)
+    said = " ".join(w.text for w in words if w.start >= a - 0.05 and w.end <= b + 0.05)[:1200]
+    return mascot_take.suggest(clip.get("upload_title") or clip.get("title") or "", clip.get("reason") or "",
+                               said, source_title)
+
+
+def _make_take(job_id: str, filename: str, say: Optional[str] = None, text: Optional[str] = None,
+               redo: bool = False) -> None:
+    """One clip's take, start to finish. `redo` puts the existing take back
+    on a clip that was just re-rendered (same words and voice, nothing new
+    is generated). Never raises: problems land in clip["take"]."""
+    with jobs_lock:
+        clip = next((dict(c) for c in (jobs.get(job_id) or {}).get("clips") or [] if c.get("file") == filename), None)
+    if clip is None:
+        return
+    old = clip.get("take") or {}
+    d, voice, backup = _take_paths(job_id, filename)
+    path = BASE_DIR / job_id / filename
+    try:
+        if redo:
+            if not voice.is_file() or not old.get("say"):
+                _set_take(job_id, filename, status="error", error="The re-render dropped the take and its voice file is gone -- add it again.")
+                return
+            _set_take(job_id, filename, status="working")
+            # The clip was just rendered again without its take: that new
+            # render is now the clip "without a take".
+            backup.unlink(missing_ok=True)
+            say, text = old.get("say"), old.get("text")
+        else:
+            st = voice_clone.status(_voice_dir)
+            if not st["ready"]:
+                _set_take(job_id, filename, status="off",
+                          error="Your AI voice isn't set up yet (long-form page → Your AI voice), so no take was added.")
+                return
+            _set_take(job_id, filename, status="working", error=None)
+            if not say:
+                line = _take_line_for(job_id, clip)
+                say, text = line["say"], line["text"]
+                if not say:
+                    raise RuntimeError("Claude didn't come up with a line -- type one yourself")
+            norm = mascot_take.normalize(say, text)
+            say, text = norm["say"], norm["text"]
+            d.mkdir(parents=True, exist_ok=True)
+            raw = d / f".{voice.stem}_24k.wav"
+            if not _voice_busy.acquire(timeout=900):
+                raise RuntimeError("the AI voice was busy for too long -- try again")
+            try:
+                voice_clone.synthesize(_voice_dir, say, raw)
+                longform.to_wav(raw, voice)
+            finally:
+                _voice_busy.release()
+                raw.unlink(missing_ok=True)
+        res = mascot_take.apply(path, voice, text, backup)
+        base = mascot_take.probe(backup)["duration"]
+        _set_take(job_id, filename, status="done", say=say, text=text, error=None, tail=res["tail"],
+                  base_duration=round(base, 2), made_at=time.time(), _duration=res["duration"])
+    except Exception as e:  # noqa: BLE001 - a take must never break a clip
+        print(f"[take] {job_id}/{filename}: {e}", flush=True)
+        _set_take(job_id, filename, status="error", error=str(e)[-300:],
+                  **({"say": say, "text": text} if say else {}))
+
+
+def _queue_takes(job_id: str, filenames: List[str], redo: bool = False) -> None:
+    """Takes for these clips, one after another in the background (the
+    voice model does one line at a time)."""
+    with jobs_lock:
+        job = jobs.get(job_id) or {}
+        wanted = job.get("mascot_take", True) or redo
+        clips = {c.get("file"): c for c in job.get("clips") or []}
+    if not wanted:
+        return
+    todo = []
+    for f in filenames:
+        c = clips.get(f)
+        if not c or c.get("promo") or c.get("is_recap") or c.get("ranking"):
+            continue
+        status = (c.get("take") or {}).get("status")
+        if redo and status != "done":
+            continue
+        if not redo and status in ("done", "removed", "working", "queued"):
+            continue
+        todo.append(f)
+    if not todo:
+        return
+    for f in todo:
+        _set_take(job_id, f, status="queued", error=None)
+
+    def run() -> None:
+        with _take_threads_lock:  # jobs finishing close together queue up here
+            for f in todo:
+                _make_take(job_id, f, redo=redo)
+    threading.Thread(target=run, daemon=True).start()
+
+
+class TakeRequest(BaseModel):
+    say: Optional[str] = None
+    text: Optional[str] = None
+
+
+@protected.post("/api/jobs/{job_id}/clips/{filename}/take")
+def set_clip_take(job_id: str, filename: str, req: TakeRequest) -> dict:
+    """Add or change a clip's take: with `say`, Dean's own words (and `text`
+    for the screen, else the start of `say`); without, a new suggestion."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job["state"] not in TERMINAL_STATES:
+            raise HTTPException(409, "wait for the job to finish first")
+        clip = next((c for c in job.get("clips") or [] if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if (clip.get("take") or {}).get("status") in ("working", "queued"):
+            raise HTTPException(409, "the take is already being made -- give it a moment")
+        if clip.get("youtube_video_id"):
+            raise HTTPException(409, "This clip is already on YouTube.")
+    st = voice_clone.status(_voice_dir)
+    if not st["ready"]:
+        raise HTTPException(409, "Your AI voice isn't set up yet -- record your sample on the long-form page first.")
+    say = " ".join((req.say or "").split()) or None
+    if say and len(say.split()) > mascot_take.SAY_MAX_WORDS:
+        raise HTTPException(400, f"Keep it to {mascot_take.SAY_MAX_WORDS} words or fewer -- short works best.")
+    _set_take(job_id, filename, status="working", error=None)
+    threading.Thread(target=_make_take, args=(job_id, filename, say, req.text), daemon=True).start()
+    with jobs_lock:
+        return dict(next(c for c in jobs[job_id]["clips"] if c.get("file") == filename))
+
+
+@protected.delete("/api/jobs/{job_id}/clips/{filename}/take")
+def remove_clip_take(job_id: str, filename: str) -> dict:
+    with jobs_lock:
+        job = jobs.get(job_id)
+        clip = next((c for c in (job or {}).get("clips") or [] if c.get("file") == filename), None)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if (clip.get("take") or {}).get("status") in ("working", "queued"):
+            raise HTTPException(409, "the take is being made -- wait a moment")
+        if clip.get("youtube_video_id"):
+            raise HTTPException(409, "This clip is already on YouTube.")
+    _, _, backup = _take_paths(job_id, filename)
+    dur = mascot_take.remove(BASE_DIR / job_id / filename, backup)
+    out = _set_take(job_id, filename, status="removed", error=None,
+                    **({"_duration": dur} if dur is not None else {}))
+    return out or {}
+
+
 app.include_router(protected)
 
 
@@ -7273,6 +7469,12 @@ _CHANNEL_HOME_TEMPLATE = """<!doctype html>
   .clip-primary-row { display: flex; gap: 8px; margin-top: 12px; }
   .clip-primary-row button { flex: 1; margin-top: 0; padding: 10px 14px; font-size: 0.86rem; }
   .clip-secondary-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .take-row { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; }
+  .take-label { line-height: 1.4; }
+  .take-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .take-btns button { margin-top: 0; padding: 6px 10px; font-size: 0.8rem; background: transparent; color: var(--muted);
+    border: 1px solid var(--border); }
+  .take-btns button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); opacity: 1; }
   .clip-secondary-row button {
     flex: 1; margin-top: 0; padding: 8px 10px; font-size: 0.78rem; font-weight: 600;
     background: transparent; color: var(--muted); border: 1px solid var(--border);
@@ -7437,6 +7639,11 @@ __NAV_LINKS__
 <div class="checkbox-row">
   <input id="card_style" type="checkbox" checked>
   <label for="card_style">Card style<div class="hint">Puts the whole-scene clips on a white card like a post: your picture, channel name and handle, the hook text on top, then the video. Any clip can be switched back with its 🪪 button.</div></label>
+</div>
+
+<div class="checkbox-row">
+  <input id="mascot_take" type="checkbox" checked>
+  <label for="mascot_take">📺 Your take at the end<div class="hint">After each clip, Pixel (the TV mascot) pops up and says one short line in your AI voice: your take or a question to viewers. Claude suggests it; change or remove it on any clip. That bit of your own commentary is what YouTube counts as original.</div></label>
 </div>
 
 <div class="checkbox-row">
@@ -8075,6 +8282,48 @@ loadJobsList();
 if (jobsTimer) clearInterval(jobsTimer);
 jobsTimer = setInterval(loadJobsList, 5000);
 
+let takeTimer = null;
+// Pixel's take at the end of a clip (clipper/mascot_take.py): what it says,
+// and buttons to change, redo or remove it.
+function takeRow(jobId, c) {
+  const tk = c.take || {};
+  const row = document.createElement('div');
+  row.className = 'take-row';
+  const busy = ['queued', 'working'].includes(tk.status);
+  const label = document.createElement('div');
+  label.className = 'take-label';
+  label.textContent = tk.status === 'done' ? `📺 Your take: “${tk.say}”` + (tk.text && tk.text !== tk.say ? ` · on screen: “${tk.text}”` : '')
+    : busy ? '📺 Adding your take (your AI voice reads it, about 30 seconds)…'
+    : tk.status === 'error' ? '📺 The take didn’t work: ' + (tk.error || 'unknown error')
+    : tk.status === 'off' ? '📺 ' + (tk.error || 'No take.')
+    : tk.status === 'removed' ? '📺 No take on this clip.' : '📺 No take yet.';
+  row.appendChild(label);
+  if (busy || c.youtube_video_id) return row;
+  const send = async (method, body, btn) => {
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/clips/${c.file}/take`, {
+        method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.detail || 'That didn’t work.'); }
+      poll(jobId);
+    } finally { btn.disabled = false; }
+  };
+  const btns = document.createElement('div');
+  btns.className = 'take-btns';
+  const mk = (text, fn) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = text; b.addEventListener('click', () => fn(b)); btns.appendChild(b); };
+  mk(tk.status === 'done' ? '✏️ Change take' : '✏️ Write my take', (b) => {
+    const say = prompt('What should Pixel say in your voice? Your take or a question, 10 words max:', tk.say || '');
+    if (say === null || !say.trim()) return;
+    const text = prompt('Words on screen (1-4):', tk.text && tk.say === say ? tk.text : say.split(/\\s+/).slice(0, 4).join(' '));
+    if (text === null) return;
+    send('POST', { say, text }, b);
+  });
+  mk(tk.status === 'done' ? '🔄 New suggestion' : '📺 Suggest a take', (b) => send('POST', {}, b));
+  if (tk.status === 'done') mk('🗑 Remove take', (b) => { if (confirm('Remove the take from this clip?')) send('DELETE', null, b); });
+  row.appendChild(btns);
+  return row;
+}
+
 async function attachToJob(jobId) {
   currentJobId = jobId;
   if (timer) clearInterval(timer);
@@ -8113,6 +8362,7 @@ async function submitJob() {
     branding: document.getElementById('branding').checked,
     irl_layout: document.getElementById('irl_layout').checked,
     card_style: document.getElementById('card_style').checked,
+    mascot_take: document.getElementById('mascot_take').checked,
     channel_profile: currentProfile,
   };
   const resp = await fetch('/api/jobs', {
@@ -8889,7 +9139,7 @@ async function poll(jobId) {
     preview.controls = true;
     preview.preload = 'metadata';
     preview.style.cssText = 'width:100%;max-width:360px;border-radius:8px;background:var(--track);display:block;margin:8px 0';
-    preview.src = `/api/jobs/${jobId}/clips/${c.file}`;
+    preview.src = `/api/jobs/${jobId}/clips/${c.file}` + ((c.take || {}).made_at ? `?t=${c.take.made_at}` : '');
     div.appendChild(preview);
 
     const titleRow = document.createElement('div');
@@ -8949,6 +9199,8 @@ async function poll(jobId) {
       uploadBtn.addEventListener('click', () => openYoutubeUploadModal(jobId, c));
       primaryRow.appendChild(uploadBtn);
       div.appendChild(primaryRow);
+
+      if (!c.promo && !c.is_recap && !c.ranking) div.appendChild(takeRow(jobId, c));
 
       const secondaryRow = document.createElement('div');
       secondaryRow.className = 'clip-secondary-row';
@@ -9076,6 +9328,11 @@ async function poll(jobId) {
   if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
     if (timer) clearInterval(timer);
     setRunning(false);
+    // Takes are made after the clips are done: check back until they're in.
+    clearTimeout(takeTimer);
+    if ((job.clips || []).some(c => ['queued', 'working'].includes((c.take || {}).status))) {
+      takeTimer = setTimeout(() => { if (currentJobId === job.id) poll(job.id); }, 4000);
+    }
     cancelBtn.disabled = false;
     cancelBtn.textContent = 'Emergency stop';
     deleteBtn.style.display = (job.clips || []).length ? 'block' : 'none';
