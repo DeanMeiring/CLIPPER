@@ -6030,17 +6030,19 @@ def _balls_make(vid: str) -> None:
             fmt = _balls_format_for(at, settings)
         except ValueError:
             pass
+        fmt = _balls_debut_kind(_balls.videos()) or fmt
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
                                           note="Finding the pictures..."))
-    pack = _balls_pick_pack(vid, opts.get("pack"))
-    if pack:
-        ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
+    if fmt not in ball_evolution.NO_PACK:          # duel / race: the balls are the contestants
+        pack = _balls_pick_pack(vid, opts.get("pack"))
+        if pack:
+            ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_pick_song(recipe, opts.get("song"))
-    if fmt != "merge":
+    if fmt != "merge" and fmt not in ball_evolution.NO_PACK:
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
     tmp = out_dir / "video.part.mp4"
@@ -6163,12 +6165,15 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
 
 
 def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
-    """The pictures for a video: a chosen pack, else the oldest pack no video
-    has used (your uploads first, then GIPHY and starter packs), else a new
-    cursed pack the app makes itself -- from a free (CC0) photo
-    (ball_photos, needs the Claude key), else from the bundled emoji
-    (ball_cursed) -- else the pack used longest ago, else None = the
-    theme's emoji. Packs Claude's check said no to are skipped."""
+    """The pictures for a video: a chosen pack, else your oldest unused
+    upload, else a pack of things people know (Dean, 19 Oct: phones,
+    countries... not just emojis) -- the bundled logo and flag packs, an
+    unused one first, then the one used longest ago. Only without those: the
+    oldest unused other pack (GIPHY, cursed starters), else a new cursed pack
+    the app makes itself -- from a free (CC0) photo (ball_photos, needs the
+    Claude key), else from the bundled emoji (ball_cursed) -- else the pack
+    used longest ago, else None = the theme's emoji. Packs Claude's check
+    said no to are skipped."""
     if choice == "emoji":
         return None
     pack = None
@@ -6178,7 +6183,7 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
         except (KeyError, OSError, ValueError):
             pack = None
     _balls_seed_starters()
-    pack = pack or _ball_packs.next_unused()
+    pack = pack or _ball_packs.next_upload() or _ball_packs.next_known() or _ball_packs.next_unused()
     if pack is None and os.environ.get("ANTHROPIC_API_KEY"):
         try:
             pack = _balls_photo_pack()
@@ -6264,7 +6269,11 @@ def _balls_view(v: dict) -> dict:
     except KeyError:
         c["has_video"] = False
     r = c.get("recipe") or {}
-    if r.get("theme") in ball_evolution.THEMES:
+    if r.get("format") in ball_evolution.NO_PACK:
+        song = r.get("song") if r.get("bounce_sound") == "song" else None
+        c["chips"] = [x for x in (BALLS_FORMAT_LABELS.get(r["format"]), r.get("hook"),
+                                  song and f"🎵 {song.get('name') or 'song'}") if x]
+    elif r.get("theme") in ball_evolution.THEMES:
         theme = ball_evolution.THEMES[r["theme"]]
         fmt = r.get("format") or "evolve"
         c["chips"] = [BALLS_FORMAT_LABELS.get(fmt, fmt), f"{ball_evolution.emoji_char(theme['chain'][0][0])} {r['theme']}"]
@@ -6287,7 +6296,7 @@ def _balls_view(v: dict) -> dict:
 
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-                         "spiral", "rays", "box", "zen", "trail")
+                         "spiral", "rays", "box", "zen", "trail", "duel", "race")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6297,16 +6306,26 @@ BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "cente
 # box +3 360K, spike jaw 106K, "every bounce it evolves" 150K). 22 slots:
 # escape x3, breakin x2, spiral x2, center x2, rays x2, box x2, zen x2,
 # trail x2, merge, spikes, shrink, jaws, touch.
-BALLS_FORMAT_CYCLE = ("escape", "spiral", "trail", "center", "breakin", "rays", "box", "merge", "escape", "zen",
-                      "spikes", "spiral", "breakin", "trail", "center", "rays", "shrink", "box", "escape", "jaws",
-                      "touch", "zen")
+# Then (19 Oct) the ball duel and "first to N" race (clipper/ball_duel.py):
+# 25 slots, duel x2 and race x1 added.
+BALLS_FORMAT_CYCLE = ("escape", "spiral", "duel", "trail", "center", "breakin", "rays", "box", "merge", "escape",
+                      "race", "zen", "spikes", "spiral", "breakin", "duel", "trail", "center", "rays", "shrink",
+                      "box", "escape", "jaws", "touch", "zen")
+# New kinds go first (Dean, 19 Oct: "the newest one added takes precedence"
+# -- he didn't want to wait days for the rotation to reach them): until each
+# has this many videos made since BALLS_DEBUT_SINCE, the autopilot's next
+# video is the one furthest from its count. Merge is here for its new
+# pictures (logos, flags) and cursed noises.
+BALLS_DEBUT = {"duel": 3, "race": 2, "merge": 2}
+BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
                        "shrink": "🔴 Ball grows every bounce", "jaws": "⏱ 4 seconds to escape",
                        "spiral": "🌀 Will the ball multiply?", "rays": "🌈 Rays in a parabola",
                        "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something",
-                       "trail": "🌈 Every bounce, it evolves"}
+                       "trail": "🌈 Every bounce, it evolves", "duel": "⚔️ Ball duel",
+                       "race": "🏁 First to N wins"}
 
 
 def _balls_tz():
@@ -6322,6 +6341,18 @@ def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
     pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
     i = local.date().toordinal() * len(times) + pos
     return BALLS_FORMAT_CYCLE[i % len(BALLS_FORMAT_CYCLE)]
+
+
+def _balls_debut_kind(videos: List[dict]) -> Optional[str]:
+    """The new kind the next autopilot video should be (BALLS_DEBUT), or
+    None once each has had its videos."""
+    made = {k: 0 for k in BALLS_DEBUT}
+    for v in videos:
+        fmt = (v.get("recipe") or {}).get("format")
+        if fmt in made and v.get("status") != "error" and (v.get("started_at") or 0) >= BALLS_DEBUT_SINCE:
+            made[fmt] += 1
+    left = [k for k in BALLS_DEBUT if made[k] < BALLS_DEBUT[k]]
+    return min(left, key=lambda k: made[k] / BALLS_DEBUT[k]) if left else None
 
 
 def _balls_next_format(s: Optional[dict] = None) -> str:
@@ -6429,7 +6460,8 @@ def balls_state() -> dict:
             by_slot[key] = v
     for dt in _balls_slots_ahead(s, max(1, int(s.get("ahead_days") or 2)))[:6]:
         v = by_slot.get(_slot_key(dt))
-        upcoming.append({"at": dt.isoformat(), "format": _balls_format_for(dt, s),
+        upcoming.append({"at": dt.isoformat(),
+                         "format": ((v or {}).get("recipe") or {}).get("format") or _balls_format_for(dt, s),
                          "video": v["id"] if v else None, "status": _balls_view(v)["status"] if v else None,
                          "title": (v or {}).get("title")})
     autopilot = {"on": bool(s.get("autopilot")), "slots": _balls_slot_times(s), "upcoming": upcoming,
@@ -12075,7 +12107,7 @@ __NAV_LINKS__
       <div><label for="m-theme">Theme</label><select id="m-theme"></select></div>
       <div class="evolve-only"><label for="m-course">Course</label><select id="m-course"></select></div>
       <div class="evolve-only"><label for="m-jar">Jar</label><select id="m-jar"></select></div>
-      <div><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
+      <div class="pack-pick"><label for="m-pack">Pictures</label><select id="m-pack"></select></div>
       <div class="song-pick"><label for="m-song">Song</label><select id="m-song"></select></div>
       <div><label for="m-count">How many</label><select id="m-count"><option value="1">1</option><option value="3">3</option><option value="7">7 (a week)</option></select></div>
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
@@ -12260,6 +12292,8 @@ function songPickState() {
 $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
+  // the duel and the race have no pictures: the balls are the contestants
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {

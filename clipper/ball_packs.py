@@ -42,6 +42,15 @@ GIPHY_SEARCH = "https://api.giphy.com/v1/stickers/search"
 
 # ---- images ----------------------------------------------------------------
 
+# Starter packs of things people know (Dean, 19 Oct: phones, countries and
+# stuff like that, not just emojis): the bundled logo and flag packs.
+KNOWN_TEMPLATES = ("logos_", "flags_")
+
+
+def is_known(pack: dict) -> bool:
+    return str(pack.get("template") or "").startswith(KNOWN_TEMPLATES)
+
+
 def normalize(data: bytes) -> Image.Image:
     """Any picture (png/jpg/webp/gif, first frame) -> RGBA, see-through
     margins trimmed, at most MAX_SIDE px."""
@@ -132,10 +141,17 @@ class PackStore:
         fresh.sort(key=lambda p: (p.get("source") != "upload", p.get("created_at") or 0))
         return fresh[0] if fresh else None
 
-    def least_used(self) -> Optional[dict]:
-        """The pack used longest ago (to use again when nothing is new)."""
-        ok = [p for p in self.packs() if not p.get("flagged")]
+    def least_used(self, known: bool = False) -> Optional[dict]:
+        """The pack used longest ago (to use again when nothing is new);
+        known=True: only the known-pictures packs (logos, flags)."""
+        ok = [p for p in self.packs() if not p.get("flagged") and (not known or is_known(p))]
         return min(ok, key=lambda p: (p.get("used_at") or 0, p.get("created_at") or 0)) if ok else None
+
+    def next_known(self) -> Optional[dict]:
+        """A known-pictures pack (logos, flags): the oldest unused one, else
+        the one used longest ago."""
+        fresh = [p for p in self.packs() if is_known(p) and not p.get("used_by") and not p.get("flagged")]
+        return fresh[0] if fresh else self.least_used(known=True)
 
     def recipe_pack(self, pack: dict) -> dict:
         """What goes into a video's recipe: enough to draw it from disk."""

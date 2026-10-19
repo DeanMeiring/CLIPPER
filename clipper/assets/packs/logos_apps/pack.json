@@ -1,0 +1,48 @@
+{
+ "key": "logos_apps",
+ "title": "Which app wins?",
+ "hook": "Which app is the final form?",
+ "credit": "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them.",
+ "items": [
+  {
+   "name": "Pinterest",
+   "file": "01.webp",
+   "logo": "pinterest"
+  },
+  {
+   "name": "Reddit",
+   "file": "02.webp",
+   "logo": "reddit"
+  },
+  {
+   "name": "Snapchat",
+   "file": "03.webp",
+   "logo": "snapchat"
+  },
+  {
+   "name": "X",
+   "file": "04.webp",
+   "logo": "x"
+  },
+  {
+   "name": "Facebook",
+   "file": "05.webp",
+   "logo": "facebook"
+  },
+  {
+   "name": "Instagram",
+   "file": "06.webp",
+   "logo": "instagram"
+  },
+  {
+   "name": "TikTok",
+   "file": "07.webp",
+   "logo": "tiktok"
+  },
+  {
+   "name": "YouTube",
+   "file": "08.webp",
+   "logo": "youtube"
+  }
+ ]
+}

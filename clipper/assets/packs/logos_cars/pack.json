@@ -1,0 +1,48 @@
+{
+ "key": "logos_cars",
+ "title": "Which car brand wins?",
+ "hook": "Which car brand is the final form?",
+ "credit": "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them.",
+ "items": [
+  {
+   "name": "Fiat",
+   "file": "01.webp",
+   "logo": "fiat"
+  },
+  {
+   "name": "Kia",
+   "file": "02.webp",
+   "logo": "kia"
+  },
+  {
+   "name": "Toyota",
+   "file": "03.webp",
+   "logo": "toyota"
+  },
+  {
+   "name": "Ford",
+   "file": "04.webp",
+   "logo": "ford"
+  },
+  {
+   "name": "Audi",
+   "file": "05.webp",
+   "logo": "audi"
+  },
+  {
+   "name": "BMW",
+   "file": "06.webp",
+   "logo": "bmw"
+  },
+  {
+   "name": "Ferrari",
+   "file": "07.webp",
+   "logo": "ferrari"
+  },
+  {
+   "name": "Bugatti",
+   "file": "08.webp",
+   "logo": "bugatti"
+  }
+ ]
+}
