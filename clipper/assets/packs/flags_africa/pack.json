@@ -1,0 +1,48 @@
+{
+ "key": "flags_africa",
+ "title": "Best country in Africa?",
+ "hook": "Which country wins Africa?",
+ "credit": "Flags: flag-icons (MIT)",
+ "items": [
+  {
+   "name": "Kenya",
+   "file": "01.webp",
+   "flag": "ke"
+  },
+  {
+   "name": "Ghana",
+   "file": "02.webp",
+   "flag": "gh"
+  },
+  {
+   "name": "Morocco",
+   "file": "03.webp",
+   "flag": "ma"
+  },
+  {
+   "name": "Egypt",
+   "file": "04.webp",
+   "flag": "eg"
+  },
+  {
+   "name": "Senegal",
+   "file": "05.webp",
+   "flag": "sn"
+  },
+  {
+   "name": "Cameroon",
+   "file": "06.webp",
+   "flag": "cm"
+  },
+  {
+   "name": "Nigeria",
+   "file": "07.webp",
+   "flag": "ng"
+  },
+  {
+   "name": "South Africa",
+   "file": "08.webp",
+   "flag": "za"
+  }
+ ]
+}

@@ -1,0 +1,48 @@
+{
+ "key": "logos_phones",
+ "title": "Which phone brand wins?",
+ "hook": "Which phone brand is the final form?",
+ "credit": "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them.",
+ "items": [
+  {
+   "name": "Nokia",
+   "file": "01.webp",
+   "logo": "nokia"
+  },
+  {
+   "name": "Motorola",
+   "file": "02.webp",
+   "logo": "motorola"
+  },
+  {
+   "name": "Oppo",
+   "file": "03.webp",
+   "logo": "oppo"
+  },
+  {
+   "name": "Huawei",
+   "file": "04.webp",
+   "logo": "huawei"
+  },
+  {
+   "name": "Xiaomi",
+   "file": "05.webp",
+   "logo": "xiaomi"
+  },
+  {
+   "name": "Google",
+   "file": "06.webp",
+   "logo": "google"
+  },
+  {
+   "name": "Samsung",
+   "file": "07.webp",
+   "logo": "samsung"
+  },
+  {
+   "name": "Apple",
+   "file": "08.webp",
+   "logo": "apple"
+  }
+ ]
+}

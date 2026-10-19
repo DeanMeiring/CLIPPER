@@ -1,0 +1,48 @@
+{
+ "key": "flags_asia",
+ "title": "Best country in Asia?",
+ "hook": "Which country wins Asia?",
+ "credit": "Flags: flag-icons (MIT)",
+ "items": [
+  {
+   "name": "Thailand",
+   "file": "01.webp",
+   "flag": "th"
+  },
+  {
+   "name": "Vietnam",
+   "file": "02.webp",
+   "flag": "vn"
+  },
+  {
+   "name": "Indonesia",
+   "file": "03.webp",
+   "flag": "id"
+  },
+  {
+   "name": "Philippines",
+   "file": "04.webp",
+   "flag": "ph"
+  },
+  {
+   "name": "India",
+   "file": "05.webp",
+   "flag": "in"
+  },
+  {
+   "name": "Turkey",
+   "file": "06.webp",
+   "flag": "tr"
+  },
+  {
+   "name": "South Korea",
+   "file": "07.webp",
+   "flag": "kr"
+  },
+  {
+   "name": "Japan",
+   "file": "08.webp",
+   "flag": "jp"
+  }
+ ]
+}

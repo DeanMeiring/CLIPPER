@@ -1,0 +1,48 @@
+{
+ "key": "logos_gaming",
+ "title": "Which gaming brand wins?",
+ "hook": "Which gaming brand is the final form?",
+ "credit": "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them.",
+ "items": [
+  {
+   "name": "Atari",
+   "file": "01.webp",
+   "logo": "atari"
+  },
+  {
+   "name": "Sega",
+   "file": "02.webp",
+   "logo": "sega"
+  },
+  {
+   "name": "EA",
+   "file": "03.webp",
+   "logo": "ea"
+  },
+  {
+   "name": "Ubisoft",
+   "file": "04.webp",
+   "logo": "ubisoft"
+  },
+  {
+   "name": "Riot Games",
+   "file": "05.webp",
+   "logo": "riotgames"
+  },
+  {
+   "name": "Steam",
+   "file": "06.webp",
+   "logo": "steam"
+  },
+  {
+   "name": "PlayStation",
+   "file": "07.webp",
+   "logo": "playstation"
+  },
+  {
+   "name": "Rockstar",
+   "file": "08.webp",
+   "logo": "rockstargames"
+  }
+ ]
+}

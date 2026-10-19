@@ -1,0 +1,48 @@
+{
+ "key": "logos_sports",
+ "title": "Which sports brand wins?",
+ "hook": "Which sports brand is the final form?",
+ "credit": "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them.",
+ "items": [
+  {
+   "name": "Fila",
+   "file": "01.webp",
+   "logo": "fila"
+  },
+  {
+   "name": "Reebok",
+   "file": "02.webp",
+   "logo": "reebok"
+  },
+  {
+   "name": "Puma",
+   "file": "03.webp",
+   "logo": "puma"
+  },
+  {
+   "name": "New Balance",
+   "file": "04.webp",
+   "logo": "newbalance"
+  },
+  {
+   "name": "Under Armour",
+   "file": "05.webp",
+   "logo": "underarmour"
+  },
+  {
+   "name": "Adidas",
+   "file": "06.webp",
+   "logo": "adidas"
+  },
+  {
+   "name": "Jordan",
+   "file": "07.webp",
+   "logo": "jordan"
+  },
+  {
+   "name": "Nike",
+   "file": "08.webp",
+   "logo": "nike"
+  }
+ ]
+}

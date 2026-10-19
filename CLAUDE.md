@@ -957,6 +957,47 @@ merge it yourself; merging stays Dean's call per the rule above.
   `MAX_BALLS` 600: the room clears ~11-25 s after the ball gets in, ~5 in
   12 seeds pass `pick_seed`, ~5 min to make a 34 s video.
 
+- **Duel, race, known pictures, cursed merges (19 Oct):** Dean sent reels
+  (a "Bouncing Ball Duel" with 1M likes, "First to 300 wins" with 149K) and
+  his weakest Shorts (emoji packs from before songs were on every kind).
+  `clipper/ball_duel.py` (`NO_PACK` kinds: no picture pack, the balls are
+  the contestants; `be._parts` dispatches; own draws in `duel_recipe` /
+  `race_recipe`, so other kinds' recipes are unchanged): `duel` -- two balls
+  with faces ("Cherry Red VS Ocean Blue", `COLOURS`), 10 hearts, weapons
+  appear in grey rings; Dean wanted mostly guns that fire once: pistol,
+  shotgun (7 pellets, max 2 hearts), minigun (1.2 s burst, max 3), rocket
+  launcher (homing, 3 hearts close / 2 at the edge), drawn in `_gun` (the
+  emoji set only has a water pistol); a knife (2 hits) and a shield (blocks
+  2, hurts on contact) now and then. Faces react, balls crack, the loser
+  shatters, "X WINS!". `sim.ok` = a comeback (winner 2+ hearts behind at
+  some point), winner on <= 3 hearts, both had 2+ weapons; `sim.max_gap`
+  (longest stretch without a hit) replaces the unlock gap in `simulate`;
+  ~1 seed in 7, `pick_seed` tries 480. `race` -- four plain colour balls
+  (Dean: not phone brands there, and the first try was too fast to
+  follow: 360 -> 640 px/s now); every wall hit ties a line, running into
+  another's lines steals them (a stolen line rests 1.5 s); first to 40
+  (`RACE_TARGET`) wins; ok = 3+ lead changes and second place within 30%.
+  Both play Dean's song straight through (not gated by bounces) under
+  their own numpy sounds (`_sfx_mix`), bed off. Rotation (25 slots) adds
+  duel x2, race x1. **New kinds first:** `BALLS_DEBUT` (duel 3, race 2,
+  merge 2 videos made since `BALLS_DEBUT_SINCE`) -- an autopilot video
+  takes the debut kind furthest from its count before the rotation; after
+  a deploy, "♻️ Remake upcoming" turns the queued videos into them. The
+  plan list shows the kind a made video actually is.
+  **Known pictures:** Dean wants merges (and every kind) with things people
+  know, not emoji. 5 logo packs (`logos_phones/apps/cars/gaming/sports`,
+  Simple Icons, CC0 data; logos are trademarks -- Dean's call after being
+  told the risk; the credit line says not made or endorsed by them) and 2
+  more flag packs (Africa, Asia). `_balls_pick_pack`: chosen > unused
+  upload > `next_known` (unused logo/flag pack, else the one used longest
+  ago) > the old order (cursed/photo packs only if no known pack exists).
+  **Cursed merge noises:** `clipper/ball_cursed_sounds.py` (numpy voices:
+  chirp-down meow, dying meow, kitten moan, demon meow, moan, reversed wail,
+  deep laugh, out-of-tune choir, demon growl; small merges short and spaced
+  >= 0.3 s, big ones deep and long). New merge recipes carry
+  `merge_sound: "cursed"`; `mix_audio` then drops the merge puffs and lays
+  `merge_track` over the music. Older recipes sound as before.
+
 ## Instagram posting (Oct 2026)
 
 - Dean pasted Meta's Content Publishing docs and asked to set it up, for

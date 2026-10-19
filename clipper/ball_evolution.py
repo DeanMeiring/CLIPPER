@@ -170,8 +170,9 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 # ---- recipes -----------------------------------------------------------
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-           "spiral", "rays", "box", "zen", "trail")   # escape/touch: ball_circles.py, breakin: ball_breakin.py,
-#                                                                   merge: ball_merge.py
+           "spiral", "rays", "box", "zen", "trail", "duel", "race")   # escape/touch: ball_circles.py,
+#               breakin: ball_breakin.py, merge: ball_merge.py, duel/race: ball_duel.py
+NO_PACK = ("duel", "race")      # the balls are the contestants: no picture pack
 
 
 def recipe_chain(recipe: dict) -> list:
@@ -203,7 +204,7 @@ def apply_pack(recipe: dict, pack: dict) -> dict:
         pass                                   # these keep their own hook: it explains the game
     elif fmt == "breakin":
         name = pack["items"][0]["name"]
-        proper = str(pack.get("template") or "").startswith("flags")      # country names keep their capital
+        proper = str(pack.get("template") or "").startswith(("flags", "logos"))   # countries, brands keep their capital
         recipe["hook"] = rng.choice(BREAKIN_HOOKS).format(item=name if proper else name.lower())
     elif pack.get("hook"):
         recipe["hook"] = pack["hook"]
@@ -268,6 +269,7 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
         recipe.update(backdrop="black", hook=m.choice(MERGE_HOOKS), ending=m.choice(MERGE_ENDINGS),
                       tune=m.choice(tunes), bed="off")
+        recipe["merge_sound"] = "cursed"       # a recipe field: older merge videos sound as they did
     if fmt in ARENA_HOOKS:
         import datetime
         from clipper import ball_merge
@@ -275,7 +277,10 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
         recipe.update(backdrop=a.choice(_BREAKIN_BACKDROP_DRAW), hook=a.choice(ARENA_HOOKS[fmt]),
                       ending=a.choice(ARENA_ENDINGS[fmt]), tune=a.choice(tunes), bed="off", skin="plain")
-    if fmt == "merge" or fmt in ARENA_HOOKS:
+    if fmt in NO_PACK:
+        from clipper import ball_duel
+        (ball_duel.duel_recipe if fmt == "duel" else ball_duel.race_recipe)(recipe)
+    if fmt == "merge" or fmt in ARENA_HOOKS or fmt in NO_PACK:
         # what the bounces play (ball_sounds): the piano tune, a cursed meow
         # that gets deeper, or an original phonk cowbell riff
         recipe["bounce_sound"] = random.Random(f"bounce-sound-{seed}").choices(
@@ -824,6 +829,9 @@ def _parts(recipe: dict):
     if recipe.get("format") in ARENA_HOOKS:
         from clipper import ball_arenas
         return ball_arenas.PARTS[recipe["format"]]
+    if recipe.get("format") in NO_PACK:
+        from clipper import ball_duel
+        return ball_duel.PARTS[recipe["format"]]
     return Sim, Painter
 
 
@@ -837,6 +845,10 @@ def good_end(recipe: dict) -> tuple:
         return (24.0, 46.0)
     if recipe.get("format") in ARENA_HOOKS:
         return (22.0, 48.0)
+    if recipe.get("format") == "duel":
+        return (26.0, 50.0)
+    if recipe.get("format") == "race":
+        return (28.0, 50.0)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -849,6 +861,8 @@ def simulate(recipe: dict) -> dict:
         sim.step()
     times = sorted(sim.unlocked_at.values())
     gap = max((b - a for a, b in zip(times, times[1:])), default=99.0)
+    if hasattr(sim, "max_gap"):
+        gap = sim.max_gap          # duel: the longest stretch without a hit; race: without a lead change
     return {"seed": recipe["seed"], "done_at": sim.done_at and round(sim.done_at, 1),
             "max_gap": round(gap, 1), "best": sim.best, "ok": getattr(sim, "ok", True)}
 
@@ -869,6 +883,9 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
         # the crowned picture wins / the ball survives on only some seeds,
         # and these simulate in ~0.1 s, so try many more
         tries = max(tries, 240)
+    if recipe.get("format") == "duel":
+        # a close fight with a comeback: ~1 seed in 15, ~0.03 s each
+        tries = max(tries, 480)
     lo, hi = good_end(recipe)
     good = []
     start = recipe["seed"]
@@ -1340,7 +1357,16 @@ def mix_audio(sim: Sim) -> np.ndarray:
     fx = np.zeros(n, dtype=np.float32)
     last = {"tick": -1.0, "knock": -1.0, "thud": -1.0, "note": -1.0, "pop": -1.0}
     gaps = {"tick": 0.035, "knock": 0.05, "thud": 0.06, "note": 0.06, "pop": 0.03}
-    for et, kind, val, vol in sim.events:
+    events = sim.events
+    cursed = None
+    if sim.recipe.get("merge_sound") == "cursed":
+        # Dean (19 Oct): the merges make cursed noises (ball_cursed_sounds)
+        # instead of the soft puff, over the music
+        from clipper import ball_cursed_sounds
+        cursed = ball_cursed_sounds.merge_track([(et, val) for et, kind, val, _v in events if kind == "pop"], n,
+                                                int(sim.recipe.get("seed") or 0))
+        events = [e for e in events if e[1] != "pop"]
+    for et, kind, val, vol in events:
         if kind in gaps:                  # a flood stays a soft patter, not a roar
             if et - last[kind] < gaps[kind] and not (kind == "pop" and val >= 3):
                 continue
@@ -1361,13 +1387,15 @@ def mix_audio(sim: Sim) -> np.ndarray:
         from clipper import ball_sounds
         hits = [(et, vol) for et, kind, _val, vol in sim.events if kind in ("tick", "knock", "thud")]
         try:
-            return _normalise(fx * 0.5 + ball_sounds.song_track(song, hits, n))
+            return _normalise(fx * 0.5 + ball_sounds.song_track(song, hits, n) + (0 if cursed is None else cursed))
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"song failed, keeping the ball sounds: {e}", flush=True)
     bed = v.music(sim.t + 1)[:n]
     mix = fx + bed
     if track is not None:                 # "merge": a tune played by the bounces
         mix = mix * 0.7 + track(n)
+    if cursed is not None:
+        mix = mix + cursed * 0.9
     return _normalise(mix)
 
 
@@ -1429,9 +1457,11 @@ def publish_text(recipe: dict) -> dict:
     question; nothing names the last item, so the reveal isn't spoiled."""
     pack = recipe.get("pack")
     fmt = recipe.get("format")
+    if fmt in NO_PACK:
+        return _duel_text(recipe)
     if pack:
         first = pack["items"][0]["name"]
-        first = first if str(pack.get("template") or "").startswith("flags") else first.lower()
+        first = first if str(pack.get("template") or "").startswith(("flags", "logos")) else first.lower()
         title = recipe["hook"]
     else:
         first = emoji_char(THEMES[recipe["theme"]]["chain"][0][0])
@@ -1491,6 +1521,23 @@ def publish_text(recipe: dict) -> dict:
         desc += "\n\n" + pack["credit"]
     elif pack and pack.get("credits"):
         desc += "\n\nStickers via GIPHY"
+    return {"title": title[:100], "description": desc}
+
+
+def _duel_text(recipe: dict) -> dict:
+    if recipe.get("format") == "duel":
+        desc = ("Two balls, ten hearts each. Weapons drop into the ring -- pistol, shotgun, minigun, rocket "
+                "launcher -- and every gun fires once. Last one standing wins.\n\nWho did you pick? 👇\n\n"
+                "#satisfying #physics #bouncingball #battle")
+        title = f"{recipe['hook']} ⚔️"
+    else:
+        desc = (f"Every time a ball hits the wall it ties a line to it. Run into someone else's lines and "
+                f"they're yours. First to {recipe.get('target')} wins.\n\nPick a colour 👇\n\n"
+                f"#satisfying #physics #bouncingball #race")
+        title = f"{recipe['hook']} 🏁"
+    song = recipe.get("song") or {}
+    if recipe.get("bounce_sound") == "song" and (song.get("credit") or "").strip():
+        desc += "\n\nMusic:\n" + song["credit"].strip()
     return {"title": title[:100], "description": desc}
 
 

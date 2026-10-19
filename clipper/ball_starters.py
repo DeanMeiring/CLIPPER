@@ -7,8 +7,13 @@ All of them ship with the code in ``clipper/assets/packs/<key>/`` (the
 pictures + a pack.json) and are copied into the pack store the first time
 it's listed:
 
-* 3 flag packs: countryballs (a flag in a circle with two eyes, the final
-  one wearing a crown), flags from flag-icons (MIT).
+* 5 flag packs (Europe, world, football; Africa and Asia since Oct 19):
+  countryballs (a flag in a circle with two eyes, the final one wearing a
+  crown), flags from flag-icons (MIT).
+* 5 logo packs (Oct 19): phones, apps, cars, gaming, sportswear -- logo
+  balls from Simple Icons (CC0; the logos are their owners' trademarks).
+  Dean wants pictures people know rather than emoji, so these and the flag
+  packs are picked before any other (``ball_packs.is_known``).
 * 7 cursed packs made by ``ball_cursed`` from the bundled Fluent Emoji
   (MIT): Cat > Long Cat > Cool Cat > Buff Cat > Sigma Cat > Cursed Cat >
   Deep Fried Cat > Cat God. The app makes new ones the same way when the
@@ -16,7 +21,7 @@ it's listed:
 
 Not used on purpose: GIPHY stickers and meme art belong to the people who
 made them, real people (Gigachad is a photo of a real man), Pepe, company
-characters.
+characters (mascots -- the logo packs are logos only, Dean's call).
 """
 from __future__ import annotations
 
