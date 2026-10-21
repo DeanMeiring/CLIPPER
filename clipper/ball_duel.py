@@ -1161,6 +1161,8 @@ def _sfx_mix(recipe: dict, sfx: list, hits: list, n: int, sim) -> np.ndarray:
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"song failed, playing the tune instead: {e}", flush=True)
             music = None
+    if music is None and recipe.get("bounce_sound") == "none":
+        music = np.zeros(n, dtype=np.float32)        # just the fight's own sounds
     if music is None:
         from clipper import ball_merge as bm
         music = bm.MergeSim.music_track(sim, n) * 0.8

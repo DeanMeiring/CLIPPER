@@ -998,6 +998,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   `merge_sound: "cursed"`; `mix_audio` then drops the merge puffs and lays
   `merge_track` over the music. Older recipes sound as before.
 
+- **Music only on the growing ball (21 Oct):** Dean: his songs only on
+  `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
+  sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
+  `BALLS_SONG_KINDS` (or any kind when a Make picks one song by hand);
+  otherwise `BALLS_NO_SONG_SOUND` sets the bounce sound -- the cursed meow
+  (deeper every bounce) for the ring/arena kinds, ball taps
+  (`ball_sounds.knock`, bounce_sound "knock") for Merge, whose merges make
+  the cursed noises, and "none" for duel/race (their own hit/shot/steal
+  sounds only). Escape, touch, break in and evolve have no bounce music:
+  their ball sounds (+ the noise bed setting). The piano tune and phonk
+  riff are no longer used by the autopilot.
+
 ## Instagram posting (Oct 2026)
 
 - Dean pasted Meta's Content Publishing docs and asked to set it up, for
