@@ -27,9 +27,10 @@ import numpy as np
 
 from .ball_evolution import SR
 
-KINDS = ("tune", "meow", "phonk", "song")
+KINDS = ("tune", "meow", "phonk", "song", "knock", "none")
 MEOW_GAP = 0.22         # seconds between meows at most
 PHONK_GAP = 0.12
+KNOCK_GAP = 0.05
 SONG_OPEN = 0.42        # how long the song plays on after each bounce
 SONG_FADE_IN, SONG_FADE_OUT = 0.006, 0.05
 
@@ -93,9 +94,21 @@ PHONK_RIFF = [76, 79, 81, 79, 76, 74, 76, 71, 76, 79, 83, 81, 79, 76, 74, 71]
 PHONK_BASS = [40, 40, 43, 38]
 
 
+def knock(seed: int = 0) -> np.ndarray:
+    """A plain ball tap: a short, dull noise burst with a low thump (no
+    pitch, no tune)."""
+    t = np.arange(int(SR * 0.09)) / SR
+    noise = np.convolve(np.random.default_rng(seed).standard_normal(len(t)), np.ones(6) / 6, mode="same")
+    thump = np.sin(2 * np.pi * np.cumsum(110 + 120 * np.exp(-t * 60)) / SR)
+    return ((noise * 0.6 + thump * 0.5) * np.exp(-t * 55) * 0.5).astype(np.float32)
+
+
 def track(kind: str, hits: list, n: int) -> np.ndarray:
-    """The bounce sound for a whole video: one meow / riff note per hit."""
+    """The bounce sound for a whole video: one meow / riff note / tap per
+    hit ("none": silence)."""
     out = np.zeros(n, dtype=np.float32)
+    if kind == "none":
+        return out
     last, k, cache = -1.0, 0, {}
 
     def put(t, w, vol):
@@ -104,7 +117,14 @@ def track(kind: str, hits: list, n: int) -> np.ndarray:
         seg += w[:len(seg)] * vol
 
     for t, vol in hits:
-        if kind == "meow":
+        if kind == "knock":
+            if t - last < KNOCK_GAP:
+                continue
+            w = cache.get(k % 4)
+            if w is None:
+                w = cache[k % 4] = knock(k % 4)
+            put(t, w, 0.4 + 0.6 * vol)
+        elif kind == "meow":
             if t - last < MEOW_GAP:
                 continue
             # a bit deeper every bounce: 1.0 -> about 3.5x slower by bounce 60

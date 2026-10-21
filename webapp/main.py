@@ -6041,7 +6041,7 @@ def _balls_make(vid: str) -> None:
         pack = _balls_pick_pack(vid, opts.get("pack"))
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
-    _balls_pick_song(recipe, opts.get("song"))
+    _balls_sound(recipe, fmt, opts.get("song"))
     if fmt != "merge" and fmt not in ball_evolution.NO_PACK:
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -6283,7 +6283,7 @@ def _balls_view(v: dict) -> dict:
         if pack:
             c["chips"][1] = f"🖼 {pack['title']}"
         if fmt == "merge" or fmt in ball_evolution.ARENA_HOOKS:
-            sound = {"meow": "🐱 cursed meow", "phonk": "🥁 phonk"}.get(r.get("bounce_sound") or "")
+            sound = {"meow": "🐱 cursed meow", "phonk": "🥁 phonk", "knock": "🔊 ball sounds"}.get(r.get("bounce_sound") or "")
             if r.get("bounce_sound") == "song" and r.get("song"):
                 sound = f"🎵 {r['song'].get('name') or 'song'}"
             c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
@@ -6705,6 +6705,26 @@ def balls_song_audio(tid: str) -> FileResponse:
     if t is None or not (_balls.music_dir() / t["file"]).is_file():
         raise HTTPException(404, "song not found")
     return FileResponse(_balls.music_dir() / t["file"])
+
+
+# Dean (21 Oct): his songs only on the growing ball; every other kind plays
+# just its ball sounds and cursed sounds. What the bounces play instead of a
+# song, for the kinds that have a bounce sound (the rest -- escape, touch,
+# break in, evolve -- play their own ball sounds already):
+BALLS_SONG_KINDS = ("shrink",)
+BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
+                       "duel": "none", "race": "none",   # just the fight's / race's own sounds
+                       **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
+                                              "trail", "shrink")}}   # the cursed meow, deeper every bounce
+
+
+def _balls_sound(recipe: dict, fmt: str, choice: Optional[str] = None) -> None:
+    """A song on the growing ball (or any kind, when a Make picked one song
+    by hand to test it); everything else gets BALLS_NO_SONG_SOUND."""
+    if choice not in (None, "", "auto", "none") or (fmt in BALLS_SONG_KINDS and choice != "none"):
+        _balls_pick_song(recipe, choice)
+    if recipe.get("bounce_sound") != "song" and fmt in BALLS_NO_SONG_SOUND:
+        recipe["bounce_sound"] = BALLS_NO_SONG_SOUND[fmt]
 
 
 def _balls_pick_song(recipe: dict, choice: Optional[str] = None) -> None:
@@ -12132,7 +12152,7 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🎵 Songs for the bounces</h3>
-    <div class="hint">Free songs for every video. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The videos take turns with your songs. Without songs, the bounce kinds play a piano tune, the cursed meow or a phonk riff, and the others their ball sounds.</div>
+    <div class="hint">Your songs play on the 🔴 Ball grows every bounce videos only. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The other kinds play no music, just their ball sounds and cursed sounds: the cursed meow on the bounces, cursed noises on Merge's merges, hits and shots in the duel. To test a song on another kind, pick it in Make.</div>
     <div class="music-links">
       <b>Where to get free songs</b>
       <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
@@ -12648,9 +12668,9 @@ function renderTracks() {
   const sel = $('m-song'), cur = sel.value;
   sel.innerHTML = '';
   const opt = (v, t) => { const o = el('option', '', t); o.value = v; sel.appendChild(o); };
-  opt('auto', SG.songs.length ? '🔀 Auto: your songs in turn' : '🎹 Auto (no songs yet)');
+  opt('auto', SG.songs.length ? '🔀 Auto: your songs on 🔴 Ball grows, ball + cursed sounds on the rest' : '🔊 Auto (no songs yet)');
   for (const t of SG.songs) opt(t.id, `🎵 ${t.name}`);
-  opt('none', '🎹 No song: piano, meow or phonk riff');
+  opt('none', '🔊 No song: ball + cursed sounds');
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
   if (typeof S !== 'undefined' && S) songPickState();
 }
