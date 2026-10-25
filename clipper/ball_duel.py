@@ -13,7 +13,13 @@
   ball that runs into another's line steals it. First to N lines wins.
   Slow enough to follow (Dean found the first try too fast to follow).
 
-Neither uses a picture pack: the balls are the contestants. The guns are
+* ``tourney`` -- a 16-ball tournament (a viewer asked under a duel, 25 Oct):
+  a bracket on top; each round's fights play at once in smaller arenas (8,
+  4, 2, then the final full size). Each fight is a DuelSim; fewer hearts
+  early on and sudden death (one heart, a rocket each, the ring closes in)
+  keep it under a minute.
+
+None of them uses a picture pack: the balls are the contestants. The guns are
 drawn here (the emoji set only has a water pistol). Sounds are made here
 (numpy); the music is Dean's song (played straight through, not gated by
 bounces) or the recipe's own bounce tune.
@@ -35,7 +41,7 @@ from clipper import ball_evolution as be
 W, H, FPS, SR = be.W, be.H, be.FPS, be.SR
 END_HOLD = 3.2
 SECONDS_CAP = 70.0
-KINDS = ("duel", "race")
+KINDS = ("duel", "race", "tourney")
 
 # colour names for the contestants: (first word, second word, rgb)
 COLOURS = [("Cherry", "Red", (228, 52, 64)), ("Ocean", "Blue", (84, 140, 245)),
@@ -161,18 +167,23 @@ class DuelSim:
     """The fight. ``events`` stays empty (no stock ball sounds): the duel's
     own sounds are in ``sfx`` and come out through ``music_track``."""
 
-    def __init__(self, recipe: dict):
+    def __init__(self, recipe: dict, players=None, hearts: int = HEARTS, key: str | None = None):
+        # players / hearts / key: a match in the tournament (TourneySim)
         self.recipe = recipe
-        self.rng = random.Random(f"duel-{recipe['seed']}")
+        self.rng = random.Random(key or f"duel-{recipe['seed']}")
         self.t = 0.0
+        self.hearts = hearts
+        self.rush_at = None          # tournament: from this second on, weapons drop much faster
+        self.keep = False            # tournament: a ball holding a weapon walks past the others
+        self.ring = D_R              # tournament: sudden death closes the ring in
         self.balls = []
-        for i, (w1, w2, col) in enumerate(recipe.get("players") or [list(c) for c in COLOURS[:2]]):
+        for i, (w1, w2, col) in enumerate(players or recipe.get("players") or [list(c) for c in COLOURS[:2]]):
             a = self.rng.uniform(0, 2 * math.pi)
             self.balls.append({
                 "i": i, "name": f"{w1} {w2}", "col": tuple(col),
                 "x": D_CX + (-170 if i == 0 else 170), "y": D_CY + self.rng.uniform(-120, 120),
                 "vx": D_SPEED * math.cos(a), "vy": D_SPEED * math.sin(a),
-                "hp": HEARTS, "weapon": None, "uses": 0, "wang": self.rng.uniform(0, 6.28), "held": 0.0,
+                "hp": hearts, "weapon": None, "uses": 0, "wang": self.rng.uniform(0, 6.28), "held": 0.0,
                 "cool": 0.0, "hurt": 0.0, "squash": 0.0, "kick": 0.0, "alive": True, "weapons_had": 0,
                 "burst": 0.0, "burst_hits": 0, "next_round": 0.0,
             })
@@ -283,19 +294,20 @@ class DuelSim:
     def _spawn(self):
         if self.t < self.next_spawn:
             return
-        if len(self.pickups) < 3:
+        rush = self.rush_at is not None and self.t >= self.rush_at
+        if len(self.pickups) < (4 if rush else 3):
             names = list(WEAPONS)
             w = self.rng.choices(names, [WEAPONS[n][2] for n in names])[0]
             for _ in range(30):
                 a = self.rng.uniform(0, 6.28)
-                dd = self.rng.uniform(0, D_R - 120)
+                dd = self.rng.uniform(0, self.ring - 120)
                 x, y = D_CX + dd * math.cos(a), D_CY + dd * math.sin(a)
                 if all(math.hypot(x - b["x"], y - b["y"]) > 190 for b in self.balls) and \
                         all(math.hypot(x - p["x"], y - p["y"]) > 170 for p in self.pickups):
                     self.pickups.append({"w": w, "x": x, "y": y, "born": self.t})
                     self.sfx.append((self.t, "spawn", 0))
                     break
-        self.next_spawn = self.t + self.rng.uniform(2.0, 3.2)
+        self.next_spawn = self.t + (self.rng.uniform(0.5, 0.9) if rush else self.rng.uniform(2.0, 3.2))
 
     def _move(self, dt):
         for b in self.balls:
@@ -303,7 +315,7 @@ class DuelSim:
             b["y"] += b["vy"] * dt
             dx, dy = b["x"] - D_CX, b["y"] - D_CY
             dd = math.hypot(dx, dy)
-            if dd > D_R - D_BALL:
+            if dd > self.ring - D_BALL:
                 nx, ny = dx / dd, dy / dd
                 vn = b["vx"] * nx + b["vy"] * ny
                 if vn > 0:
@@ -312,7 +324,7 @@ class DuelSim:
                     b["vx"], b["vy"] = D_SPEED * math.cos(a), D_SPEED * math.sin(a)
                     self.hits.append((self.t, 0.6))
                     self.sfx.append((self.t, "wall", 0))
-                b["x"], b["y"] = D_CX + nx * (D_R - D_BALL), D_CY + ny * (D_R - D_BALL)
+                b["x"], b["y"] = D_CX + nx * (self.ring - D_BALL), D_CY + ny * (self.ring - D_BALL)
         a, c = self.balls
         dx, dy = c["x"] - a["x"], c["y"] - a["y"]
         dd = math.hypot(dx, dy)
@@ -339,7 +351,8 @@ class DuelSim:
                 b["vx"], b["vy"] = b["vx"] / s * D_SPEED, b["vy"] / s * D_SPEED
         for p in list(self.pickups):
             for b in self.balls:
-                if b["alive"] and math.hypot(p["x"] - b["x"], p["y"] - b["y"]) < D_BALL + 55:
+                if b["alive"] and not (self.keep and WEAPONS.get(b["weapon"], ("",))[0] == "gun") and \
+                        math.hypot(p["x"] - b["x"], p["y"] - b["y"]) < D_BALL + 55:
                     self._equip(b, p["w"])
                     self.pickups.remove(p)
                     break
@@ -420,7 +433,14 @@ class DuelSim:
                     self._drop(b)
             else:  # a gun: aim, then fire its one shot
                 b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 6)
-                if b["held"] > 0.45 and abs(_ang_diff(aim, b["wang"])) < 0.15:
+                # (tournament: circling balls can outrun the aim, so after 1.2 s it
+                # fires near enough; with the ring closed in, it just fires)
+                tol = 0.15
+                if self.keep and b["held"] > 1.2:
+                    tol = 0.6
+                if self.ring < D_R and b["held"] > 0.6:
+                    tol = 9.0
+                if b["held"] > 0.45 and abs(_ang_diff(aim, b["wang"])) < tol:
                     if w == "minigun":
                         b["burst"], b["burst_hits"], b["next_round"] = 1.2, 0, self.t
                         self.sfx.append((self.t, "spin", 0))
@@ -439,7 +459,7 @@ class DuelSim:
                     if self.damage(o, 1, u["x"], u["y"], own) and cap is not None:
                         own["burst_hits"] += 1
                 self.bullets.remove(u)
-            elif u["life"] <= 0 or math.hypot(u["x"] - D_CX, u["y"] - D_CY) > D_R:
+            elif u["life"] <= 0 or math.hypot(u["x"] - D_CX, u["y"] - D_CY) > self.ring:
                 self.effects.append({"k": "spark", "x": u["x"], "y": u["y"], "life": 0.5, "col": (255, 220, 120)})
                 self.bullets.remove(u)
         for r in list(self.rockets):
@@ -456,7 +476,7 @@ class DuelSim:
                                      "y": r["y"] - math.sin(r["a"]) * 30, "life": 1.0,
                                      "r": self.rng.uniform(10, 18)})
             hit = o["alive"] and math.hypot(r["x"] - o["x"], r["y"] - o["y"]) < D_BALL + 14
-            if hit or math.hypot(r["x"] - D_CX, r["y"] - D_CY) > D_R - 10:
+            if hit or math.hypot(r["x"] - D_CX, r["y"] - D_CY) > self.ring - 10:
                 self.rockets.remove(r)
                 self._boom(r["x"], r["y"], r["owner"])
 
@@ -574,12 +594,54 @@ class DuelPainter:
         self.cache: dict = {}
         self.shown_hp = [HEARTS, HEARTS]
         self.lost_at = [[None] * HEARTS, [None] * HEARTS]
+        # where draw_match puts the arena: the duel's own place (plain), or a
+        # smaller arena somewhere else (the tournament: TourneyPainter.place)
+        self.plain, self.k, self.cx, self.cy = True, 1.0, D_CX, D_CY
+        self.scaled: dict = {}
+        self.fonts: dict = {}
+
+    # -- placing a smaller arena (the tournament); plain = the duel, untouched
+    def place(self, cx, cy, k):
+        self.plain, self.k, self.cx, self.cy = False, k, cx, cy
+
+    def P(self, x, y):
+        if self.plain:
+            return x, y
+        return self.cx + (x - D_CX) * self.k, self.cy + (y - D_CY) * self.k
+
+    def sl(self, v):
+        """A length."""
+        return v if self.plain else v * self.k
+
+    def sw(self, v):
+        """A line width."""
+        return v if self.plain else max(1, int(round(v * self.k)))
+
+    def img(self, key, im):
+        if self.plain:
+            return im
+        k2 = (key, round(self.k, 4))
+        out = self.scaled.get(k2)
+        if out is None:
+            out = self.scaled[k2] = im.resize((max(2, int(im.width * self.k)), max(2, int(im.height * self.k))),
+                                              Image.LANCZOS)
+        return out
+
+    def font(self, f):
+        if self.plain:
+            return f
+        size = max(10, int(f.size * self.k))
+        out = self.fonts.get(size)
+        if out is None:
+            out = self.fonts[size] = _font(size)
+        return out
 
     def ball_sprite(self, b, look, mood, blink, flash, cracks):
-        key = (b["i"], round(look / (math.pi / 12)), mood, blink, flash, cracks)
+        r = D_BALL if self.plain else max(8, int(round(D_BALL * self.k)))
+        q = 1 if self.plain else r / D_BALL
+        key = (b["i"], b["col"], r, round(look / (math.pi / 12)), mood, blink, flash, cracks)
         if key in self.cache:
             return self.cache[key]
-        r = D_BALL
         S3 = 3
         big = (r * 2 + 8) * S3
         c = big / 2
@@ -587,7 +649,8 @@ class DuelPainter:
         im = Image.new("RGBA", (big, big), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
         col = (255, 255, 255) if flash else b["col"]
-        d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=(255, 255, 255, 255), width=int(5 * S3))
+        d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=(255, 255, 255, 255),
+                  width=max(1, int(5 * S3 * q)))
         rng = np.random.default_rng(b["i"] * 7 + 3)
         for _ in range(cracks):
             a0 = rng.uniform(0, 2 * math.pi)
@@ -599,7 +662,7 @@ class DuelPainter:
                 ang += rng.uniform(-0.6, 0.6)
                 x, y = x + math.cos(ang) * step, y + math.sin(ang) * step
                 pts.append((x, y))
-            d.line(pts, fill=(30, 30, 50, 200), width=int(2.4 * S3))
+            d.line(pts, fill=(30, 30, 50, 200), width=max(1, int(2.4 * S3 * q)))
         ink = (20, 20, 30, 255)
         ex, ey = math.cos(look), math.sin(look)
         for side in (-1, 1):
@@ -607,14 +670,14 @@ class DuelPainter:
             er = R * (0.27 if mood == "scared" else 0.22)
             if mood == "dead" or flash:
                 w_ = er * 0.8
-                d.line([(cx_e - w_, cy_e - w_), (cx_e + w_, cy_e + w_)], fill=ink, width=int(4 * S3))
-                d.line([(cx_e - w_, cy_e + w_), (cx_e + w_, cy_e - w_)], fill=ink, width=int(4 * S3))
+                d.line([(cx_e - w_, cy_e - w_), (cx_e + w_, cy_e + w_)], fill=ink, width=max(1, int(4 * S3 * q)))
+                d.line([(cx_e - w_, cy_e + w_), (cx_e + w_, cy_e - w_)], fill=ink, width=max(1, int(4 * S3 * q)))
                 continue
             if blink:
-                d.line([(cx_e - er, cy_e), (cx_e + er, cy_e)], fill=ink, width=int(4 * S3))
+                d.line([(cx_e - er, cy_e), (cx_e + er, cy_e)], fill=ink, width=max(1, int(4 * S3 * q)))
                 continue
             d.ellipse((cx_e - er, cy_e - er, cx_e + er, cy_e + er), fill=(255, 255, 255, 255), outline=ink,
-                      width=int(2.5 * S3))
+                      width=max(1, int(2.5 * S3 * q)))
             pr = er * (0.42 if mood == "scared" else 0.55)
             px, py = cx_e + ex * er * 0.4, cy_e + ey * er * 0.4
             d.ellipse((px - pr, py - pr, px + pr, py + pr), fill=ink)
@@ -622,23 +685,25 @@ class DuelPainter:
             if mood == "angry":
                 # outer end high, inner end low: a frown
                 d.line([(cx_e + side * er * 1.1, cy_e - er * 1.5), (cx_e - side * er * 0.9, cy_e - er * 0.85)],
-                       fill=ink, width=int(5 * S3))
+                       fill=ink, width=max(1, int(5 * S3 * q)))
             elif mood == "scared":
                 # inner end high: worried
                 d.line([(cx_e + side * er * 1.0, cy_e - er * 1.05), (cx_e - side * er * 0.9, cy_e - er * 1.55)],
-                       fill=ink, width=int(4 * S3))
+                       fill=ink, width=max(1, int(4 * S3 * q)))
         my = c + R * 0.38
         if mood == "happy":
-            d.arc((c - R * 0.3, my - R * 0.25, c + R * 0.3, my + R * 0.12), 20, 160, fill=ink, width=int(4 * S3))
+            d.arc((c - R * 0.3, my - R * 0.25, c + R * 0.3, my + R * 0.12), 20, 160, fill=ink,
+                  width=max(1, int(4 * S3 * q)))
         elif mood == "angry":
-            d.arc((c - R * 0.28, my - R * 0.02, c + R * 0.28, my + R * 0.3), 200, 340, fill=ink, width=int(4 * S3))
+            d.arc((c - R * 0.28, my - R * 0.02, c + R * 0.28, my + R * 0.3), 200, 340, fill=ink,
+                  width=max(1, int(4 * S3 * q)))
         elif mood == "scared":
             pts = [(c - R * 0.28 + k * R * 0.07, my + (R * 0.05 if k % 2 else -R * 0.03)) for k in range(9)]
-            d.line(pts, fill=ink, width=int(3.5 * S3))
+            d.line(pts, fill=ink, width=max(1, int(3.5 * S3 * q)))
         elif mood == "dead":
             d.ellipse((c - R * 0.12, my - R * 0.08, c + R * 0.12, my + R * 0.16), fill=ink)
         sp = im.resize((r * 2 + 8, r * 2 + 8), Image.LANCZOS)
-        if len(self.cache) > 600:
+        if len(self.cache) > 1500:
             self.cache.clear()
         self.cache[key] = sp
         return sp
@@ -650,7 +715,7 @@ class DuelPainter:
             return "dead"
         if b["weapon"] and b["weapon"] != "shield":
             return "angry"
-        if b["hp"] <= 4:
+        if b["hp"] <= 4 * sim.hearts / HEARTS:
             return "scared"
         return "happy"
 
@@ -658,53 +723,7 @@ class DuelPainter:
         im = self.bg.copy().convert("RGBA")
         d = ImageDraw.Draw(im)
         self.hud(im, d, sim)
-        for p in sim.pickups:
-            age = sim.t - p["born"]
-            s = min(1.0, age / 0.25)
-            rr = 70 * s
-            bob = math.sin(age * 4) * 6
-            d.ellipse((p["x"] - rr, p["y"] - rr + bob, p["x"] + rr, p["y"] + rr + bob), outline=(150, 150, 165, 255),
-                      width=7)
-            if s > 0.2:
-                ic = self.icons[p["w"]]
-                f = min(1.0, 124 / max(ic.size)) * s
-                ic = ic.resize((max(4, int(ic.width * f)), max(4, int(ic.height * f))), Image.LANCZOS)
-                im.alpha_composite(ic, (int(p["x"] - ic.width / 2), int(p["y"] - ic.height / 2 + bob)))
-        for e in sim.effects:
-            if e["k"] == "smoke":
-                L = max(0.0, e["life"])
-                r = e["r"]
-                d.ellipse((e["x"] - r, e["y"] - r, e["x"] + r, e["y"] + r), fill=(190, 190, 200, int(120 * L)))
-        for u in sim.bullets:
-            sp = math.hypot(u["vx"], u["vy"])
-            ln = 34 if u["kind"] == "shotgun" else 46
-            tx, ty = u["x"] - u["vx"] / sp * ln, u["y"] - u["vy"] / sp * ln
-            d.line([(tx, ty), (u["x"], u["y"])], fill=(255, 210, 90, 170), width=7)
-            rr = 6 if u["kind"] == "shotgun" else 8
-            d.ellipse((u["x"] - rr, u["y"] - rr, u["x"] + rr, u["y"] + rr), fill=(255, 245, 200, 255))
-        for r in sim.rockets:
-            rot = self.rocket.rotate(-math.degrees(r["a"]), resample=Image.BICUBIC, expand=True)
-            im.alpha_composite(rot, (int(r["x"] - rot.width / 2), int(r["y"] - rot.height / 2)))
-        for b in sim.balls:
-            if not b["alive"]:
-                continue
-            o = sim.other(b)
-            look = math.atan2(o["y"] - b["y"], o["x"] - b["x"])
-            blink = (int(sim.t * 10 + b["i"] * 17) % 37) == 0
-            flash = b["hurt"] > 0.18
-            cracks = min(4, (HEARTS - b["hp"]) // 2)
-            sp = self.ball_sprite(b, look, self.mood(sim, b), blink, flash, cracks)
-            if sim.winner is b:
-                scale = 1 + min(0.5, (sim.t - sim.done_at) * 0.4)
-            else:
-                scale = 1 + 0.25 * b["squash"]
-            if abs(scale - 1) > 0.01:
-                sp = sp.resize((int(sp.width * scale), int(sp.height * scale)), Image.LANCZOS)
-            im.alpha_composite(sp, (int(b["x"] - sp.width / 2), int(b["y"] - sp.height / 2)))
-            self.held(im, b)
-        self.effects(im, d, sim)
-        if sim.winner is not None:
-            self.ending(im, d, sim)
+        self.draw_match(im, d, sim)
         self.watermark(d)
         out = im.convert("RGB")
         if sim.shake > 0:
@@ -713,11 +732,68 @@ class DuelPainter:
             out = Image.fromarray(np.roll(np.asarray(out), (rng.randint(-amp, amp), rng.randint(-amp, amp)), (0, 1)))
         return out
 
+    def draw_match(self, im, d, sim: DuelSim, ending: bool = True):
+        """Everything inside the arena (where ``place`` put it)."""
+        P, sl, sw = self.P, self.sl, self.sw
+        for p in sim.pickups:
+            age = sim.t - p["born"]
+            s = min(1.0, age / 0.25)
+            rr = sl(70) * s
+            bob = math.sin(age * 4) * sl(6)
+            x, y = P(p["x"], p["y"])
+            d.ellipse((x - rr, y - rr + bob, x + rr, y + rr + bob), outline=(150, 150, 165, 255),
+                      width=sw(7))
+            if s > 0.2:
+                ic = self.icons[p["w"]]
+                f = min(1.0, 124 / max(ic.size)) * s * (1 if self.plain else self.k)
+                ic = ic.resize((max(4, int(ic.width * f)), max(4, int(ic.height * f))), Image.LANCZOS)
+                im.alpha_composite(ic, (int(x - ic.width / 2), int(y - ic.height / 2 + bob)))
+        for e in sim.effects:
+            if e["k"] == "smoke":
+                L = max(0.0, e["life"])
+                r = sl(e["r"])
+                x, y = P(e["x"], e["y"])
+                d.ellipse((x - r, y - r, x + r, y + r), fill=(190, 190, 200, int(120 * L)))
+        for u in sim.bullets:
+            sp = math.hypot(u["vx"], u["vy"])
+            ln = 34 if u["kind"] == "shotgun" else 46
+            tx, ty = P(u["x"] - u["vx"] / sp * ln, u["y"] - u["vy"] / sp * ln)
+            x, y = P(u["x"], u["y"])
+            d.line([(tx, ty), (x, y)], fill=(255, 210, 90, 170), width=sw(7))
+            rr = sl(6 if u["kind"] == "shotgun" else 8)
+            d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 245, 200, 255))
+        for r in sim.rockets:
+            rot = self.img("rocket", self.rocket).rotate(-math.degrees(r["a"]), resample=Image.BICUBIC, expand=True)
+            x, y = P(r["x"], r["y"])
+            im.alpha_composite(rot, (int(x - rot.width / 2), int(y - rot.height / 2)))
+        for b in sim.balls:
+            if not b["alive"]:
+                continue
+            o = sim.other(b)
+            look = math.atan2(o["y"] - b["y"], o["x"] - b["x"])
+            blink = (int(sim.t * 10 + b["i"] * 17) % 37) == 0
+            flash = b["hurt"] > 0.18
+            cracks = min(4, (sim.hearts - b["hp"]) * HEARTS // sim.hearts // 2)
+            sp = self.ball_sprite(b, look, self.mood(sim, b), blink, flash, cracks)
+            if sim.winner is b:
+                scale = 1 + min(0.5, (sim.t - sim.done_at) * 0.4)
+            else:
+                scale = 1 + 0.25 * b["squash"]
+            if abs(scale - 1) > 0.01:
+                sp = sp.resize((int(sp.width * scale), int(sp.height * scale)), Image.LANCZOS)
+            x, y = P(b["x"], b["y"])
+            im.alpha_composite(sp, (int(x - sp.width / 2), int(y - sp.height / 2)))
+            self.held(im, b)
+        self.effects(im, d, sim)
+        if ending and sim.winner is not None:
+            self.ending(im, d, sim)
+
     def held(self, im, b):
         w = b["weapon"]
         if not w:
             return
         a = b["wang"]
+        flip = False
         if w == "knife":
             img, dist, rot = self.knife, D_BALL + 34, -math.degrees(a) - 45
         elif w == "shield":
@@ -726,12 +802,12 @@ class DuelPainter:
             img = self.guns[w]
             if math.cos(a) < 0:              # keep the gun upright on the left side
                 img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                flip = True
             kick = b["kick"] * 14
             dist = D_BALL + img.width * 0.42 - kick
             rot = -math.degrees(a)
-        x = b["x"] + math.cos(a) * dist
-        y = b["y"] + math.sin(a) * dist
-        r_img = img.rotate(rot, resample=Image.BICUBIC, expand=True)
+        x, y = self.P(b["x"] + math.cos(a) * dist, b["y"] + math.sin(a) * dist)
+        r_img = self.img((w, flip), img).rotate(rot, resample=Image.BICUBIC, expand=True)
         im.alpha_composite(r_img, (int(x - r_img.width / 2), int(y - r_img.height / 2)))
 
     def hud(self, im, d, sim):
@@ -767,40 +843,42 @@ class DuelPainter:
             x += d.textlength(t, font=f)
 
     def effects(self, im, d, sim):
+        P, sl, sw = self.P, self.sl, self.sw
         for e in sim.effects:
             L = max(0.0, e["life"])
             k = e["k"]
+            ex, ey = P(e["x"], e["y"])
             if k == "num":
                 a = int(255 * min(1, L * 2))
-                d.text((e["x"], e["y"]), e["text"], font=self.f_num, fill=(255, 255, 255, a), anchor="mm",
-                       stroke_width=6, stroke_fill=e["col"] + (a,))
+                d.text((ex, ey), e["text"], font=self.font(self.f_num), fill=(255, 255, 255, a), anchor="mm",
+                       stroke_width=sw(6), stroke_fill=e["col"] + (a,))
             elif k == "spark":
                 for j in range(8):
                     ang = j * math.pi / 4 + 0.3
-                    r0, r1 = 10 + (1 - L) * 40, 22 + (1 - L) * 70
-                    d.line([(e["x"] + math.cos(ang) * r0, e["y"] + math.sin(ang) * r0),
-                            (e["x"] + math.cos(ang) * r1, e["y"] + math.sin(ang) * r1)],
-                           fill=e["col"] + (int(255 * L),), width=5)
+                    r0, r1 = sl(10 + (1 - L) * 40), sl(22 + (1 - L) * 70)
+                    d.line([(ex + math.cos(ang) * r0, ey + math.sin(ang) * r0),
+                            (ex + math.cos(ang) * r1, ey + math.sin(ang) * r1)],
+                           fill=e["col"] + (int(255 * L),), width=sw(5))
             elif k == "flash":
-                r = 30 * L + 8
-                d.ellipse((e["x"] - r, e["y"] - r, e["x"] + r, e["y"] + r), fill=e["col"] + (int(230 * L),))
+                r = sl(30 * L + 8)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=e["col"] + (int(230 * L),))
             elif k == "ring":
-                r = D_BALL + 8 + (1 - L) * 50
-                d.ellipse((e["x"] - r, e["y"] - r, e["x"] + r, e["y"] + r), outline=e["col"] + (int(200 * L),), width=6)
+                r = sl(D_BALL + 8 + (1 - L) * 50)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), outline=e["col"] + (int(200 * L),), width=sw(6))
             elif k == "boom":
-                r = 70 + (1 - L) * 170
-                d.ellipse((e["x"] - r, e["y"] - r, e["x"] + r, e["y"] + r), fill=(255, 140, 40, int(160 * L)))
+                r = sl(70 + (1 - L) * 170)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=(255, 140, 40, int(160 * L)))
                 r2 = r * 0.6
-                d.ellipse((e["x"] - r2, e["y"] - r2, e["x"] + r2, e["y"] + r2), fill=(255, 240, 180, int(210 * L)))
+                d.ellipse((ex - r2, ey - r2, ex + r2, ey + r2), fill=(255, 240, 180, int(210 * L)))
             elif k == "shard":
-                r = e["r"] * L + 2
-                d.regular_polygon((e["x"], e["y"], r), 3, rotation=(1 - L) * 400, fill=e["col"] + (int(255 * L),))
+                r = sl(e["r"] * L + 2)
+                d.regular_polygon((ex, ey, r), 3, rotation=(1 - L) * 400, fill=e["col"] + (int(255 * L),))
             elif k == "drop":
                 img = self.icons.get(e["w"])
                 if img is not None:
-                    g = img.rotate(-math.degrees(e["ang"]), resample=Image.BICUBIC, expand=True)
+                    g = self.img(e["w"], img).rotate(-math.degrees(e["ang"]), resample=Image.BICUBIC, expand=True)
                     g.putalpha(g.getchannel("A").point(lambda v, f=L: int(v * f)))
-                    im.alpha_composite(g, (int(e["x"] - g.width / 2), int(e["y"] - g.height / 2)))
+                    im.alpha_composite(g, (int(ex - g.width / 2), int(ey - g.height / 2)))
 
     def ending(self, im, d, sim):
         w = sim.winner
@@ -1057,6 +1135,417 @@ class RacePainter:
         return im.convert("RGB")
 
 
+# ---- the tournament (a viewer asked for 16 balls, 25 Oct) ----------------------
+#
+# 16 duel balls in a bracket. All the fights of a round play at once, in
+# smaller arenas (8, then 4, then 2), and the final fills the screen. Every
+# match is a DuelSim in the duel's own coordinates, so the fighting is the
+# duel's; the painter only draws each arena smaller somewhere else. Fewer
+# hearts in the early rounds and faster weapon drops once a fight runs long
+# keep the whole thing under a minute.
+
+EXTRA_COLOURS = [("Snow", "White", (236, 238, 244)), ("Coal", "Black", (52, 52, 62)),
+                 ("Choco", "Brown", (134, 86, 52)), ("Mint", "Green", (140, 236, 186)),
+                 ("Deep", "Maroon", (134, 26, 52)), ("Navy", "Blue", (36, 52, 150)),
+                 ("Steel", "Grey", (150, 156, 172)), ("Shiny", "Gold", (206, 160, 40))]
+TOURNEY_HOOKS = ["16 balls, 1 winner", "16 ball tournament -- who wins?", "Pick your ball: 16 enter, 1 wins",
+                 "16 balls enter. Only 1 wins."]
+ROUND_NAMES = ("ROUND OF 16", "QUARTER-FINALS", "SEMI-FINALS", "FINAL")
+T_HEARTS = (2, 2, 3, 5)           # hearts per ball, by round
+T_RUSH = (0.0, 0.0, 0.0, 4.0)     # seconds into a fight when the weapons start dropping fast
+T_SUDDEN = (6.0, 7.0, 8.0, None)  # then sudden death: one heart each and a rocket each (the final plays out)
+T_RING_MIN, T_RING_SPEED = 190, 110   # sudden death: the ring shrinks to this, this fast (px/s, duel scale)
+T_INTRO = 0.6                     # the bracket fills in, then round 1 starts
+T_WAIT = 0.9                      # after a round's last knockout
+T_BREAK = 1.6                     # the winners move up the bracket
+T_CAP = 95.0
+
+
+def tourney_recipe(recipe: dict) -> dict:
+    rng = random.Random(f"tourney-recipe-{recipe['seed']}")
+    a, b = rng.sample(COLOURS, 8), rng.sample(EXTRA_COLOURS, 8)
+    players = []
+    for x, y in zip(a, b):           # every first fight: a bright colour vs one of the extra ones
+        players += [x, y] if rng.random() < 0.5 else [y, x]
+    recipe.update(players=[list(p) for p in players], bed="off", hook=rng.choice(TOURNEY_HOOKS),
+                  ending="CHAMPION!")
+    return recipe
+
+
+def _arenas(rnd: int) -> list:
+    """(cx, cy, r) of each arena in a round, in bracket order."""
+    if rnd == 0:
+        return [(cx, 828 + j * 295, 118) for cx in (270, 810) for j in range(4)]
+    if rnd == 1:
+        return [(cx, 975 + j * 590, 222) for cx in (270, 810) for j in range(2)]
+    if rnd == 2:
+        return [(540, 975 + j * 590, 262) for j in range(2)]
+    return [(540, 1300, 420)]
+
+
+class TourneySim:
+    def __init__(self, recipe: dict):
+        self.recipe = recipe
+        self.players = [tuple(p[:2]) + (tuple(p[2]),) for p in
+                        (recipe.get("players") or [list(c) for c in COLOURS + EXTRA_COLOURS])]
+        self.t = 0.0
+        self.round = -1
+        self.phase = "intro"
+        self.phase_at = 0.0
+        self.slots = [list(range(16))]           # who is in each bracket level
+        self.matches: list = []
+        self.pairs: list = []
+        self.old: list = []                     # the last round's fights, shown while the bracket moves
+        self.old_pairs: list = []
+        self.sfx: list = []
+        self.events: list = []
+        self.hits: list = []
+        self.unlocked_at = {0: 0.0}
+        self.best, self.spawned = 0, 16
+        self.winner = None                      # the champion's player index
+        self.done_at = None
+        self.ok = False
+        self.max_gap = 99.0
+        self.shake = 0.0
+        self._ko: list = []                     # (t, round) of every knockout
+        self._hit_times: list = []
+        self._natural = True                    # every fight ended in a knockout
+
+    @property
+    def finished(self) -> bool:
+        return (self.done_at is not None and self.t - self.done_at > END_HOLD + 0.6) or self.t > T_CAP
+
+    def _start(self, rnd):
+        self.round = rnd
+        self.phase, self.phase_at = "fight", self.t
+        ids = self.slots[rnd]
+        self.pairs = [(ids[2 * j], ids[2 * j + 1]) for j in range(len(ids) // 2)]
+        self.matches = []
+        for j, (a, b) in enumerate(self.pairs):
+            m = DuelSim(self.recipe, players=[self.players[a], self.players[b]], hearts=T_HEARTS[rnd],
+                        key=f"tourney-{self.recipe['seed']}-{rnd}-{j}")
+            m.rush_at = T_RUSH[rnd]
+            m.next_spawn = 0.5               # a weapon right away
+            m.keep = True                    # fire what you've got (swapping stalled the fights)
+            self.matches.append(m)
+        self.sfx.append((self.t, "whoosh", rnd))
+
+    def _won(self, m):
+        if m.winner is not None:
+            return m.winner["i"]
+        self._natural = False                   # out of time: more hearts wins
+        return 0 if m.balls[0]["hp"] >= m.balls[1]["hp"] else 1
+
+    def step(self):
+        dt = 1 / FPS
+        self.t += dt
+        if self.phase == "intro":
+            if self.t >= T_INTRO:
+                self._start(0)
+            return
+        for m in self.matches:
+            sd = T_SUDDEN[self.round]
+            if sd is not None and m.winner is None and m.t >= sd and not getattr(m, "sudden", False):
+                m.sudden = True
+                for b in m.balls:
+                    b["hp"] = min(b["hp"], 1)
+                    m._equip(b, "rocket")        # homing
+                self.sfx.append((self.t, "sudden", 0, self.round))
+            if getattr(m, "sudden", False) and m.winner is None and m.ring > T_RING_MIN:
+                # and the ring closes in until nothing can miss
+                m.ring = max(T_RING_MIN, m.ring - T_RING_SPEED / FPS)
+                m.pickups = [p for p in m.pickups if math.hypot(p["x"] - D_CX, p["y"] - D_CY) < m.ring - 60]
+            elif getattr(m, "sudden", False) and m.winner is None and m.t >= getattr(m, "rearm", 0.0):
+                # closed in: no room for drops, so a ball without a gun gets a rocket
+                m.rearm = m.t + 1.0
+                for b in m.balls:
+                    if b["alive"] and WEAPONS.get(b["weapon"], ("",))[0] != "gun":
+                        m._equip(b, "rocket")
+        for m in self.matches + self.old:
+            n0 = len(m.sfx)
+            had = m.winner
+            m.step()
+            for _t, kind, val in m.sfx[n0:]:
+                if kind == "hit":
+                    self._hit_times.append(self.t)
+                if m in self.old and kind in ("wall", "bump"):
+                    continue
+                self.sfx.append((self.t, kind, val, self.round if m in self.matches else self.round - 1))
+            if m in self.matches and had is None and m.winner is not None:
+                self._ko.append((self.t, self.round))
+            if self.round == 3 and m in self.matches:
+                self.hits += [(self.t, v) for _t, v in m.hits[len(self.hits):]]
+        final = self.round == 3
+        self.shake = self.matches[0].shake if final and self.matches else 0.0
+        if self.phase == "fight":
+            over = [m.done_at for m in self.matches]
+            if final and self.matches[0].done_at is not None and self.done_at is None:
+                m = self.matches[0]
+                self.winner = self.pairs[0][self._won(m)]
+                self.done_at = self.t
+                self.slots.append([self.winner])
+                self._finish(m)
+                self.phase = "done"
+            elif all(x is not None for x in over) and self.t - self.phase_at - max(over) >= T_WAIT:
+                self.slots.append([pair[self._won(m)] for pair, m in zip(self.pairs, self.matches)])
+                self.old, self.old_pairs = self.matches, self.pairs
+                self.matches, self.pairs = [], []
+                self.phase, self.phase_at = "break", self.t
+        elif self.phase == "break" and self.t - self.phase_at >= T_BREAK:
+            self.old, self.old_pairs = [], []
+            self._start(self.round + 1)
+
+    def _finish(self, final):
+        times = [0.0] + self._hit_times + [self.t]
+        self.max_gap = max(b - a for a, b in zip(times, times[1:]))
+        w = final.winner["i"] if final.winner else 0
+        behind = any(h[1 + w] - h[2 - w] <= -2 for h in final._hp_log)
+        left = final.balls[w]["hp"]
+        had = min(b["weapons_had"] for b in final.balls)
+        long_enough = final.t >= 8.0
+        self.ok = self._natural and (behind or left <= 2) and had >= 2 and long_enough
+        self.sfx.append((self.t + 0.7, "win", 0, 3))
+
+    def music_track(self, n: int) -> np.ndarray:
+        # eight fights at once would be a wall of noise: the early rounds keep
+        # the hits, shots and knockouts, and drop the wall taps and bumps
+        sfx = [(t, kind, val) for t, kind, val, *rnd in self.sfx
+               if not (rnd and rnd[0] < 3 and kind in ("wall", "bump", "spawn", "pickup"))]
+        return _sfx_mix(self.recipe, sfx, self.hits, n, self)
+
+
+def _tourney_bg(arenas) -> Image.Image:
+    bg = Image.new("RGB", (W, H), (7, 9, 24))
+    d = ImageDraw.Draw(bg)
+    for x in range(0, W, 60):
+        d.line([(x, 0), (x, H)], fill=(20, 24, 48), width=2)
+    for y in range(0, H, 60):
+        d.line([(0, y), (W, y)], fill=(20, 24, 48), width=2)
+    mask = Image.new("L", (W, H), 0)
+    glow = Image.new("RGB", (W, H), (0, 0, 0))
+    md, gd = ImageDraw.Draw(mask), ImageDraw.Draw(glow)
+    for cx, cy, r in arenas:
+        md.ellipse((cx - r, cy - r, cx + r, cy + r), fill=255)
+        gd.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(160, 170, 255), width=max(6, r // 30))
+    bg = Image.composite(bg, Image.new("RGB", (W, H), (5, 6, 16)), mask)
+    glow = glow.filter(ImageFilter.GaussianBlur(12))
+    bg = Image.fromarray(np.clip(np.asarray(bg, dtype=np.int16) + np.asarray(glow, dtype=np.int16), 0, 255)
+                         .astype(np.uint8))
+    d = ImageDraw.Draw(bg)
+    for cx, cy, r in arenas:
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(245, 245, 255), width=max(3, r // 80))
+    return bg
+
+
+# the bracket: left half x going right, right half mirrored; rows per level
+B_X = (52, 150, 248, 346)
+B_Y0, B_DY = 178, 62
+B_CHAMP = (540, 395)
+
+
+def _bracket_pos(level: int, k: int) -> tuple:
+    """Where the k-th ball of a bracket level sits (level 4: the champion)."""
+    if level >= 4:
+        return B_CHAMP
+    per_side = 8 >> level
+    side, j = divmod(k, per_side)
+    span = 8 // per_side
+    y = B_Y0 + (j * span + (span - 1) / 2) * B_DY
+    x = B_X[level]
+    return (W - x if side else x), y
+
+
+class TourneyPainter(DuelPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(dict(recipe, players=(recipe.get("players") or [])[:2] or None))
+        self.recipe = recipe
+        self.bgs = [_tourney_bg(_arenas(r)) for r in range(4)]
+        self.bg_empty = _tourney_bg([])
+        self.f_sudden, self.f_sudden2, self.f_sudden3 = _font(24), _font(34), _font(40)
+        self.f_round = _font(64)
+        self.f_names = _font(46)
+        self.f_champ = _font(110)
+        self.trophy = _emoji("1f3c6", 120)
+        self.crown = _emoji("1f451", 64)
+        self.hearts: dict = {}
+
+    def heart(self, col, size, kind):
+        key = (col, size, kind)
+        h = self.hearts.get(key)
+        if h is None:
+            if kind == "full":
+                h = _heart_sprite(size, col + (255,))
+            else:
+                h = _heart_sprite(size, None, (70, 74, 100, 255))
+            self.hearts[key] = h
+        return h
+
+    def frame(self, sim: TourneySim) -> Image.Image:
+        rnd = max(0, sim.round)
+        if sim.phase == "break":
+            # the finished round's arenas fade out, then the next round's fade in
+            k = (sim.t - sim.phase_at) / T_BREAK
+            if k < 0.5:
+                im = Image.blend(self.bgs[rnd], self.bg_empty, min(1.0, k / 0.45)).convert("RGBA")
+            else:
+                im = Image.blend(self.bg_empty, self.bgs[min(3, rnd + 1)], min(1.0, (k - 0.5) / 0.45)).convert("RGBA")
+        else:
+            im = self.bgs[rnd].copy().convert("RGBA")
+        d = ImageDraw.Draw(im)
+        if sim.phase == "break":
+            fade = 1 - min(1.0, (sim.t - sim.phase_at) / (T_BREAK * 0.5))
+            if fade > 0:
+                layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                self.round_matches(layer, ImageDraw.Draw(layer), sim, sim.old, sim.old_pairs, rnd)
+                layer.putalpha(layer.getchannel("A").point(lambda v, f=fade: int(v * f)))
+                im.alpha_composite(layer)
+        else:
+            self.round_matches(im, d, sim, sim.matches, sim.pairs, rnd)
+        self.bracket(im, d, sim)
+        self.header(im, d, sim)
+        if sim.winner is not None:
+            self.champion(im, d, sim)
+        self.watermark(d)
+        out = im.convert("RGB")
+        if sim.shake > 0:
+            amp = int(12 * min(1.0, sim.shake))
+            rng = random.Random(int(sim.t * 1000))
+            out = Image.fromarray(np.roll(np.asarray(out), (rng.randint(-amp, amp), rng.randint(-amp, amp)), (0, 1)))
+        return out
+
+    def round_matches(self, im, d, sim, matches, pairs, rnd):
+        arenas = _arenas(rnd)
+        hs = (30, 40, 44, 52)[rnd]
+        for m, pair, (cx, cy, r) in zip(matches, pairs, arenas):
+            self.place(cx, cy, r / D_R)
+            if m.ring < D_R:
+                # sudden death: the ring closing in, in red
+                rr = m.ring * r / D_R
+                q = r - max(3, r // 80)
+                d.ellipse((cx - q, cy - q, cx + q, cy + q), fill=(5, 6, 16, 255))
+                d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=(12, 10, 26, 255), outline=(255, 70, 80, 255),
+                          width=max(3, int(r / 40)))
+            if getattr(m, "sudden", False) and m.winner is None:
+                blink = int(m.t * 4) % 2 == 0
+                d.text((cx, cy - r - 4 - (14 if rnd == 0 else 26)), "SUDDEN DEATH", font=self.font_sized(rnd),
+                       fill=(255, 90, 100, 255 if blink else 170), anchor="mm", stroke_width=3,
+                       stroke_fill=(7, 9, 24, 255))
+            self.draw_match(im, d, m, ending=False)
+            # each ball's hearts in a column beside the arena, on its side
+            for i, b in enumerate(m.balls):
+                x = cx + (-1 if i == 0 else 1) * (r + 16 + hs / 2)
+                if rnd == 3:
+                    x = 58 if i == 0 else W - 58
+                n = m.hearts
+                y0 = cy - (n - 1) * (hs + 6) / 2
+                for k in range(n):
+                    full = k < b["hp"]
+                    h = self.heart(b["col"], hs, "full" if full else "empty")
+                    im.alpha_composite(h, (int(x - hs / 2), int(y0 + k * (hs + 6) - hs / 2)))
+        if rnd == 3 and matches:
+            m = matches[0]
+            parts = []
+            for k, b in enumerate(m.balls):
+                if k:
+                    parts.append(("VS ", (255, 255, 255)))
+                w1, w2 = b["name"].split(" ", 1)
+                parts += [(w1 + " ", b["col"]), (w2 + (" " if k == 0 else ""), (255, 255, 255))]
+            f = self.f_names
+            total = sum(d.textlength(t, font=f) for t, _ in parts)
+            x = (W - total) / 2
+            for t, col in parts:
+                d.text((x, 815), t, font=f, fill=col, anchor="lm", stroke_width=3, stroke_fill=(7, 9, 24))
+                x += d.textlength(t, font=f)
+        self.plain = True
+
+    def font_sized(self, rnd):
+        return self.f_sudden if rnd == 0 else self.f_sudden2 if rnd < 3 else self.f_sudden3
+
+    def bracket(self, im, d, sim):
+        line, dim = (58, 64, 100, 255), (34, 38, 62)
+        # the lines: each ball to the next level
+        for level in range(4):
+            for k in range(8 >> level << 1):
+                x0, y0 = _bracket_pos(level, k)
+                x1, y1 = _bracket_pos(level + 1, k // 2)
+                mx = (x0 + x1) / 2
+                won = len(sim.slots) > level + 1 and sim.slots[level][k] == sim.slots[level + 1][k // 2]
+                col = line
+                width = 3
+                if won:
+                    p = self.players(sim, sim.slots[level][k])
+                    col, width = p[2] + (255,), 5
+                pts = [(x0, y0), (mx, y0), (mx, y1), (x1, y1)] if level < 3 else \
+                    [(x0, y0), (x1 + (-62 if x0 < W / 2 else 62), y1)]
+                d.line(pts, fill=col, width=width, joint="curve")
+        # the balls
+        for level, ids in enumerate(sim.slots[:4]):
+            born = 0.0 if level == 0 else self.level_at(sim, level)
+            for k, pid in enumerate(ids):
+                x, y = _bracket_pos(level, k)
+                col = self.players(sim, pid)[2]
+                out = len(sim.slots) > level + 1 and pid not in sim.slots[level + 1]
+                age = sim.t - (k * 0.03 if level == 0 else born)
+                s = min(1.0, max(0.0, age / 0.25))
+                if s <= 0:
+                    continue
+                r = (22 + 2 * level) * (1 + 0.3 * math.sin(min(1.0, age / 0.4) * math.pi)) * s
+                if out:
+                    c2 = tuple(int(v * 0.3 + 20) for v in col)
+                    d.ellipse((x - r, y - r, x + r, y + r), fill=c2 + (255,), outline=dim, width=3)
+                    q = r * 0.5
+                    d.line([(x - q, y - q), (x + q, y + q)], fill=(230, 60, 70, 255), width=5)
+                    d.line([(x - q, y + q), (x + q, y - q)], fill=(230, 60, 70, 255), width=5)
+                else:
+                    d.ellipse((x - r, y - r, x + r, y + r), fill=col + (255,), outline=(255, 255, 255, 255), width=4)
+        tx, ty = B_CHAMP
+        if sim.winner is None:
+            im.alpha_composite(self.trophy, (int(tx - 60), int(ty - 60)))
+
+    def level_at(self, sim, level):
+        """When a bracket level was decided (when its round ended)."""
+        ends = [t for t, r in sim._ko if r == level - 1]
+        return (max(ends) + T_WAIT) if ends else sim.t
+
+    def players(self, sim, pid):
+        return sim.players[pid]
+
+    def header(self, im, d, sim):
+        rnd = max(0, sim.round)
+        name = ROUND_NAMES[rnd]
+        if sim.phase == "break":
+            k = (sim.t - sim.phase_at) / T_BREAK
+            name = ROUND_NAMES[min(3, rnd + 1)] if k > 0.45 else name
+        if sim.winner is not None:
+            name = "CHAMPION"
+        d.text((W / 2, 92), name, font=self.f_round, fill=(255, 255, 255, 255), anchor="mm",
+               stroke_width=6, stroke_fill=(70, 60, 160, 255))
+
+    def champion(self, im, d, sim):
+        p = sim.players[sim.winner]
+        age = sim.t - sim.done_at
+        x, y = B_CHAMP
+        s = min(1.0, age / 0.3)
+        r = 56 * s * (1 + 0.15 * math.sin(min(1.0, age / 0.5) * math.pi))
+        if r > 1:
+            d.ellipse((x - r, y - r, x + r, y + r), fill=p[2] + (255,), outline=(255, 215, 80, 255), width=7)
+            if s >= 1:
+                im.alpha_composite(self.crown, (int(x - 32), int(y - r - 52)))
+        if age < 0.7:
+            return
+        k = min(1.0, (age - 0.7) / 0.3)
+        sc = 0.6 + 0.4 * k
+        for text, yy, size in ((f"{p[0]} {p[1]}".upper(), 1490, 92), ("CHAMPION!", 1590, 80)):
+            f = _font(size)
+            while d.textlength(text, font=f) > W - 120:
+                f = _font(f.size - 4)
+            txt = Image.new("RGBA", (W, 160), (0, 0, 0, 0))
+            ImageDraw.Draw(txt).text((W / 2, 80), text, font=f, fill=(255, 255, 255, 255), anchor="mm",
+                                     stroke_width=9, stroke_fill=p[2] + (255,))
+            txt = txt.resize((int(W * sc), int(160 * sc)), Image.LANCZOS)
+            im.alpha_composite(txt, (int((W - txt.width) / 2), int(yy - txt.height / 2)))
+
+
 # ---- sound (numpy) -------------------------------------------------------------
 
 def _noise(n, seed):
@@ -1126,6 +1615,14 @@ def _sound(kind: str, seed: int = 0) -> np.ndarray:
     if kind == "tie":                 # a line tied on (race)
         t = tt(0.06)
         return np.sin(2 * np.pi * (880 + 120 * (seed % 4)) * t) * np.exp(-t * 70) * 0.16
+    if kind == "sudden":              # sudden death: a low warning blip
+        t = tt(0.35)
+        return np.sin(2 * np.pi * 220 * t) * np.exp(-t * 9) * (0.6 + 0.4 * np.sign(np.sin(2 * np.pi * 8 * t))) * 0.3
+    if kind == "whoosh":              # a tournament round starts
+        t = tt(0.7)
+        sweep = _lp(_noise(len(t), seed), 6) * np.sin(np.pi * np.minimum(1, t / 0.7)) ** 2
+        gong = np.sin(2 * np.pi * (110 + 30 * seed) * t) * np.exp(-t * 5) * np.minimum(1, t / 0.01)
+        return (sweep * 0.35 + gong * 0.5) * 0.8
     if kind == "steal":               # lines stolen (race)
         t = tt(0.2)
         return _lp(_noise(len(t), seed), 4) * np.exp(-t * 22) * 0.35
@@ -1170,4 +1667,5 @@ def _sfx_mix(recipe: dict, sfx: list, hits: list, n: int, sim) -> np.ndarray:
     return out * 0.8 + music
 
 
-PARTS = {"duel": (DuelSim, DuelPainter), "race": (RaceSim, RacePainter)}
+PARTS = {"duel": (DuelSim, DuelPainter), "race": (RaceSim, RacePainter),
+         "tourney": (TourneySim, TourneyPainter)}
