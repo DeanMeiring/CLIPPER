@@ -1020,6 +1020,31 @@ merge it yourself; merging stays Dean's call per the rule above.
   fights at once was a wall of noise). In the rotation once (26 slots) and
   `BALLS_DEBUT` 1, so the next autopilot video is a tournament.
   ~2 min to make a 51 s video.
+- **Numbers + more fights (25 Oct):** Dean asked to "pull analytics for the
+  balls and see what does well". vidIQ's public numbers for the 30 Shorts
+  (8-23 Oct; Dropvolve isn't connected to vidIQ, so no retention/swipe
+  data -- Dean was told to connect it): almost all sit at 1-2k views (the
+  test audience), the Royal Purple VS Cherry Red duel went to 12k and still
+  climbing, 3.5 likes per 100 views; the other duel 2.2; everything else
+  ~1; the growing ball 3k; cursed packs weakest. Dean said yes to more
+  fights + varied duels:
+  - `BALLS_FORMAT_CYCLE` 18 slots, a third fights: duel x4, tourney x2,
+    shrink x2, escape x2, then one each of center, zen, spiral, race, merge,
+    jaws, box, spikes. Rays, break in, trail, touch out of the autopilot.
+  - Duel looks (`duel_recipe`, own rng `duel-look-<seed>`, so the colour
+    duel's draws are unchanged): 45% **flags** (`COUNTRIES`, 45 plain
+    flag-icons discs in `clipper/assets/flags`, the duel's own face drawn
+    on them; 70% a football-style `RIVALRIES` pair; countries in an armed
+    conflict with each other left out on purpose; a too-close second colour
+    takes `ALT_COLOURS`; "Flags: flag-icons (MIT)" in the description),
+    25% **2v2** (`TeamDuelSim` / `TeamDuelPainter`: a warm and a cool pair,
+    team-coloured rings, 6 hearts each, aim at the nearest enemy, no
+    friendly fire, a team is out when both are; ok = a 3+ heart comeback
+    and the winners on <= 5 hearts, ~1 seed in 10), 30% the old colours.
+    The tournament is half flags ("16 countries, 1 winner"). The duel's
+    team-ready hooks (`_hp_row`, `_ko`, `_movers`, `_pairs`, `_collide`,
+    `_bullet_hit`, `_boom_targets`) keep the 1v1 duel byte for byte as
+    before (checked on two whole duels from their saved recipes).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
