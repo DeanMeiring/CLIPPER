@@ -998,6 +998,28 @@ merge it yourself; merging stays Dean's call per the rule above.
   `merge_sound: "cursed"`; `mix_audio` then drops the merge puffs and lays
   `merge_track` over the music. Older recipes sound as before.
 
+- **16-ball tournament (25 Oct):** a viewer commented "Pls make a tournament
+  16 balls" under a duel, and Dean asked for it. `format: "tourney"` in
+  `clipper/ball_duel.py` (`TourneySim` / `TourneyPainter`, `NO_PACK`): a
+  bracket on top (16 colour dots, losers crossed out, winners' lines in their
+  colour, 🏆 then the champion with a crown), all fights of a round at once
+  below it (8 arenas, then 4, then 2, then the final full width with names),
+  each ball's hearts in a column beside its arena. Every fight is a `DuelSim`
+  in the duel's own coordinates; the painter only draws it smaller
+  (`DuelPainter.place`; plain mode draws the duel byte for byte as before,
+  checked on two whole duels, sim + frames + audio). Hearts by round 2/2/3/5
+  (`T_HEARTS`). Tuning lessons: rounds ran 20-40 s because balls kept
+  swapping weapons before firing (now `keep`: a gun-holder walks past drops),
+  circling balls outran the aim (fires near enough after 1.2 s), and shots
+  kept missing; so `T_SUDDEN` 6/7/8 s: sudden death = one heart each + a
+  rocket each, and the ring closes in (`DuelSim.ring`, red on screen,
+  "SUDDEN DEATH") until nothing misses; rounds now ~9-15 s, the whole video
+  ~45-55 s (`good_end` 36-58), ~40% of seeds have a close final (comeback or
+  winner on <= 2 hearts). 16 colours: `COLOURS` + `EXTRA_COLOURS`, every
+  first fight one of each. Early rounds drop wall/bump/pickup sounds (eight
+  fights at once was a wall of noise). In the rotation once (26 slots) and
+  `BALLS_DEBUT` 1, so the next autopilot video is a tournament.
+  ~2 min to make a 51 s video.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
