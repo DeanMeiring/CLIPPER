@@ -1529,13 +1529,18 @@ def publish_text(recipe: dict) -> dict:
 
 
 def _duel_text(recipe: dict) -> dict:
-    if recipe.get("format") == "duel":
+    if recipe.get("format") == "duel" and recipe.get("look") == "teams":
+        desc = ("Two teams of two, six hearts each. Weapons drop into the ring -- pistol, shotgun, minigun, "
+                "rocket launcher -- and every gun fires once. A team is out when both its balls are.\n\n"
+                "Which team did you pick? 👇\n\n#satisfying #physics #bouncingball #battle")
+        title = f"{recipe['hook']} ⚔️"
+    elif recipe.get("format") == "duel":
         desc = ("Two balls, ten hearts each. Weapons drop into the ring -- pistol, shotgun, minigun, rocket "
                 "launcher -- and every gun fires once. Last one standing wins.\n\nWho did you pick? 👇\n\n"
                 "#satisfying #physics #bouncingball #battle")
         title = f"{recipe['hook']} ⚔️"
     elif recipe.get("format") == "tourney":
-        desc = ("16 balls, one bracket. All the fights of a round happen at once: 8, then 4, then 2, then the "
+        desc = (f"16 {'countries' if recipe.get('look') == 'flags' else 'balls'}, one bracket. All the fights of a round happen at once: 8, then 4, then 2, then the "
                 "final. Every gun fires once, and when a fight runs long it's sudden death -- one heart, a rocket "
                 "each, and the ring closes in.\n\nWho did you pick? 👇\n\n"
                 "#satisfying #physics #bouncingball #tournament")
@@ -1548,6 +1553,8 @@ def _duel_text(recipe: dict) -> dict:
     song = recipe.get("song") or {}
     if recipe.get("bounce_sound") == "song" and (song.get("credit") or "").strip():
         desc += "\n\nMusic:\n" + song["credit"].strip()
+    if recipe.get("look") == "flags":
+        desc += "\n\nFlags: flag-icons (MIT)"
     return {"title": title[:100], "description": desc}
 
 

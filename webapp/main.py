@@ -6308,10 +6308,16 @@ BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "cente
 # trail x2, merge, spikes, shrink, jaws, touch.
 # Then (19 Oct) the ball duel and "first to N" race (clipper/ball_duel.py):
 # 25 slots, duel x2 and race x1 added. Then (25 Oct) the 16-ball
-# tournament a viewer asked for under a duel: 26 slots.
-BALLS_FORMAT_CYCLE = ("escape", "spiral", "duel", "trail", "center", "breakin", "rays", "box", "merge", "escape",
-                      "race", "zen", "spikes", "spiral", "breakin", "duel", "trail", "center", "rays", "shrink",
-                      "box", "escape", "tourney", "jaws", "touch", "zen")
+# tournament a viewer asked for under a duel. Same day, the channel's
+# numbers (30 Shorts, 8-23 Oct): a duel went to 12k views with 3.5 likes per
+# 100 views, the other duel 2.2, everything else ~1 and stuck at the
+# 1-2k test audience; the growing ball (3k) next. Dean: more fights. 18
+# slots, a third fights (duel x4 -- colours, flags or 2v2 --, tournament
+# x2), the growing ball and escape x2, one each of center, zen, spiral,
+# race, merge, jaws, box, spikes. Rays, break in, trail and touch are out
+# (still in Make by hand).
+BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "tourney", "center", "duel", "zen", "spiral", "duel", "race",
+                      "shrink", "escape", "tourney", "merge", "duel", "jaws", "box", "spikes")
 # New kinds go first (Dean, 19 Oct: "the newest one added takes precedence"
 # -- he didn't want to wait days for the rotation to reach them): until each
 # has this many videos made since BALLS_DEBUT_SINCE, the autopilot's next
