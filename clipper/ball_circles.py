@@ -32,6 +32,7 @@ BALL_R = 22
 SECONDS_CAP = 75.0
 END_HOLD = 4.0
 FORMATS = ("escape", "touch")
+FILL_SHARE = 0.74          # escape with recipe["fill"]: done at this share of the ring's area
 
 
 def capacity(fmt: str = "touch") -> int:
@@ -58,6 +59,12 @@ class CircleSim:
         start = 2 if self.format == "touch" else 1
         self.thresholds = [round(start * (self.cap / start) ** (k / self.last)) for k in range(self.last + 1)]
         self.thresholds[-1] = self.cap
+        if recipe.get("fill") and self.format == "escape":
+            # Dean (26 Oct): the final picture came at "full", but under
+            # gravity 145 balls only fill the bottom half, so the video
+            # stopped on a half-empty ring. The pictures keep their counts;
+            # the balls keep coming until the ring really is full.
+            self.cap = int(FILL_SHARE * (RING_R / BALL_R) ** 2)
 
         self.space = pymunk.Space()
         self.space.gravity = (0, 700 if self.format == "escape" else 0)

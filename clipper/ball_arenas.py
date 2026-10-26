@@ -61,6 +61,8 @@ class ArenaSim:
         self.t = 0.0
         self.done_at = None
         self.ok = True
+        self.fill = bool(recipe.get("fill"))
+        self.final_at = None
 
     def reveal(self, tier: int) -> None:
         tier = min(self.last, tier)
@@ -71,6 +73,13 @@ class ArenaSim:
             self.best = tier
             self.banner = (f"NEW: {self.chain[tier][1]}!", self.t)
             self.events.append((self.t, "unlock", tier, 1.0))
+
+    def final(self) -> None:
+        """recipe["fill"] (26 Oct): the final picture comes as before, but the
+        video goes on until the job is visibly done (finish)."""
+        if self.final_at is None:
+            self.final_at = self.t
+            self.reveal(self.last)
 
     def finish(self, ok: bool = True) -> None:
         if self.done_at is None:
@@ -381,6 +390,8 @@ S_SPIKE_W, S_SPIKE_H = 50, 46
 S_TIP = 10             # only a hit this close to the tip pops it...
 S_HEAD_ON = 0.97       # ...and nearly head-on (cos of the angle to the spike's line)
 S_BOUNCES = 28         # bounces to the final form, shared out over the pictures
+S_AUTO = 0.12          # recipe["fill"]: after the final form a spike grows by itself this often
+                       # in a free spot, until the walls are covered
 
 
 def _octagon() -> list:
@@ -447,7 +458,8 @@ class SpikesSim(ArenaSim):
         # the tip is the first thing a ball meets from most directions, so
         # only a near head-on hit pops it; the rest glance off
         head_on = -(cps.normal.x * ax + cps.normal.y * ay)
-        if (p.x - tip[0]) ** 2 + (p.y - tip[1]) ** 2 < S_TIP ** 2 and head_on > S_HEAD_ON:
+        # (once the final form is in, it can't pop: it fills the walls)
+        if (p.x - tip[0]) ** 2 + (p.y - tip[1]) ** 2 < S_TIP ** 2 and head_on > S_HEAD_ON and self.final_at is None:
             self._popped = True
         else:
             self._hit()
@@ -483,10 +495,46 @@ class SpikesSim(ArenaSim):
                 tier = min(self.last, self.bounces // self.per_tier)
                 self.ball["tier"] = tier
                 self.reveal(tier)
-                if tier >= self.last:
+                if tier >= self.last and self.fill:
+                    self.final()
+                    if self.t - getattr(self, "_auto_at", -1.0) >= S_AUTO:
+                        self._auto_at = self.t
+                        if not self._auto_grow():
+                            self.finish(ok=True)
+                elif tier >= self.last:
                     self.finish(ok=True)
         self.spawned = len(self.spikes)
         self.t += dt
+
+    def _auto_grow(self) -> bool:
+        """Grow one spike in a free spot on the walls (not right where the
+        ball is); False when there's none left."""
+        if not hasattr(self, "_slots"):
+            pts = _octagon()
+            self._slots = []
+            for p, q in zip(pts, pts[1:] + pts[:1]):
+                L = math.hypot(q[0] - p[0], q[1] - p[1])
+                n = int(L // (S_SPIKE_W * 1.08))
+                mx, my = (p[0] + q[0]) / 2, (p[1] + q[1]) / 2
+                nx, ny = CX - mx, CY - my
+                d = math.hypot(nx, ny)
+                for k in range(n):
+                    f = (k + 0.5) / n
+                    self._slots.append((p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f, nx / d, ny / d))
+            self.rng.shuffle(self._slots)
+        bx, by = _pos(self.ball) if self.balls else (-1e5, -1e5)
+        for i, (x, y, nx, ny) in enumerate(self._slots):
+            if any((x - s[0]) ** 2 + (y - s[1]) ** 2 < (S_SPIKE_W * 1.05) ** 2 for s in self.spikes):
+                continue
+            if (bx - x) ** 2 + (by - y) ** 2 < (S_BALL + S_SPIKE_H + 20) ** 2:
+                continue                                  # not on top of the ball
+            self._grow(x, y, nx, ny)
+            self.events.append((self.t, "tick", len(self.spikes) % 10, 0.7))
+            return True
+        # nothing free: covered (a spot held up only by the ball waits for it)
+        return any((bx - x) ** 2 + (by - y) ** 2 < (S_BALL + S_SPIKE_H + 20) ** 2
+                   and not any((x - s[0]) ** 2 + (y - s[1]) ** 2 < (S_SPIKE_W * 1.05) ** 2 for s in self.spikes)
+                   for x, y, nx, ny in self._slots)
 
     def _grow(self, x: float, y: float, nx: float, ny: float) -> None:
         if any((x - s[0]) ** 2 + (y - s[1]) ** 2 < (S_SPIKE_W * 1.05) ** 2 for s in self.spikes):
@@ -848,7 +896,7 @@ class SpiralSim(ArenaSim):
                     self.pieces.remove(w)
             self._dead.clear()
         for pos in self._spawns:
-            if len(self.balls) < P_MAX and self.done_at is None:
+            if len(self.balls) < (self.total + 1 if self.fill else P_MAX) and self.done_at is None:
                 nb = self._add(pos)
                 if len(self.effects) < 10:
                     self.effects.append([pos[0], pos[1], 22, 1.0, nb["tier"]])
@@ -860,7 +908,11 @@ class SpiralSim(ArenaSim):
         for w in self.pieces:
             w.piece["flash"] *= 0.8
         self.spawned = len(self.balls)
-        if self.done_at is None:
+        if self.done_at is None and self.fill and 1 - len(self.pieces) / self.total >= P_CLEAR:
+            self.final()
+            if not self.pieces:                       # the whole spiral is gone
+                self.finish(ok=True)
+        elif self.done_at is None:
             if 1 - len(self.pieces) / self.total >= P_CLEAR:
                 self.finish(ok=True)
             else:
@@ -1027,6 +1079,7 @@ B_BALL = 13
 B_PLUS = 3
 B_LIVE = 520            # balls simulated at once
 B_TARGET = 2500         # the count for the final form
+B_FULL = 1150           # recipe["fill"]: balls in the box when it's full
 
 
 class BoxSim(ArenaSim):
@@ -1092,8 +1145,9 @@ class BoxSim(ArenaSim):
             elif not b["out"]:
                 live += 1
         # new balls drop in at the top, a few per frame
+        cap = B_FULL + 40 if self.final_at is not None else B_LIVE
         for _ in range(min(self.waiting, 12)):
-            if live >= B_LIVE:
+            if live >= cap:
                 break
             self._add()
             self.waiting -= 1
@@ -1102,7 +1156,11 @@ class BoxSim(ArenaSim):
         if self.done_at is None:
             tier = max(k for k, th in enumerate(self.thresholds) if self.count >= th or k == 0)
             self.reveal(tier)
-            if self.count >= B_TARGET:
+            if self.count >= B_TARGET and self.fill:
+                self.final()
+                if live >= B_FULL:
+                    self.finish(ok=True)
+            elif self.count >= B_TARGET:
                 self.finish(ok=True)
         self.t += dt
 
@@ -1304,6 +1362,7 @@ class ZenPainter(ArenaPainter):
 T_R = 470               # the ring
 T_BALL0, T_BALL_STEP = 22.0, 4.0
 T_END = 0.46            # done when the ball's radius reaches this share of the ring's
+T_FILL_END = 0.9        # recipe["fill"]: the final picture at T_END, done at this
 T_GRAVITY, T_MIN_SPEED = 800.0, 760.0
 
 
@@ -1335,7 +1394,11 @@ class TrailSim(OneBallSim):
                     b["x"], b["y"] = CX + dx * k, CY + dy * k
             b["tier"] = min(self.last, int(self.bounces / self.target * (self.last + 0.999)))
             self.reveal(b["tier"])
-            if b["r"] >= T_R * T_END:
+            if b["r"] >= T_R * T_END and self.fill:
+                self.final()
+                if b["r"] >= T_R * T_FILL_END:
+                    self.finish(ok=True)
+            elif b["r"] >= T_R * T_END:
                 self.finish(ok=True)
         self.spawned = self.bounces
         self.t += dt

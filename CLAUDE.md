@@ -1062,6 +1062,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   added; `BALLS_DEBUT` royale 1 (the next autopilot video). White winners
   (England, Snow White) get a dark text outline (`_stroke`). ~1.75 min to
   make a 35 s video.
+- **Finish the job (26 Oct):** Dean: some videos stop at the final picture
+  with the job half done (ring not full, box not full, spikes not
+  covering the walls). New recipes of `be.FILL_KINDS` carry
+  `recipe["fill"]`; the final picture still comes when it did
+  (`ArenaSim.final()`), then the video goes on until it's visibly done:
+  escape keeps adding balls to `FILL_SHARE` 0.74 of the ring's area (it
+  fills to the top; at 145 gravity left the top half empty), spiral until
+  every wall piece is gone (a ball per piece), box until `B_FULL` 1150
+  balls are in it (full to the top; the live cap rises after the final),
+  spikes grow by themselves every `S_AUTO` 0.12 s in free spots (not on
+  the ball, which can't pop after the final form) until the walls are
+  covered, trail until the ball's radius is `T_FILL_END` 0.9 of the ring.
+  Adds ~1-8 s. Recipes without the field (every older video) simulate
+  exactly as before (checked on 12 recipes of 6 kinds). Shrink, touch,
+  zen, merge, center, jaws, break in already ended on a finished job.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
