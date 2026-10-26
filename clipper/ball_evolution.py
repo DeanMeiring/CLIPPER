@@ -173,7 +173,8 @@ FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", 
            "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
-NO_PACK = ("duel", "race", "tourney", "royale")      # the balls are the contestants: no picture pack
+NO_PACK = ("duel", "race", "tourney", "royale")
+FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
 def recipe_chain(recipe: dict) -> list:
@@ -292,6 +293,11 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         # the rainbow along the path, not one dim colour per picture. A
         # recipe field, so videos made before draw exactly as they did.
         recipe["trail"] = "rainbow"
+    if fmt in FILL_KINDS:
+        # Dean (26 Oct): these stopped at the final picture with the job half
+        # done (a half-full ring or box, bare walls); now they go on until
+        # it's visibly done. A recipe field, so older videos play as they did.
+        recipe["fill"] = True
     return recipe
 
 
