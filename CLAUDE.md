@@ -1045,6 +1045,23 @@ merge it yourself; merging stays Dean's call per the rule above.
     team-ready hooks (`_hp_row`, `_ko`, `_movers`, `_pairs`, `_collide`,
     `_bullet_hit`, `_boom_targets`) keep the 1v1 duel byte for byte as
     before (checked on two whole duels from their saved recipes).
+- **Battle royale (26 Oct):** Dean asked for "16 balls, one circle,
+  1v1v1". `format: "royale"` (`RoyaleSim` / `RoyalePainter` in
+  `ball_duel.py`, `NO_PACK`, half 16 countries / half 16 colours): every
+  ball for itself (each its own team in the 2v2 machinery: aims at the
+  nearest ball, bullets hit whoever they reach, rockets hurt everyone near),
+  4 hearts each (pips above each ball), up to 6 drops at once. It runs in
+  a bigger ring (`R_START` 800 in the duel's units) drawn scaled into the
+  duel's ring, so 16 balls have room; from `R_ZONE_AT` 8 s the ring closes
+  in like a battle-royale zone (red, 14/s down to 250), and once it is
+  smaller than the duel ring guns fire without waiting to aim. HUD: the
+  hook, all 16 in two rows (crossed out when out), "N LEFT". ok = winner
+  on <= 2 hearts and the first knockout by 6 s; `max_gap` is the longest
+  wait between knockouts; `good_end` 24-45 (median ~29 s, ~1 seed in 3).
+  Early tests with 3 hearts ended in ~24 s. Rotation 20 slots: royale x2
+  added; `BALLS_DEBUT` royale 1 (the next autopilot video). White winners
+  (England, Snow White) get a dark text outline (`_stroke`). ~1.75 min to
+  make a 35 s video.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
