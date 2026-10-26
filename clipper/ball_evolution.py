@@ -170,10 +170,10 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 # ---- recipes -----------------------------------------------------------
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney")
+           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
-#   duel/race/tourney: ball_duel.py
-NO_PACK = ("duel", "race", "tourney")      # the balls are the contestants: no picture pack
+#   duel/race/tourney/royale: ball_duel.py
+NO_PACK = ("duel", "race", "tourney", "royale")      # the balls are the contestants: no picture pack
 
 
 def recipe_chain(recipe: dict) -> list:
@@ -281,7 +281,7 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     if fmt in NO_PACK:
         from clipper import ball_duel
         {"duel": ball_duel.duel_recipe, "race": ball_duel.race_recipe,
-         "tourney": ball_duel.tourney_recipe}[fmt](recipe)
+         "tourney": ball_duel.tourney_recipe, "royale": ball_duel.royale_recipe}[fmt](recipe)
     if fmt == "merge" or fmt in ARENA_HOOKS or fmt in NO_PACK:
         # what the bounces play (ball_sounds): the piano tune, a cursed meow
         # that gets deeper, or an original phonk cowbell riff
@@ -853,6 +853,8 @@ def good_end(recipe: dict) -> tuple:
         return (28.0, 50.0)
     if recipe.get("format") == "tourney":
         return (36.0, 58.0)
+    if recipe.get("format") == "royale":
+        return (24.0, 45.0)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -1539,6 +1541,12 @@ def _duel_text(recipe: dict) -> dict:
                 "launcher -- and every gun fires once. Last one standing wins.\n\nWho did you pick? 👇\n\n"
                 "#satisfying #physics #bouncingball #battle")
         title = f"{recipe['hook']} ⚔️"
+    elif recipe.get("format") == "royale":
+        who = "countries" if recipe.get("look") == "flags" else "balls"
+        desc = (f"16 {who}, one circle, everyone for themselves. Weapons drop in, every gun fires once, a rocket "
+                f"hits everyone near it, and the circle keeps closing in. Last one standing wins.\n\n"
+                f"Who did you pick? 👇\n\n#satisfying #physics #bouncingball #battleroyale")
+        title = f"{recipe['hook']} 👑"
     elif recipe.get("format") == "tourney":
         desc = (f"16 {'countries' if recipe.get('look') == 'flags' else 'balls'}, one bracket. All the fights of a round happen at once: 8, then 4, then 2, then the "
                 "final. Every gun fires once, and when a fight runs long it's sudden death -- one heart, a rocket "

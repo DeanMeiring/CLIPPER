@@ -41,7 +41,7 @@ from clipper import ball_evolution as be
 W, H, FPS, SR = be.W, be.H, be.FPS, be.SR
 END_HOLD = 3.2
 SECONDS_CAP = 70.0
-KINDS = ("duel", "race", "tourney")
+KINDS = ("duel", "race", "tourney", "royale")
 
 # colour names for the contestants: (first word, second word, rgb)
 COLOURS = [("Cherry", "Red", (228, 52, 64)), ("Ocean", "Blue", (84, 140, 245)),
@@ -108,6 +108,12 @@ def _country(code: str) -> list:
     """A player entry for a country: [name, "", colour, flag code]."""
     name, col = COUNTRIES[code]
     return [name, "", list(col), code]
+
+
+def _stroke(col) -> tuple:
+    """The outline for white text in a player's colour: a light colour
+    (England, Snow White) would vanish, so those get a dark one."""
+    return (40, 42, 64) if min(col) > 170 else tuple(col)
 
 
 def _name(p) -> str:
@@ -267,6 +273,7 @@ class DuelSim:
         self.rush_at = None          # tournament: from this second on, weapons drop much faster
         self.keep = False            # tournament: a ball holding a weapon walks past the others
         self.ring = D_R              # tournament: sudden death closes the ring in
+        self.max_drops = 4           # weapons waiting at once while rushing (battle royale: more)
         self.balls = []
         for i, p in enumerate(players or recipe.get("players") or [list(c) for c in COLOURS[:2]]):
             w1, w2, col = p[:3]
@@ -407,7 +414,7 @@ class DuelSim:
         if self.t < self.next_spawn:
             return
         rush = self.rush_at is not None and self.t >= self.rush_at
-        if len(self.pickups) < (4 if rush else 3):
+        if len(self.pickups) < (self.max_drops if rush else 3):
             names = list(WEAPONS)
             w = self.rng.choices(names, [WEAPONS[n][2] for n in names])[0]
             for _ in range(30):
@@ -1018,7 +1025,7 @@ class DuelPainter:
         s = 0.6 + 0.4 * k
         txt = Image.new("RGBA", (W, 200), (0, 0, 0, 0))
         ImageDraw.Draw(txt).text((W / 2, 100), name, font=f, fill=(255, 255, 255, 255), anchor="mm",
-                                 stroke_width=10, stroke_fill=w["col"] + (255,))
+                                 stroke_width=10, stroke_fill=_stroke(w["col"]) + (255,))
         txt = txt.resize((int(W * s), int(200 * s)), Image.LANCZOS)
         im.alpha_composite(txt, (int((W - txt.width) / 2), int(D_CY + 230 - txt.height / 2)))
 
@@ -1686,7 +1693,7 @@ class TourneyPainter(DuelPainter):
                 f = _font(f.size - 4)
             txt = Image.new("RGBA", (W, 160), (0, 0, 0, 0))
             ImageDraw.Draw(txt).text((W / 2, 80), text, font=f, fill=(255, 255, 255, 255), anchor="mm",
-                                     stroke_width=9, stroke_fill=p[2] + (255,))
+                                     stroke_width=9, stroke_fill=_stroke(p[2]) + (255,))
             txt = txt.resize((int(W * sc), int(160 * sc)), Image.LANCZOS)
             im.alpha_composite(txt, (int((W - txt.width) / 2), int(yy - txt.height / 2)))
 
@@ -1831,6 +1838,170 @@ def _duel_painter(recipe: dict):
     return (TeamDuelPainter if recipe.get("look") == "teams" else DuelPainter)(recipe)
 
 
+# ---- battle royale (26 Oct: Dean, "16 balls, one circle, 1v1v1...") ------------
+#
+# 16 duel balls in one ring, every ball for itself: it aims at the nearest
+# ball, bullets hit whoever they reach, a rocket hurts everyone near it. 4
+# hearts each. After R_ZONE_AT the ring closes in like a battle-royale zone
+# (red on screen), so the last fights can't drag on; once it is smaller
+# than the duel's ring, guns fire without waiting to aim. The fight runs in
+# a bigger ring (R_START) in the duel's own units and is drawn scaled down,
+# so 16 balls have room. Last ball standing wins.
+
+R_START, R_MIN = 800, 250
+R_ZONE_AT, R_ZONE_SPEED = 8.0, 14.0
+R_HEARTS = 4
+ROYALE_HOOKS = ["16 balls, 1 circle -- who survives?", "Last ball standing wins", "16 balls enter. 1 leaves.",
+                "Pick a ball: last one alive wins"]
+FLAG_ROYALE_HOOKS = ["16 countries, 1 circle -- who survives?", "Last country standing wins",
+                     "16 countries enter. 1 leaves.", "Pick a country: last one alive wins"]
+
+
+def royale_recipe(recipe: dict) -> dict:
+    rng = random.Random(f"royale-recipe-{recipe['seed']}")
+    if rng.random() < 0.5:
+        players = [_country(c) for c in rng.sample(sorted(COUNTRIES), 16)]
+        recipe.update(look="flags", hook=rng.choice(FLAG_ROYALE_HOOKS))
+    else:
+        players = [list(c) for c in rng.sample(COLOURS + EXTRA_COLOURS, 16)]
+        recipe.update(hook=rng.choice(ROYALE_HOOKS))
+    recipe.update(players=players, bed="off", ending="WINS!")
+    return recipe
+
+
+class RoyaleSim(TeamDuelSim):
+    def __init__(self, recipe: dict):
+        DuelSim.__init__(self, recipe, hearts=R_HEARTS)
+        self.ring = R_START
+        self.rush_at = 0.0
+        self.keep = True
+        self.max_drops = 6
+        self.next_spawn = 0.4
+        n = len(self.balls)
+        for b in self.balls:
+            a = 2 * math.pi * b["i"] / n - math.pi / 2
+            b["team"] = b["i"]                       # everyone for themselves
+            b["x"], b["y"] = D_CX + math.cos(a) * 560, D_CY + math.sin(a) * 560
+        self.kos: list = []                          # (t, ball index)
+
+    def left(self) -> int:
+        return sum(1 for b in self.balls if b["alive"])
+
+    def _hp_row(self) -> tuple:
+        return (self.left(),)
+
+    def _ko(self, target, by):
+        self.kos.append((self.t, target["i"]))
+        self.sfx.append((self.t, "die", 0))
+        live = [b for b in self.balls if b["alive"]]
+        if len(live) == 1:
+            self._end(live[0])
+
+    def _end(self, winner):
+        self.winner = winner
+        self.done_at = self.t
+        self.sfx.append((self.t + 0.3, "win", 0))
+        times = [0.0] + [t for t, _ in self.kos]
+        self.max_gap = max(b - a for a, b in zip(times, times[1:]))     # longest wait between knockouts
+        self.ok = winner["hp"] <= 2 and times[1] <= 6.0
+
+    def step(self):
+        super().step()
+        if self.winner is None and self.t > R_ZONE_AT:
+            self.ring = max(R_MIN, R_START - (self.t - R_ZONE_AT) * R_ZONE_SPEED)
+            self.pickups = [p for p in self.pickups if math.hypot(p["x"] - D_CX, p["y"] - D_CY) < self.ring - 60]
+        for b in self.balls:
+            if not b["alive"] and not b.get("gone"):
+                b["gone"] = True                     # out of the way of drops (its shards are already flying)
+                b["x"] = b["y"] = -1e5
+
+    def music_track(self, n: int) -> np.ndarray:
+        # 16 balls tapping the wall is a wall of noise: hits, shots and knockouts only
+        sfx = [e for e in self.sfx if e[1] not in ("wall", "bump", "spawn")]
+        return _sfx_mix(self.recipe, sfx, self.hits, n, self)
+
+
+class RoyalePainter(DuelPainter):
+    def __init__(self, recipe: dict):
+        super().__init__(dict(recipe, players=(recipe.get("players") or [])[:2] or None))
+        self.recipe = recipe
+        self.players = recipe.get("players") or [list(c) for c in COLOURS + EXTRA_COLOURS]
+        self.k = D_R / R_START
+        self.f_left = _font(64)
+        self.f_hook = _font(52)
+        self.pip_full: dict = {}
+        self.pip_empty = _heart_sprite(18, None, (90, 94, 120, 255))
+        self.dead_at: dict = {}
+
+    def frame(self, sim: RoyaleSim) -> Image.Image:
+        im = self.bg.copy().convert("RGBA")
+        d = ImageDraw.Draw(im)
+        if sim.ring < R_START - 0.5:
+            # the zone closing in, in red
+            rr = sim.ring * self.k
+            q = D_R - 4
+            d.ellipse((D_CX - q, D_CY - q, D_CX + q, D_CY + q), fill=(5, 6, 16, 255))
+            d.ellipse((D_CX - rr, D_CY - rr, D_CX + rr, D_CY + rr), fill=(12, 10, 26, 255),
+                      outline=(255, 70, 80, 255), width=6)
+        self.hud(im, d, sim)
+        self.place(D_CX, D_CY, self.k)
+        self.draw_match(im, d, sim, ending=False)
+        for b in sim.balls:                          # each ball's hearts as pips above it
+            if not b["alive"] or sim.winner is not None:
+                continue
+            x, y = self.P(b["x"], b["y"])
+            full = self.pip_full.get(b["col"])
+            if full is None:
+                full = self.pip_full[b["col"]] = _heart_sprite(18, b["col"] + (255,))
+            x0 = x - (sim.hearts * 20 - 2) / 2
+            for k in range(sim.hearts):
+                im.alpha_composite(full if k < b["hp"] else self.pip_empty, (int(x0 + k * 20), int(y - 62)))
+        self.plain = True
+        if sim.winner is not None:
+            self.ending(im, d, sim)
+        self.watermark(d)
+        out = im.convert("RGB")
+        if sim.shake > 0:
+            amp = int(10 * min(1.0, sim.shake))
+            rng = random.Random(int(sim.t * 1000))
+            out = Image.fromarray(np.roll(np.asarray(out), (rng.randint(-amp, amp), rng.randint(-amp, amp)), (0, 1)))
+        return out
+
+    def hud(self, im, d, sim):
+        f = self.f_hook
+        hook = self.recipe.get("hook") or ""
+        while d.textlength(hook, font=f) > W - 80 and f.size > 30:
+            f = _font(f.size - 4)
+        d.text((W / 2, 92), hook, font=f, fill=(255, 255, 255, 255), anchor="mm", stroke_width=5,
+               stroke_fill=(70, 60, 160, 255))
+        # everyone in two rows: crossed out when they're knocked out
+        for b in sim.balls:
+            x, y = 76 + (b["i"] % 8) * 132, 210 + (b["i"] // 8) * 108
+            r = 40
+            if not b["alive"]:
+                self.dead_at.setdefault(b["i"], sim.t)
+            if b.get("flag"):
+                disc = _flag(b["flag"], 2 * r)
+                if not b["alive"]:
+                    disc = Image.blend(Image.new("RGBA", disc.size, (7, 9, 24, 0)), disc, 0.35)
+                    disc.putalpha(_flag(b["flag"], 2 * r).getchannel("A"))
+                im.alpha_composite(disc, (x - r, y - r))
+                d.ellipse((x - r, y - r, x + r, y + r), outline=(255, 255, 255, 255) if b["alive"] else (60, 64, 90),
+                          width=4)
+            else:
+                col = b["col"] if b["alive"] else tuple(int(v * 0.3 + 20) for v in b["col"])
+                d.ellipse((x - r, y - r, x + r, y + r), fill=col + (255,),
+                          outline=(255, 255, 255, 255) if b["alive"] else (60, 64, 90), width=4)
+            if not b["alive"]:
+                age = sim.t - self.dead_at[b["i"]]
+                q = r * 0.55 * min(1.0, age / 0.15 + 0.3)
+                d.line([(x - q, y - q), (x + q, y + q)], fill=(230, 60, 70, 255), width=6)
+                d.line([(x - q, y + q), (x + q, y - q)], fill=(230, 60, 70, 255), width=6)
+        left = sim.left()
+        d.text((W / 2, 430), f"{left} LEFT" if left > 1 else "1 LEFT", font=self.f_left, fill=(255, 255, 255, 255),
+               anchor="mm", stroke_width=6, stroke_fill=(200, 50, 70, 255))
+
+
 # ---- sound (numpy) -------------------------------------------------------------
 
 def _noise(n, seed):
@@ -1953,4 +2124,4 @@ def _sfx_mix(recipe: dict, sfx: list, hits: list, n: int, sim) -> np.ndarray:
 
 
 PARTS = {"duel": (_duel_sim, _duel_painter), "race": (RaceSim, RacePainter),
-         "tourney": (TourneySim, TourneyPainter)}
+         "tourney": (TourneySim, TourneyPainter), "royale": (RoyaleSim, RoyalePainter)}
