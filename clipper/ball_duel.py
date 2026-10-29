@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 import random
 import subprocess
+from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
@@ -130,8 +131,13 @@ def _name_parts(p, last: bool) -> list:
 RACE_HOOKS = ["First to {n} wins", "Pick a colour: first to {n} wins", "Which colour gets {n} first?"]
 
 
-def duel_recipe(recipe: dict) -> dict:
-    """The duel's own draws (own rng, so other kinds' recipes don't change)."""
+def duel_recipe(recipe: dict, force: Optional[str] = None) -> dict:
+    """The duel's own draws (own rng, so other kinds' recipes don't change).
+    `force` sets the look (colours / flags / teams) the learning picked; the
+    draws stay in the same order, so a forced look draws what that look
+    would have drawn anyway."""
+    recipe.pop("look", None)
+    recipe.pop("team_names", None)
     rng = random.Random(f"duel-recipe-{recipe['seed']}")
     a, b = rng.sample(COLOURS, 2)
     recipe.update(players=[list(a), list(b)], bed="off",
@@ -139,6 +145,7 @@ def duel_recipe(recipe: dict) -> dict:
                   ending="WINS!")
     look = random.Random(f"duel-look-{recipe['seed']}")      # own rng: the draws above stay as they were
     x = look.random()
+    x = {"flags": 0.2, "teams": 0.6, "colours": 0.9}.get(force, x)
     if x < 0.45:
         # flag balls: a known rivalry most of the time, else any two countries
         pair = list(look.choice(RIVALRIES)) if look.random() < 0.7 else look.sample(sorted(COUNTRIES), 2)
@@ -1293,7 +1300,8 @@ T_BREAK = 1.6                     # the winners move up the bracket
 T_CAP = 95.0
 
 
-def tourney_recipe(recipe: dict) -> dict:
+def tourney_recipe(recipe: dict, force: Optional[str] = None) -> dict:
+    recipe.pop("look", None)
     rng = random.Random(f"tourney-recipe-{recipe['seed']}")
     a, b = rng.sample(COLOURS, 8), rng.sample(EXTRA_COLOURS, 8)
     players = []
@@ -1302,7 +1310,8 @@ def tourney_recipe(recipe: dict) -> dict:
     recipe.update(players=[list(p) for p in players], bed="off", hook=rng.choice(TOURNEY_HOOKS),
                   ending="CHAMPION!")
     look = random.Random(f"tourney-look-{recipe['seed']}")
-    if look.random() < 0.5:
+    x = look.random()
+    if {"flags": 0.0, "colours": 1.0}.get(force, x) < 0.5:
         recipe.update(look="flags", players=[_country(c) for c in look.sample(sorted(COUNTRIES), 16)],
                       hook=look.choice(FLAG_TOURNEY_HOOKS))
     return recipe
@@ -1857,9 +1866,11 @@ FLAG_ROYALE_HOOKS = ["16 countries, 1 circle -- who survives?", "Last country st
                      "16 countries enter. 1 leaves.", "Pick a country: last one alive wins"]
 
 
-def royale_recipe(recipe: dict) -> dict:
+def royale_recipe(recipe: dict, force: Optional[str] = None) -> dict:
+    recipe.pop("look", None)
     rng = random.Random(f"royale-recipe-{recipe['seed']}")
-    if rng.random() < 0.5:
+    x = rng.random()
+    if {"flags": 0.0, "colours": 1.0}.get(force, x) < 0.5:
         players = [_country(c) for c in rng.sample(sorted(COUNTRIES), 16)]
         recipe.update(look="flags", hook=rng.choice(FLAG_ROYALE_HOOKS))
     else:
