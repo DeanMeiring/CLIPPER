@@ -254,3 +254,91 @@ def pick(weights: Dict[str, float], seed: str, avoid: Optional[str] = None) -> O
         rest = [(k, w) for k, w in items if k != avoid]
         choice = random.Random(seed + "-again").choices([k for k, _ in rest], [w for _, w in rest])[0]
     return choice
+
+
+# ---- the daily report: everything above, per video, for Claude Code to read --
+# Dean (29 Oct): "let it pull a report ... available to you so that you can
+# read it. Then you can edit it as you see fit." Each learning run writes
+# report.json and prints it to the app's logs as "[balls-report]" lines (one
+# per video, so no line gets long), which a Claude Code session reads with
+# Railway's get-logs (filter "balls-report") to decide what to change in the
+# videos themselves.
+REPORT_TAG = "[balls-report]"
+CURVES = 3                # retention curves for the best and the worst this many
+
+
+def _sound(recipe: dict) -> str:
+    song = recipe.get("song") or {}
+    if song.get("name"):
+        return f"song: {song['name']}"
+    return recipe.get("bounce_sound") or recipe.get("bed") or ""
+
+
+def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] = None) -> List[dict]:
+    """One row per posted video with numbers: what it was (kind, look, hook,
+    pictures, sound, length) next to how it did. Newest first."""
+    now = now or datetime.datetime.now(datetime.timezone.utc).timestamp()
+    rows = []
+    for v in videos:
+        yt = v.get("youtube") or {}
+        st = stats.get(yt.get("video_id") or "")
+        rec = v.get("recipe") or {}
+        if not st or not rec.get("format"):
+            continue
+        posted = yt.get("publish_at_ts") or yt.get("uploaded_at") or 0
+        views = st.get("views", 0)
+        row = {"yt": yt["video_id"], "posted": datetime.datetime.fromtimestamp(posted, datetime.timezone.utc)
+               .strftime("%Y-%m-%d %H:%M"), "age_h": round((now - posted) / 3600),
+               "kind": kind_of(rec), "title": (v.get("title") or "")[:90], "hook": (rec.get("hook") or "")[:80],
+               "pictures": ((rec.get("pack") or {}).get("title") or rec.get("theme") or "")[:60],
+               "sound": _sound(rec)[:60], "seconds": round(v.get("seconds") or 0, 1),
+               "views": round(views), "avg_pct": round(st.get("avg_pct", 0), 1),
+               "likes": round(st.get("likes", 0)), "comments": round(st.get("comments", 0)),
+               "shares": round(st.get("shares", 0))}
+        if "engaged_views" in st and views:
+            row["stayed_pct"] = round(100 * st["engaged_views"] / views, 1)
+        rows.append(row)
+    rows.sort(key=lambda r: r["posted"], reverse=True)
+    return rows
+
+
+def curve_picks(rows: List[dict], n: int = CURVES) -> List[dict]:
+    """The best and worst n videos by views (at least MIN_AGE_H old)."""
+    old = sorted((r for r in rows if r["age_h"] >= MIN_AGE_H), key=lambda r: -r["views"])
+    if len(old) <= 2 * n:
+        return old
+    return old[:n] + old[-n:]
+
+
+def short_curve(points: list, n: int = 20) -> List[float]:
+    """A retention curve (ElapsedVideoTimeRatio, watch ratio, ...) cut to n
+    points: the share still watching at 5%, 10% ... 100% of the video."""
+    if not points:
+        return []
+    out = []
+    for i in range(1, n + 1):
+        at = i / n
+        p = min(points, key=lambda q: abs(q[0] - at))
+        out.append(round(float(p[1]), 2))
+    return out
+
+
+def log_report(report: dict, log: Callable[[str], None] = print) -> None:
+    """The report as log lines: a summary line, the mix, each kind, each
+    video, each curve -- every line "[balls-report] <json>" with the run's
+    time, so one run's lines can be picked out of the logs."""
+    run = datetime.datetime.fromtimestamp(report["at"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+    def line(kind, data):
+        log(f"{REPORT_TAG} " + json.dumps({"run": run, "type": kind, **data}, ensure_ascii=False,
+                                          separators=(",", ":")))
+    line("summary", {"videos": len(report["videos"]), "source": report.get("source"),
+                     "channel": report.get("channel"), "notes": report.get("notes") or []})
+    line("mix", {"weights": report.get("weights") or {}, "looks": report.get("looks") or {}})
+    for k, r in (report.get("kinds") or {}).items():
+        line("kind", {"kind": k, **r})
+    for r in report["videos"]:
+        line("video", r)
+    for yt, c in (report.get("curves") or {}).items():
+        line("curve", {"yt": yt, "watching": c})
+    line("end", {"lines": 3 + len(report.get("kinds") or {}) + len(report["videos"]) + len(report.get("curves") or {})})
