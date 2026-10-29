@@ -867,7 +867,7 @@ def good_end(recipe: dict) -> tuple:
     if recipe.get("format") == "tourney":
         return (36.0, 58.0)
     if recipe.get("format") == "royale":
-        return (18.0, 38.0)
+        return (15.0, 34.0) if recipe.get("floor") else (18.0, 38.0)
     if recipe.get("format") == "survivor":
         return (20.0, 36.0)
     n = len(recipe_chain(recipe))
@@ -1571,8 +1571,10 @@ def _duel_text_base(recipe: dict) -> dict:
         title = f"{recipe['hook']} ⚔️"
     elif recipe.get("format") == "royale":
         who = "countries" if recipe.get("look") == "flags" else "balls"
+        squeeze = ("the floor cracks and falls away from the edge in -- fall through and you're out"
+                   if recipe.get("floor") else "the circle keeps closing in")
         desc = (f"16 {who}, one circle, everyone for themselves. Weapons drop in, every gun fires once, a rocket "
-                f"hits everyone near it, and the circle keeps closing in. Last one standing wins.\n\n"
+                f"hits everyone near it, and {squeeze}. Last one standing wins.\n\n"
                 f"Who did you pick? 👇\n\n#satisfying #physics #bouncingball #battleroyale")
         title = f"{recipe['hook']} 👑"
     elif recipe.get("format") == "survivor":

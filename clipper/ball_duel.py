@@ -140,6 +140,9 @@ def duel_recipe(recipe: dict, force: Optional[str] = None) -> dict:
     recipe.pop("team_names", None)
     recipe["arsenal"] = 2            # the new weapons (WEAPONS2); not a draw, so the rest is unchanged
     recipe["style"] = "clean"        # health bars, a bigger arena (DuelPainter)
+    mix = random.Random(f"weapons-{recipe['seed']}")      # own rng: the draws below stay as they were
+    recipe["weapons"] = mix.sample(CLASSICS, 4) + mix.sample(NEWER, 6)
+    recipe["arena"] = mix.choice(ARENAS)
     rng = random.Random(f"duel-recipe-{recipe['seed']}")
     a, b = rng.sample(COLOURS, 2)
     recipe.update(players=[list(a), list(b)], bed="off",
@@ -200,6 +203,8 @@ def _gun(kind: str) -> Image.Image:
         w, h = 200, 70
     elif kind == "freeze":
         w, h = 184, 84
+    elif kind == "flamethrower":
+        w, h = 200, 88
     else:  # rocket
         w, h = 230, 76
     im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
@@ -258,6 +263,14 @@ def _gun(kind: str) -> Image.Image:
         d.ellipse((70 * k, 6 * k, 84 * k, 16 * k), fill=ice_hi)
         box(124, 20, 168, 42, ice, 8)                                                               # nozzle
         box(160, 16, 182, 46, ice_hi, 6)
+    elif kind == "flamethrower":
+        red, grey = (214, 60, 46, 255), (120, 126, 140, 255)
+        d.ellipse((4 * k, 34 * k, 70 * k, 84 * k), fill=red, outline=ink, width=o)                   # tank
+        d.rectangle((20 * k, 44 * k, 54 * k, 52 * k), fill=(250, 214, 60, 255))
+        box(40, 18, 150, 40, grey, 6)                                                               # body
+        box(146, 22, 196, 36, (70, 75, 86, 255), 4)                                                 # nozzle
+        d.polygon(P([(186, 14), (200, 29), (186, 44)]), fill=(255, 150, 40, 255), outline=ink, width=2 * k)
+        d.polygon(P([(64, 40), (88, 40), (82, 66), (60, 66)]), fill=grey, outline=ink, width=o)     # grip
     else:  # rocket launcher
         olive, olive_hi = (86, 112, 62, 255), (126, 156, 92, 255)
         box(6, 20, 196, 52, olive, 14)                                                             # tube
@@ -289,6 +302,43 @@ def _saw() -> Image.Image:
     return im.resize((2 * r + 8, 2 * r + 8), Image.LANCZOS)
 
 
+def _sticker(img: Image.Image, outline: int = 6) -> Image.Image:
+    """A picture as a die-cut sticker: a white outline around it (the look
+    the idea board used for the newer weapons)."""
+    off = 2 * outline
+    big = Image.new("RGBA", (img.width + 2 * off, img.height + 2 * off), (0, 0, 0, 0))
+    m = Image.new("L", big.size, 0)
+    m.paste(img.getchannel("A"), (off, off))
+    m = m.filter(ImageFilter.MaxFilter(outline * 2 + 1))
+    white = Image.new("RGBA", big.size, (255, 255, 255, 255))
+    white.putalpha(m)
+    big.alpha_composite(white)
+    big.alpha_composite(img, (off, off))
+    return big
+
+
+# the newer weapons' pictures (Fluent Emoji 3D) and where each one's business
+# end points in its picture (degrees, y down), so it can be turned to aim
+EMOJI_ARMS = {"katana": "1f5e1", "hammer": "1f528", "boomerang": "1fa83", "axe": "1fa93", "bow": "1f3f9",
+              "lightning": "26a1", "magnet": "1f9f2", "banana": "1f34c", "glove": "1f94a", "pan": "1f373",
+              "tornado": "1f32a", "blackhole": "1f300", "boulder": "1f5ff", "wand": "1fa84", "potion": "1f9ea"}
+HELD_ANGLE = {"katana": 135, "hammer": -135, "axe": -135, "wand": -45, "bow": -45, "magnet": 90, "glove": -90}
+
+
+def _wobble(d, pts_fn, col, width, seed=0, passes=2, amp=0.012, n=150, closed=True):
+    """A hand-drawn line: the same shape drawn ``passes`` times, each with
+    its own slow wobble (the notebook and chalk arenas)."""
+    rng = random.Random(seed)
+    for p in range(passes):
+        ph = [rng.uniform(0, 6.28) for _ in range(3)]
+        pts = []
+        for k in range(n + (6 if closed else 1)):
+            t = k / n
+            j = amp * (math.sin(18.8 * t + ph[0]) + 0.6 * math.sin(31.4 * t + ph[1]) + 0.3 * math.sin(56 * t + ph[2]))
+            pts.append(pts_fn(t, j, p))
+        d.line(pts, fill=col, width=width, joint="curve")
+
+
 # name: (kind, damage, spawn weight); guns fire once, then they're gone
 WEAPONS = {
     "pistol": ("gun", 1, 3),
@@ -310,6 +360,30 @@ WEAPONS2 = {
     "bomb": ("bomb", 3, 1),         # dropped where the ball is; goes off after BOMB_FUSE
 }
 SAW_HITS, FREEZE_S, BOMB_FUSE, LASER_CHARGE = 3, 1.5, 1.4, 0.5
+# Then (29 Oct, from the idea board Dean liked): sixteen more. Each new
+# fight gets its own mix (``recipe["weapons"]``: 4 of the classics + 6 of
+# the new ones), so the fights differ from video to video.
+WEAPONS2.update({
+    "katana": ("dash", 2, 2),       # dashes at the enemy: 2 hearts if it connects
+    "hammer": ("slam", 2, 2),       # slams the floor: a shockwave, 2 hearts close, 1 further
+    "boomerang": ("throw", 1, 2),   # thrown, curves back: can hit going out and coming back
+    "axe": ("throw", 2, 2),         # thrown, spinning: 2 hearts
+    "bow": ("bow", 2, 2),           # draws, then an arrow that goes through everyone
+    "lightning": ("chain", 2, 2),   # strikes the nearest enemy, jumps to the next ones
+    "flamethrower": ("flame", 1, 2),  # a cone of fire for FLAME_S: a heart every 0.4 s, 3 at most
+    "magnet": ("magnet", 1, 1),     # pulls the enemy in; contact = 1 heart
+    "banana": ("trap", 1, 2),       # drops a peel: 1 heart and a spin-out
+    "glove": ("glove", 1, 2),       # a punch that sends them flying; a wall after it = 1 more
+    "pan": ("pan", 1, 1),           # bats bullets back, bonks on contact
+    "tornado": ("summon", 1, 1),    # roams the ring, flings whoever it touches
+    "blackhole": ("summon", 1, 1),  # pulls everyone near it in, hurts at the middle
+    "boulder": ("summon", 2, 1),    # a Moai head rolls across: 2 hearts
+    "wand": ("gun", 1, 2),          # a spark: 1 heart, and they're tiny (take +1 a hit) for SMALL_S
+    "potion": ("potion", 0, 1),     # heal 2, speed or giant, at random
+})
+CLASSICS = ("pistol", "shotgun", "minigun", "rocket", "knife", "shield")
+NEWER = tuple(k for k in WEAPONS2 if k not in CLASSICS)
+FLAME_S, SMALL_S, PAN_BLOCKS, GLOVE_HITS = 1.5, 3.5, 3, 2
 
 
 # ---- the duel -----------------------------------------------------------------
@@ -320,6 +394,15 @@ D_CX, D_CY, D_R = 540, 1130, 470
 # higher, under fighting-game health bars, with colour trails and a white
 # flash on the knockout. Physics are untouched.
 C_CY, C_K = 1050, 1.08
+# The arenas a new duel / 2v2 rotates through (Dean picked these from the
+# idea board, 29 Oct): the neon ring, a notebook page, a chalkboard (both
+# rings, drawn by hand), an ice rink and a boxing ring (rounded boxes:
+# ARENA_SHAPES, in the duel's own coordinates).
+ARENAS = ("neon", "notebook", "chalk", "ice", "boxing")
+ARENA_SHAPES = {"ice": (540, 1130, 420, 480, 170), "boxing": (540, 1130, 440, 440, 14)}
+NEW_FX = {"wave": 2.2, "bolt": 3.2, "flame": 2.6, "slashfx": 3.0, "fall": 1.5}      # how fast the newer effects fade
+NEW_KINDS = ("dash", "slam", "throw", "bow", "chain", "flame", "magnet", "trap", "glove", "pan", "summon",
+             "potion")
 D_BALL = 64
 D_SPEED = 560
 HEARTS = 10
@@ -339,8 +422,15 @@ class DuelSim:
         self.keep = False            # tournament: a ball holding a weapon walks past the others
         self.ring = D_R              # tournament: sudden death closes the ring in
         self.max_drops = 4           # weapons waiting at once while rushing (battle royale: more)
-        self.arms = WEAPONS2 if recipe.get("arsenal") == 2 else WEAPONS
+        self.new_arms = recipe.get("arsenal") == 2
+        self.arms = WEAPONS2 if self.new_arms else WEAPONS
+        if recipe.get("weapons"):
+            self.arms = {k: WEAPONS2[k] for k in recipe["weapons"] if k in WEAPONS2}
         self.bombs: list = []
+        self.things: list = []       # thrown / summoned things (the newer weapons)
+        # the arena's walls: None = the ring (every older fight); else a rounded
+        # box (cx, cy, half width, half height, corner radius)
+        self.shape = ARENA_SHAPES.get(recipe.get("arena")) if not players else None
         self.balls = []
         for i, p in enumerate(players or recipe.get("players") or [list(c) for c in COLOURS[:2]]):
             w1, w2, col = p[:3]
@@ -392,6 +482,8 @@ class DuelSim:
                 if target["uses"] <= 0:
                     self._drop(target)
                 return False
+        if target.get("small", 0) > 0:
+            dmg += 1                    # shrunk by the wand: every hit hurts more
         target["hp"] = max(0, target["hp"] - dmg)
         target["hurt"] = 0.3
         target["squash"] = 1.0
@@ -473,6 +565,9 @@ class DuelSim:
             self._move(dt / 4)
         self._weapons(dt)
         self._bombs()
+        if self.new_arms:
+            self._things(dt)
+            self._status(dt)
         self._effects(dt)
         if self.t > SECONDS_CAP - END_HOLD - 0.1 and self.done_at is None:
             self.done_at = self.t        # nobody won in time: a bad seed
@@ -489,12 +584,16 @@ class DuelSim:
                 a = self.rng.uniform(0, 6.28)
                 dd = self.rng.uniform(0, self.ring - 120)
                 x, y = D_CX + dd * math.cos(a), D_CY + dd * math.sin(a)
+                if self.shape:                          # a box: anywhere inside it
+                    cx, cy, hw, hh, _cr = self.shape
+                    x = cx + (2 * a / 6.28 - 1) * (hw - 130)
+                    y = cy + (2 * dd / max(1.0, self.ring - 120) - 1) * (hh - 130)
                 if all(math.hypot(x - b["x"], y - b["y"]) > 190 for b in self.balls) and \
                         all(math.hypot(x - p["x"], y - p["y"]) > 170 for p in self.pickups):
                     self.pickups.append({"w": w, "x": x, "y": y, "born": self.t})
                     self.sfx.append((self.t, "spawn", 0))
                     break
-        lo, hi = (1.5, 2.5) if self.arms is WEAPONS2 else (2.0, 3.2)     # the new weapons are slower to land
+        lo, hi = (1.5, 2.5) if self.new_arms else (2.0, 3.2)     # the new weapons are slower to land
         self.next_spawn = self.t + (self.rng.uniform(0.5, 0.9) if rush else self.rng.uniform(lo, hi))
 
     def _move(self, dt):
@@ -503,6 +602,9 @@ class DuelSim:
                 continue                 # frozen solid: it stays where it is
             b["x"] += b["vx"] * dt
             b["y"] += b["vy"] * dt
+            if self.shape:
+                self._box_bounce(b)
+                continue
             dx, dy = b["x"] - D_CX, b["y"] - D_CY
             dd = math.hypot(dx, dy)
             if dd > self.ring - D_BALL:
@@ -511,9 +613,11 @@ class DuelSim:
                 if vn > 0:
                     vx, vy = b["vx"] - 2 * vn * nx, b["vy"] - 2 * vn * ny
                     a = math.atan2(vy, vx) + self.rng.uniform(-0.18, 0.18)
-                    b["vx"], b["vy"] = D_SPEED * math.cos(a), D_SPEED * math.sin(a)
+                    sp = self._spd(b)
+                    b["vx"], b["vy"] = sp * math.cos(a), sp * math.sin(a)
                     self.hits.append((self.t, 0.6))
                     self.sfx.append((self.t, "wall", 0))
+                    self._wall_slam(b)
                 b["x"], b["y"] = D_CX + nx * (self.ring - D_BALL), D_CY + ny * (self.ring - D_BALL)
         for a, c in self._pairs():
             self._collide(a, c)
@@ -541,6 +645,10 @@ class DuelSim:
                     if p["weapon"] == "shield" and p["cool"] <= 0:
                         p["cool"] = 0.6
                         self.damage(q, 1, (a["x"] + c["x"]) / 2, (a["y"] + c["y"]) / 2, p)
+                    elif self.new_arms and (p["weapon"] == "pan" or p.get("giant", 0) > 0) and p["cool"] <= 0 \
+                            and self.damage(q, 1, (a["x"] + c["x"]) / 2, (a["y"] + c["y"]) / 2, p):
+                        p["cool"] = 0.6
+                        self.sfx.append((self.t, "bonk", 0))
             over = 2 * D_BALL - dd
             a["x"] -= nx * over / 2
             a["y"] -= ny * over / 2
@@ -548,7 +656,73 @@ class DuelSim:
             c["y"] += ny * over / 2
             for b in (a, c):
                 s = math.hypot(b["vx"], b["vy"]) or 1
-                b["vx"], b["vy"] = b["vx"] / s * D_SPEED, b["vy"] / s * D_SPEED
+                sp = self._spd(b)
+                b["vx"], b["vy"] = b["vx"] / s * sp, b["vy"] / s * sp
+
+    # -- the arena's walls and speeds (newer fights)
+    def _spd(self, b):
+        """A ball's speed: D_SPEED, faster while dashing / boosted / punched
+        (only the newer weapons set those; older fights always get D_SPEED)."""
+        if not self.new_arms:
+            return D_SPEED
+        k = 1.0
+        if b.get("dash", 0) > 0:
+            k *= 2.4
+        if b.get("fast", 0) > 0:
+            k *= 1.5
+        if b.get("knock", 0) > 0:
+            k *= 1.9
+        return D_SPEED * k
+
+    def _box_wall(self, x, y, r):
+        """Where a circle of radius r at (x, y) pokes out of the box, as
+        (contact x, contact y, outward nx, ny), or None if it's inside."""
+        cx, cy, hw, hh, cr = self.shape
+        hw2, hh2, c2 = hw - r, hh - r, max(0.0, cr - r)
+        px, py = x - cx, y - cy
+        ax, ay = abs(px), abs(py)
+        qx, qy = ax - (hw2 - c2), ay - (hh2 - c2)
+        if qx > 0 and qy > 0:
+            d = math.hypot(qx, qy)
+            if d <= c2:
+                return None
+            nx, ny = qx / d, qy / d
+            ox, oy = (hw2 - c2) + nx * c2, (hh2 - c2) + ny * c2
+        elif qx > c2:
+            nx, ny, ox, oy = 1.0, 0.0, hw2, ay
+        elif qy > c2:
+            nx, ny, ox, oy = 0.0, 1.0, ax, hh2
+        else:
+            return None
+        sx, sy = (1 if px >= 0 else -1), (1 if py >= 0 else -1)
+        return cx + sx * ox, cy + sy * oy, sx * nx, sy * ny
+
+    def _box_bounce(self, b):
+        w = self._box_wall(b["x"], b["y"], D_BALL)
+        if w is None:
+            return
+        px, py, nx, ny = w
+        vn = b["vx"] * nx + b["vy"] * ny
+        if vn > 0:
+            vx, vy = b["vx"] - 2 * vn * nx, b["vy"] - 2 * vn * ny
+            a = math.atan2(vy, vx) + self.rng.uniform(-0.18, 0.18)
+            sp = self._spd(b)
+            b["vx"], b["vy"] = sp * math.cos(a), sp * math.sin(a)
+            self.hits.append((self.t, 0.6))
+            self.sfx.append((self.t, "wall", 0))
+            self._wall_slam(b)
+        b["x"], b["y"] = px, py
+
+    def _outside(self, x, y, margin=0.0):
+        if self.shape:
+            return self._box_wall(x, y, -margin) is not None
+        return math.hypot(x - D_CX, y - D_CY) > self.ring + margin
+
+    def _wall_slam(self, b):
+        """Punched into a wall (the glove): one more heart."""
+        if b.get("knock", 0) > 0 and b.get("slam_by"):
+            by, b["slam_by"] = b["slam_by"], None
+            self.damage(b, 1, b["x"], b["y"], by)
 
     def _equip(self, b, w):
         if b["weapon"]:
@@ -558,7 +732,8 @@ class DuelSim:
         b["held"] = 0.0
         b["burst"] = 0.0
         b["burst_hits"] = 0
-        b["uses"] = KNIFE_HITS if w == "knife" else SHIELD_BLOCKS if w == "shield" else SAW_HITS if w == "saw" else 1
+        b["uses"] = KNIFE_HITS if w == "knife" else SHIELD_BLOCKS if w == "shield" else SAW_HITS if w == "saw" \
+            else PAN_BLOCKS if w == "pan" else GLOVE_HITS if w == "glove" else 1
         b["charge"] = 0.0
         self.sfx.append((self.t, "pickup", 0))
         self.effects.append({"k": "ring", "ball": b, "x": b["x"], "y": b["y"], "life": 1.0, "col": (255, 255, 255)})
@@ -574,6 +749,9 @@ class DuelSim:
         elif w == "freeze":
             self._bullet(b, mx, my, a, 1150, 1.4, "ice")
             self.sfx.append((self.t, "icefire", 0))
+        elif w == "wand":
+            self._bullet(b, mx, my, a, 1300, 1.4, "magic")
+            self.sfx.append((self.t, "sparkle", 0))
         elif w == "shotgun":
             b["burst_hits"] = 0
             for k in range(7):
@@ -638,6 +816,8 @@ class DuelSim:
                     if b["held"] > 0.4 and (abs(_ang_diff(aim, b["wang"])) < 0.25 or b["held"] > 1.4):
                         b["charge"] = 1e-6
                         self.sfx.append((self.t, "charge", 0))
+            elif kind in NEW_KINDS:
+                self._use(b, o, w, kind, dmg, aim, dt)
             elif w == "minigun" and b["burst"] > 0:
                 b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 4)
                 b["burst"] -= dt
@@ -674,6 +854,15 @@ class DuelSim:
             u["life"] -= dt
             o = self._bullet_hit(u)
             cap = {"shotgun": 2, "minigun": 3}.get(u["kind"])
+            if o is not None and o["weapon"] == "pan" and self._facing(o, u["owner"]):
+                # batted straight back: it's the pan holder's bullet now
+                u["vx"], u["vy"], u["owner"] = -u["vx"], -u["vy"], o
+                o["uses"] -= 1
+                self.sfx.append((self.t, "bonk", 0))
+                self.effects.append({"k": "spark", "x": u["x"], "y": u["y"], "life": 1.0, "col": (255, 255, 255)})
+                if o["uses"] <= 0:
+                    self._drop(o)
+                continue
             if o is not None:
                 own = u["owner"]
                 if cap is None or own["burst_hits"] < cap:
@@ -684,8 +873,11 @@ class DuelSim:
                         o["frozen"] = FREEZE_S
                         self.sfx.append((self.t, "freeze", 0))
                         self.effects.append({"k": "ice", "ball": o, "x": o["x"], "y": o["y"], "life": 1.0})
+                    if hurt and u["kind"] == "magic" and o["alive"]:
+                        o["small"] = SMALL_S
                 self.bullets.remove(u)
-            elif u["life"] <= 0 or math.hypot(u["x"] - D_CX, u["y"] - D_CY) > self.ring:
+            elif u["life"] <= 0 or (self._outside(u["x"], u["y"]) if self.shape else
+                                    math.hypot(u["x"] - D_CX, u["y"] - D_CY) > self.ring):
                 self.effects.append({"k": "spark", "x": u["x"], "y": u["y"], "life": 0.5, "col": (255, 220, 120)})
                 self.bullets.remove(u)
         for r in list(self.rockets):
@@ -702,7 +894,8 @@ class DuelSim:
                                      "y": r["y"] - math.sin(r["a"]) * 30, "life": 1.0,
                                      "r": self.rng.uniform(10, 18)})
             hit = o["alive"] and math.hypot(r["x"] - o["x"], r["y"] - o["y"]) < D_BALL + 14
-            if hit or math.hypot(r["x"] - D_CX, r["y"] - D_CY) > self.ring - 10:
+            if hit or (self._outside(r["x"], r["y"], -10) if self.shape else
+                       math.hypot(r["x"] - D_CX, r["y"] - D_CY) > self.ring - 10):
                 self.rockets.remove(r)
                 self._boom(r["x"], r["y"], r["owner"])
 
@@ -716,6 +909,10 @@ class DuelSim:
         fx, fy = x0 - D_CX, y0 - D_CY
         bq = fx * dx + fy * dy
         L = -bq + math.sqrt(max(0.0, bq * bq - (fx * fx + fy * fy - self.ring * self.ring)))
+        if self.shape:
+            L = 0.0
+            while L < 2400 and not self._outside(x0 + dx * L, y0 + dy * L):
+                L += 8
         x1, y1 = x0 + dx * L, y0 + dy * L
         self.effects.append({"k": "beam", "x": x0, "y": y0, "x1": x1, "y1": y1, "life": 1.0})
         self.sfx.append((self.t, "laser", 0))
@@ -727,6 +924,253 @@ class DuelSim:
             t = max(0.0, min(L, (o["x"] - x0) * dx + (o["y"] - y0) * dy))
             if math.hypot(o["x"] - (x0 + dx * t), o["y"] - (y0 + dy * t)) < D_BALL + 12:
                 self.damage(o, self.arms["laser"][1], x0 + dx * t, y0 + dy * t, b)
+
+    # -- the newer weapons (WEAPONS2 from the idea board)
+    def _facing(self, b, by):
+        return abs(_ang_diff(math.atan2(by["y"] - b["y"], by["x"] - b["x"]), b["wang"])) < 1.2
+
+    def _use(self, b, o, w, kind, dmg, aim, dt):
+        dist = math.hypot(o["x"] - b["x"], o["y"] - b["y"])
+        if kind not in ("throw", "bow"):
+            b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 7)
+        if kind == "dash":                                   # katana
+            if b.get("dash", 0) <= 0 and b["held"] > 0.35 and dist < 560:
+                b["dash"] = 0.42
+                b["vx"], b["vy"] = 2.4 * D_SPEED * math.cos(aim), 2.4 * D_SPEED * math.sin(aim)
+                self.sfx.append((self.t, "slash", 0))
+            if b.get("dash", 0) > 0 and dist < 2 * D_BALL + 34 and b["cool"] <= 0:
+                b["cool"] = 0.5
+                b["dash"] = 0.0
+                self.damage(o, dmg, (b["x"] + o["x"]) / 2, (b["y"] + o["y"]) / 2, b)
+                self.effects.append({"k": "slashfx", "x": o["x"], "y": o["y"], "ang": aim, "life": 1.0})
+                self._drop(b)
+            elif b["held"] > 2.4:
+                self._drop(b)                                # missed: it's gone
+        elif kind == "slam":                                 # hammer
+            if b["held"] > 0.3 and (dist < 330 or b["held"] > 2.2):
+                self.effects.append({"k": "wave", "x": b["x"], "y": b["y"], "life": 1.0, "r": 330})
+                self.sfx.append((self.t, "slam", 0))
+                self.shake = max(self.shake, 0.5)
+                for t in self._boom_targets(b):
+                    dd = math.hypot(t["x"] - b["x"], t["y"] - b["y"])
+                    if dd < 330 and self.damage(t, 2 if dd < 180 else 1, t["x"], t["y"], b) and t["alive"]:
+                        self._fling(t, math.atan2(t["y"] - b["y"], t["x"] - b["x"]))
+                self._drop(b)
+        elif kind in ("throw", "bow"):
+            b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 6)
+            ready = b["held"] > (0.55 if kind == "bow" else 0.4)
+            if ready and (abs(_ang_diff(aim, b["wang"])) < 0.25 or b["held"] > 1.6):
+                a = b["wang"]
+                x, y = b["x"] + math.cos(a) * (D_BALL + 40), b["y"] + math.sin(a) * (D_BALL + 40)
+                sp = {"boomerang": 1050, "axe": 1100, "bow": 1900}[w]
+                self.things.append({"k": w, "x": x, "y": y, "vx": sp * math.cos(a), "vy": sp * math.sin(a),
+                                    "owner": b, "t0": self.t, "hit": set(), "spin": 0.0, "dmg": dmg})
+                self.sfx.append((self.t, "twang" if kind == "bow" else "throw", 0))
+                self._drop(b)
+        elif kind == "chain":                                # lightning
+            if b["held"] > 0.3:
+                pts, last, hit, power = [(b["x"], b["y"])], b, [], dmg
+                for _ in range(3):
+                    cand = [t for t in self._boom_targets(b) if t["alive"] and t not in hit and
+                            (last is b or math.hypot(t["x"] - last["x"], t["y"] - last["y"]) < 460)]
+                    if not cand:
+                        break
+                    t = min(cand, key=lambda t: math.hypot(t["x"] - last["x"], t["y"] - last["y"]))
+                    hit.append(t)
+                    pts.append((t["x"], t["y"]))
+                    self.damage(t, power, t["x"], t["y"], b)
+                    power, last = 1, t
+                self.effects.append({"k": "bolt", "pts": pts, "x": b["x"], "y": b["y"], "life": 1.0,
+                                     "seed": int(self.t * 100)})
+                self.sfx.append((self.t, "thunder", 0))
+                self.shake = max(self.shake, 0.35)
+                self._drop(b)
+        elif kind == "flame":                                # flamethrower
+            if b["held"] > 0.3:
+                if b.get("fire", 0) <= 0:
+                    b["fire"], b["burst_hits"] = FLAME_S, 0
+                    self.sfx.append((self.t, "fire", 0))
+                b["fire"] -= dt
+                a = b["wang"]
+                if self.rng.random() < 0.9:
+                    sp = self.rng.uniform(500, 760)
+                    aa = a + self.rng.uniform(-0.3, 0.3)
+                    self.effects.append({"k": "flame", "x": b["x"] + math.cos(a) * (D_BALL + 70),
+                                         "y": b["y"] + math.sin(a) * (D_BALL + 70), "vx": sp * math.cos(aa),
+                                         "vy": sp * math.sin(aa), "life": 1.0, "r": self.rng.uniform(14, 24)})
+                for t in self._boom_targets(b):
+                    dd = math.hypot(t["x"] - b["x"], t["y"] - b["y"])
+                    ang = math.atan2(t["y"] - b["y"], t["x"] - b["x"])
+                    if (dd < 340 and abs(_ang_diff(ang, a)) < 0.4 and b["cool"] <= 0 and b["burst_hits"] < 3
+                            and self.damage(t, 1, t["x"], t["y"], b)):
+                        b["cool"], b["burst_hits"] = 0.4, b["burst_hits"] + 1
+                if b["fire"] <= 0:
+                    self._drop(b)
+        elif kind == "magnet":
+            if b["held"] > 0.3 and not o.get("pulled"):
+                o["pulled"], o["puller"] = 1.4, b
+                self.sfx.append((self.t, "magnet", 0))
+            if o.get("pulled", 0) > 0 and dist < 2 * D_BALL + 12 and b["cool"] <= 0:
+                b["cool"] = 0.6
+                o["pulled"] = 0.0
+                self.damage(o, dmg, (b["x"] + o["x"]) / 2, (b["y"] + o["y"]) / 2, b)
+                self._drop(b)
+            elif b["held"] > 2.2:
+                o["pulled"] = 0.0
+                self._drop(b)
+        elif kind == "trap":                                 # banana
+            if b["held"] > 0.3 and (dist < 340 or b["held"] > 1.6):
+                self.things.append({"k": "peel", "x": b["x"], "y": b["y"], "owner": b, "t0": self.t,
+                                    "ang": self.rng.uniform(0, 6.28)})
+                self.sfx.append((self.t, "pickup", 0))
+                b["weapon"] = None
+        elif kind == "glove":
+            if dist < 2 * D_BALL + 56 and b["cool"] <= 0:
+                b["cool"] = 0.6
+                if self.damage(o, dmg, (b["x"] + o["x"]) / 2, (b["y"] + o["y"]) / 2, b) and o["alive"]:
+                    self._fling(o, aim)
+                    o["slam_by"] = b
+                self.sfx.append((self.t, "punch", 0))
+                b["kick"] = 1.0
+                b["uses"] -= 1
+                if b["uses"] <= 0:
+                    self._drop(b)
+        elif kind == "pan":
+            pass                                             # held up front: bats bullets back (bullet loop)
+        elif kind == "summon":
+            if b["held"] > 0.35:
+                if w == "tornado":
+                    v = self.rng.uniform(0, 6.28)
+                    self.things.append({"k": "tornado", "x": b["x"] + math.cos(aim) * 150,
+                                        "y": b["y"] + math.sin(aim) * 150, "vx": 340 * math.cos(v),
+                                        "vy": 340 * math.sin(v), "owner": b, "t0": self.t, "life": 4.5,
+                                        "cool": {}})
+                    self.sfx.append((self.t, "wind", 0))
+                elif w == "blackhole":
+                    self.things.append({"k": "hole", "x": (b["x"] + o["x"]) / 2, "y": (b["y"] + o["y"]) / 2,
+                                        "owner": b, "t0": self.t, "life": 2.4, "cool": {}})
+                    self.sfx.append((self.t, "hole", 0))
+                else:                                        # the Moai rolls in from behind
+                    x, y = b["x"] - math.cos(aim) * 120, b["y"] - math.sin(aim) * 120
+                    self.things.append({"k": "boulder", "x": x, "y": y, "vx": 980 * math.cos(aim),
+                                        "vy": 980 * math.sin(aim), "owner": b, "t0": self.t, "hit": set(),
+                                        "spin": 0.0, "dmg": dmg})
+                    self.sfx.append((self.t, "rumble", 0))
+                self._drop(b)
+        elif kind == "potion":
+            if b["held"] > 0.4:
+                pick = self.rng.choice(("heal", "fast", "giant"))
+                if pick == "heal":
+                    b["hp"] = min(self.hearts, b["hp"] + 2)
+                    self.effects.append({"k": "num", "x": b["x"], "y": b["y"] - 80, "text": "+2", "life": 1.0,
+                                         "col": (60, 200, 90)})
+                else:
+                    b[pick] = 3.0
+                    self.effects.append({"k": "num", "x": b["x"], "y": b["y"] - 80,
+                                         "text": "SPEED!" if pick == "fast" else "GIANT!", "life": 1.0,
+                                         "col": (150, 90, 230)})
+                self.sfx.append((self.t, "gulp", 0))
+                self._drop(b)
+
+    def _fling(self, t, ang):
+        t["knock"] = 0.55
+        sp = 1.9 * D_SPEED
+        t["vx"], t["vy"] = sp * math.cos(ang), sp * math.sin(ang)
+
+    def _things(self, dt):
+        for m in list(self.things):
+            k = m["k"]
+            age = self.t - m["t0"]
+            gone = False
+            if k in ("boomerang", "axe", "bow", "boulder"):
+                if k == "boomerang" and age > 0.5:            # curves back to its owner
+                    ow = m["owner"]
+                    want = math.atan2(ow["y"] - m["y"], ow["x"] - m["x"])
+                    sp = math.hypot(m["vx"], m["vy"])
+                    cur = math.atan2(m["vy"], m["vx"])
+                    cur += _ang_diff(want, cur) * min(1, dt * 7)
+                    m["vx"], m["vy"] = sp * math.cos(cur), sp * math.sin(cur)
+                    if math.hypot(ow["x"] - m["x"], ow["y"] - m["y"]) < D_BALL + 20 or age > 2.6:
+                        gone = True
+                m["x"] += m["vx"] * dt
+                m["y"] += m["vy"] * dt
+                m["spin"] += dt * (18 if k in ("boomerang", "axe") else 6)
+                rad = 95 if k == "boulder" else 30
+                leg = 1 if (k == "boomerang" and age > 0.5) else 0
+                for t in self._boom_targets(m["owner"]):
+                    key = (t["i"], leg)
+                    if t["alive"] and key not in m["hit"] and math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + rad:
+                        m["hit"].add(key)
+                        if self.damage(t, m["dmg"], m["x"], m["y"], m["owner"]) and k == "boulder" and t["alive"]:
+                            self._fling(t, math.atan2(m["vy"], m["vx"]))
+                        if k == "axe":
+                            gone = True
+                if k != "boomerang" and self._outside(m["x"], m["y"], 60 if k == "boulder" else 0):
+                    gone = True
+                    if k == "axe":
+                        self.effects.append({"k": "spark", "x": m["x"], "y": m["y"], "life": 0.6,
+                                             "col": (255, 220, 160)})
+                if k == "boomerang" and self._outside(m["x"], m["y"], 40):
+                    gone = True
+            elif k == "peel":
+                for t in self._boom_targets(m["owner"]):
+                    if t["alive"] and t["frozen"] <= 0 and math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + 26:
+                        self.damage(t, 1, m["x"], m["y"], m["owner"])
+                        t["frozen"], t["spin"] = 1.2, 1.2
+                        self.sfx.append((self.t, "slip", 0))
+                        gone = True
+                        break
+                if age > 7.0:
+                    gone = True
+            elif k == "tornado":
+                m["x"] += m["vx"] * dt
+                m["y"] += m["vy"] * dt
+                if self._outside(m["x"], m["y"], -150):
+                    ang = math.atan2(D_CY - m["y"], D_CX - m["x"]) + self.rng.uniform(-0.6, 0.6)
+                    m["vx"], m["vy"] = 340 * math.cos(ang), 340 * math.sin(ang)
+                for t in self._boom_targets(m["owner"]):
+                    if t["alive"] and math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + 70 and \
+                            self.t >= m["cool"].get(t["i"], 0):
+                        m["cool"][t["i"]] = self.t + 0.9
+                        if self.damage(t, 1, t["x"], t["y"], m["owner"]) and t["alive"]:
+                            self._fling(t, self.rng.uniform(0, 6.28))
+                gone = age > m["life"]
+            elif k == "hole":
+                for t in self._boom_targets(m["owner"]):
+                    if not t["alive"] or t["frozen"] > 0:
+                        continue
+                    dd = math.hypot(t["x"] - m["x"], t["y"] - m["y"])
+                    if dd < 430:
+                        want = math.atan2(m["y"] - t["y"], m["x"] - t["x"])
+                        cur = math.atan2(t["vy"], t["vx"])
+                        cur += _ang_diff(want, cur) * min(1, dt * 5)
+                        sp = self._spd(t)
+                        t["vx"], t["vy"] = sp * math.cos(cur), sp * math.sin(cur)
+                    if dd < D_BALL + 30 and self.t >= m["cool"].get(t["i"], 0):
+                        m["cool"][t["i"]] = self.t + 0.5
+                        self.damage(t, 1, m["x"], m["y"], m["owner"])
+                gone = age > m["life"]
+            if gone:
+                self.things.remove(m)
+
+    def _status(self, dt):
+        for b in self.balls:
+            for key in ("dash", "fast", "giant", "small", "knock", "spin"):
+                v = b.get(key, 0)
+                if v > 0:
+                    b[key] = max(0.0, v - dt)
+                    if b[key] == 0 and key in ("dash", "fast", "knock"):
+                        s = math.hypot(b["vx"], b["vy"]) or 1     # back to normal speed
+                        sp = self._spd(b)
+                        b["vx"], b["vy"] = b["vx"] / s * sp, b["vy"] / s * sp
+            if b.get("pulled", 0) > 0 and b["alive"] and b["frozen"] <= 0:
+                b["pulled"] = max(0.0, b["pulled"] - dt)
+                pu = b["puller"]
+                want = math.atan2(pu["y"] - b["y"], pu["x"] - b["x"])
+                cur = math.atan2(b["vy"], b["vx"])
+                cur += _ang_diff(want, cur) * min(1, dt * 8)
+                sp = self._spd(b)
+                b["vx"], b["vy"] = sp * math.cos(cur), sp * math.sin(cur)
 
     def _bombs(self):
         for m in list(self.bombs):
@@ -748,7 +1192,8 @@ class DuelSim:
     def _effects(self, dt):
         for e in self.effects:
             k = e["k"]
-            e["life"] -= dt * (1.6 if k in ("spark", "flash") else 1.3 if k == "smoke" else 3.0 if k == "beam" else 0.9)
+            e["life"] -= dt * (1.6 if k in ("spark", "flash") else 1.3 if k == "smoke" else 3.0 if k == "beam" else
+                               NEW_FX.get(k, 0.9))
             if k == "num":
                 e["y"] -= 70 * dt
             elif k in ("ring", "ice"):
@@ -765,6 +1210,12 @@ class DuelSim:
                 e["ang"] += 4 * dt
             elif k == "smoke":
                 e["r"] += 30 * dt
+            elif k == "flame":
+                e["x"] += e["vx"] * dt
+                e["y"] += e["vy"] * dt
+                e["vx"] *= 0.93
+                e["vy"] *= 0.93
+                e["r"] += 60 * dt
         self.effects = [e for e in self.effects if e["life"] > 0]
 
     # -- sound
@@ -836,11 +1287,20 @@ class DuelPainter:
         self.shield = _emoji("1f6e1", 118)
         self.icons = {**self.guns, "knife": self.knife, "shield": self.shield}
         if recipe.get("arsenal") == 2:
-            self.guns.update(laser=_gun("laser"), freeze=_gun("freeze"))
+            self.guns.update(laser=_gun("laser"), freeze=_gun("freeze"), flamethrower=_gun("flamethrower"))
             self.saw = _saw()
             self.bomb = _emoji("1f4a3", 104)
             self.snow = _emoji("2744", 52)
-            self.icons.update(laser=self.guns["laser"], freeze=self.guns["freeze"], saw=self.saw, bomb=self.bomb)
+            self.star = _emoji("2b50", 34)
+            self.icons.update(laser=self.guns["laser"], freeze=self.guns["freeze"], saw=self.saw, bomb=self.bomb,
+                              flamethrower=self.guns["flamethrower"])
+            for w, code in EMOJI_ARMS.items():
+                self.icons[w] = _sticker(_emoji(code, 100), 5)
+            self.moai = _emoji("1f5ff", 200)
+            self.swirl = _emoji("1f300", 150)
+            self.twister = _emoji("1f32a", 170)
+            self.peel = _emoji("1f34c", 76)
+            self.spin_pics = {w: _emoji(EMOJI_ARMS[w], 92) for w in ("boomerang", "axe")}
         self.rocket = Image.new("RGBA", (90, 40), (0, 0, 0, 0))          # a rocket in flight
         rd = ImageDraw.Draw(self.rocket)
         rd.rounded_rectangle((4, 10, 70, 30), 8, fill=(220, 220, 228, 255), outline=(22, 22, 28, 255), width=3)
@@ -861,17 +1321,24 @@ class DuelPainter:
         self.fonts: dict = {}
         self.end_y = D_CY + 230
         self.clean = recipe.get("style") == "clean"
+        self.arena = recipe.get("arena") or "neon"
+        self.ball_ring = None                 # the balls' outline (the hand-drawn arenas: ink / chalk)
+        self.ink, self.ink_stroke = (255, 255, 255), (7, 9, 24)
+        self.trail_col = None                 # None: each ball's own colour
+        self.hand_font = None
         if self.clean:
-            self.bg = _arena_bg(D_CX, C_CY, int(D_R * C_K))
+            self.bg = _arena_bg(D_CX, C_CY, int(D_R * C_K)) if self.arena == "neon" else self.arena_bg()
             self.place(D_CX, C_CY, C_K)
             self.end_y = C_CY + 250
             self.trail_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             self.prev: dict = {}
             self.bar_shown: dict = {}       # ball -> the hp its bar shows (drains after a hit)
-            self.f_name = _font(46)
-            self.f_name_s = _font(32)
+            hf = self.hand_font
+            big = 1.18 if hf and hf.startswith("Gochi") else 1.0      # Gochi Hand runs small
+            self.f_name = _font(int((50 if hf else 46) * big), hf or "Inter-Black.ttf")
+            self.f_name_s = _font(int((34 if hf else 32) * big), hf or "Inter-Black.ttf")
             self.f_vs = _font(50)
-            self.f_hook = _font(52)
+            self.f_hook = _font(int((58 if hf else 52) * big), hf or "Inter-Black.ttf")
 
     # -- placing a smaller arena (the tournament); plain = the duel, untouched
     def place(self, cx, cy, k):
@@ -923,7 +1390,7 @@ class DuelPainter:
         im = Image.new("RGBA", (big, big), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
         col = (255, 255, 255) if flash else b["col"]
-        ring = tuple(b.get("ring") or (255, 255, 255)) + (255,)       # 2v2: the team's colour
+        ring = tuple(b.get("ring") or self.ball_ring or (255, 255, 255)) + (255,)   # 2v2: the team's colour
         rw = max(1, int((8 if b.get("ring") else 5) * S3 * q))
         if b.get("flag") and not flash:
             im.alpha_composite(_flag(b["flag"], int(2 * R)), (int(c - R), int(c - R)))
@@ -1067,6 +1534,19 @@ class DuelPainter:
             s2 = 1 + 0.12 * pulse
             g = g.resize((int(g.width * s2), int(g.height * s2)), Image.LANCZOS)
             im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        for m in getattr(sim, "things", ()):
+            self.thing(im, d, sim, m)
+        for b in sim.balls:                           # the magnet's pull: a line between them
+            if b.get("pulled", 0) > 0 and b["alive"]:
+                pu = b["puller"]
+                x0, y0 = P(pu["x"], pu["y"])
+                x1, y1 = P(b["x"], b["y"])
+                n = 14
+                for j in range(n):
+                    if j % 2 == 0:
+                        d.line([(x0 + (x1 - x0) * j / n, y0 + (y1 - y0) * j / n),
+                                (x0 + (x1 - x0) * (j + 1) / n, y0 + (y1 - y0) * (j + 1) / n)],
+                               fill=(230, 60, 80, 220) if j % 4 == 0 else (120, 160, 255, 220), width=sw(8))
         for r in sim.rockets:
             rot = self.img("rocket", self.rocket).rotate(-math.degrees(r["a"]), resample=Image.BICUBIC, expand=True)
             x, y = P(r["x"], r["y"])
@@ -1084,11 +1564,29 @@ class DuelPainter:
                 scale = 1 + min(0.5, (sim.t - sim.done_at) * 0.4)
             else:
                 scale = 1 + 0.25 * b["squash"]
+            if b.get("small", 0) > 0:
+                scale *= 0.65                         # the wand
+            if b.get("giant", 0) > 0:
+                scale *= 1.45                         # the potion
+            if b.get("fast", 0) > 0 or b.get("dash", 0) > 0:
+                sp_ = math.hypot(b["vx"], b["vy"]) or 1
+                ux, uy = -b["vx"] / sp_, -b["vy"] / sp_
+                for j in (-1, 0, 1):
+                    ox, oy = -uy * j * 30, ux * j * 30
+                    x0, y0 = P(b["x"] + ux * 80 + ox, b["y"] + uy * 80 + oy)
+                    x1, y1 = P(b["x"] + ux * 190 + ox, b["y"] + uy * 190 + oy)
+                    d.line([(x0, y0), (x1, y1)], fill=(255, 255, 255, 170), width=sw(6))
             if abs(scale - 1) > 0.01:
                 sp = sp.resize((int(sp.width * scale), int(sp.height * scale)), Image.LANCZOS)
             x, y = P(b["x"], b["y"])
             im.alpha_composite(sp, (int(x - sp.width / 2), int(y - sp.height / 2)))
-            if b.get("frozen", 0) > 0:
+            if b.get("spin", 0) > 0:                   # slipped on a banana: stars go round
+                for j in range(3):
+                    ang = sim.t * 9 + j * 2.09
+                    g = self.img("star", self.star)
+                    sx, sy = P(b["x"] + math.cos(ang) * 82, b["y"] - 70 + math.sin(ang) * 28)
+                    im.alpha_composite(g, (int(sx - g.width / 2), int(sy - g.height / 2)))
+            elif b.get("frozen", 0) > 0:
                 rr = sl(D_BALL + 6)
                 a = int(150 * min(1.0, b["frozen"] / 0.3))
                 d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(170, 225, 255, a // 2),
@@ -1110,7 +1608,9 @@ class DuelPainter:
             p = self.prev.get(b["i"])
             x, y = self.P(b["x"], b["y"])
             if p and b["alive"] and b.get("frozen", 0) <= 0:
-                td.line([p, (x, y)], fill=b["col"] + (190,), width=int(D_BALL * C_K * 0.8))
+                col = self.trail_col or b["col"] + (170,)
+                wd = int(D_BALL * C_K * (0.18 if self.arena == "notebook" else 0.32))
+                td.line([p, (x, y)], fill=col, width=wd)
             self.prev[b["i"]] = (x, y)
         im.alpha_composite(self.trail_layer)
 
@@ -1140,8 +1640,8 @@ class DuelPainter:
                 name = b["name"].upper()
                 f = self.f_name if big else self.f_name_s
                 while d.textlength(name, font=f) > bx1 - bx0 and f.size > 18:
-                    f = _font(f.size - 2)
-                d.text((bx0 if k == 0 else bx1, by - 10), name, font=f, fill=(255, 255, 255, 255),
+                    f = _font(f.size - 2, self.hand_font or "Inter-Black.ttf")
+                d.text((bx0 if k == 0 else bx1, by - 10), name, font=f, fill=self.ink + (255,),
                        anchor="ls" if k == 0 else "rs")
                 self.bar(d, b, sim, bx0, by, bx1, by + bh, mirror=k == 1)
         # VS badge
@@ -1152,9 +1652,9 @@ class DuelPainter:
         hook = self.recipe.get("hook") or ""
         f = self.f_hook
         while d.textlength(hook, font=f) > W - 80 and f.size > 28:
-            f = _font(f.size - 2)
-        d.text((W / 2, 410 if not teams else 440), hook, font=f, fill=(255, 255, 255, 255), anchor="mm",
-               stroke_width=4, stroke_fill=(7, 9, 24, 255))
+            f = _font(f.size - 2, self.hand_font or "Inter-Black.ttf")
+        d.text((W / 2, 410 if not teams else 440), hook, font=f, fill=self.ink + (255,), anchor="mm",
+               stroke_width=4, stroke_fill=self.ink_stroke + (255,))
 
     def portrait(self, im, d, b, x, y, size):
         ring = tuple(b.get("ring") or (255, 255, 255))
@@ -1192,6 +1692,138 @@ class DuelPainter:
                 col = (44, 48, 76, 255)
             d.rounded_rectangle((sx, y0, sx + seg, y1), 5, fill=col)
 
+    def thing(self, im, d, sim, m):
+        """A thrown / summoned thing (the newer weapons)."""
+        P, sl, sw = self.P, self.sl, self.sw
+        k = m["k"]
+        x, y = P(m["x"], m["y"])
+        age = sim.t - m["t0"]
+        if k in ("boomerang", "axe"):
+            g = self.img(k + "-spin", self.spin_pics[k]).rotate(-math.degrees(m["spin"]) % 360, resample=Image.BICUBIC,
+                                                               expand=True)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "bow":
+            a = math.atan2(m["vy"], m["vx"])
+            tx, ty = P(m["x"] - math.cos(a) * 90, m["y"] - math.sin(a) * 90)
+            d.line([(tx, ty), (x, y)], fill=(120, 80, 40, 255), width=sw(7))
+            hx, hy = math.cos(a), math.sin(a)
+            q = sl(22)
+            d.polygon([(x + hx * q, y + hy * q), (x - hy * q * 0.6, y + hx * q * 0.6), (x + hy * q * 0.6, y - hx * q * 0.6)],
+                      fill=(200, 205, 215, 255))
+            for f in (-1, 1):
+                d.line([(tx, ty), (tx - hx * q + f * hy * q * 0.7, ty - hy * q - f * hx * q * 0.7)],
+                       fill=(230, 60, 60, 255), width=sw(5))
+        elif k == "boulder":
+            g = self.img("moai", self.moai).rotate(-math.degrees(m["spin"]) % 360, resample=Image.BICUBIC, expand=True)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "peel":
+            g = self.img("peel", self.peel).rotate(math.degrees(m["ang"]), resample=Image.BICUBIC, expand=True)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "tornado":
+            r = sl(110)
+            for j in range(3):
+                a0 = (age * 400 + j * 120) % 360
+                d.arc((x - r, y - r * 0.5 + sl(40), x + r, y + r * 0.5 + sl(40)), a0, a0 + 70,
+                      fill=(200, 200, 210, 160), width=sw(6))
+            s2 = 1 + 0.06 * math.sin(age * 20)
+            g = self.img("twister", self.twister)
+            g = g.resize((int(g.width * s2), int(g.height * s2)), Image.LANCZOS)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "hole":
+            grow = min(1.0, age / 0.3) * min(1.0, (m["life"] - age) / 0.3)
+            r = sl(170) * grow
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(120, 60, 200, 60))
+            for j in range(4):                         # rings pulled inward
+                f = ((age * 1.5 + j / 4) % 1)
+                rr = r * (1 - f)
+                d.ellipse((x - rr, y - rr, x + rr, y + rr), outline=(190, 140, 255, int(160 * f)), width=sw(4))
+            g = self.img("swirl", self.swirl).rotate(age * 400 % 360, resample=Image.BICUBIC, expand=True)
+            g = g.resize((max(4, int(g.width * grow)), max(4, int(g.height * grow))), Image.LANCZOS)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+            c = sl(40) * grow
+            d.ellipse((x - c, y - c, x + c, y + c), fill=(0, 0, 0, 255))
+
+    # -- the arenas (Dean picked notebook, chalkboard, ice rink, boxing ring)
+    def arena_bg(self) -> Image.Image:
+        cx, cy, r = D_CX, C_CY, D_R * C_K
+        rng = np.random.default_rng(3)
+        if self.arena == "notebook":
+            im = Image.new("RGBA", (W, H), (250, 247, 236, 255))
+            d = ImageDraw.Draw(im)
+            for y in range(70, H, 52):
+                d.line([(0, y), (W, y)], fill=(170, 196, 232, 255), width=3)
+            d.line([(112, 0), (112, H)], fill=(235, 120, 120, 255), width=3)
+            grain = Image.fromarray((rng.random((H, W)) * 40).astype(np.uint8))
+            im = Image.composite(Image.new("RGBA", im.size, (226, 220, 202, 255)), im, grain.point(lambda v: v * 2))
+            d = ImageDraw.Draw(im)
+            _wobble(d, lambda t, j, p: (cx + r * (1 + j) * math.cos(t * 6.283) + p, cy + r * (1 + j) * math.sin(t * 6.283)),
+                    (40, 40, 48, 255), 8, seed=4, passes=3, amp=0.006)
+            self.ball_ring, self.ink, self.ink_stroke = (28, 28, 34), (30, 30, 36), (250, 247, 236)
+            self.trail_col = (70, 70, 84, 150)
+            self.hand_font = "PermanentMarker-Regular.woff"
+            return im
+        if self.arena == "chalk":
+            base = np.zeros((H, W, 3), np.float32) + (34, 60, 46)
+            base += rng.normal(0, 5, (H, W, 1))
+            im = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8)).convert("RGBA")
+            smudge = Image.new("RGBA", im.size, (0, 0, 0, 0))
+            sd = ImageDraw.Draw(smudge)
+            for _ in range(8):
+                x, y = rng.uniform(0, W), rng.uniform(0, H)
+                sd.ellipse((x - 260, y - 120, x + 260, y + 120), fill=(255, 255, 255, 16))
+            im.alpha_composite(smudge.filter(ImageFilter.GaussianBlur(60)))
+            d = ImageDraw.Draw(im)
+            _wobble(d, lambda t, j, p: (cx + r * (1 + j) * math.cos(t * 6.283) + p, cy + r * (1 + j) * math.sin(t * 6.283)),
+                    (232, 238, 228, 230), 10, seed=9, passes=2, amp=0.008)
+            self.ball_ring = (236, 240, 232)
+            self.trail_col = (230, 236, 226, 70)
+            self.hand_font = "GochiHand-Regular.woff"
+            return im
+        im = Image.new("RGBA", (W, H), (12, 14, 26, 255))
+        d = ImageDraw.Draw(im)
+        bx, by, hw, hh, cr = ARENA_SHAPES[self.arena]
+        X, Y = D_CX, C_CY + (by - D_CY) * C_K       # (the painter isn't placed yet: map by hand)
+        hw, hh, cr = hw * C_K, hh * C_K, cr * C_K
+        if self.arena == "ice":
+            d.rounded_rectangle((X - hw - 14, Y - hh - 14, X + hw + 14, Y + hh + 14), cr + 14, fill=(230, 60, 70, 255))
+            d.rounded_rectangle((X - hw, Y - hh, X + hw, Y + hh), cr, fill=(226, 240, 250, 255))
+            ice = Image.new("RGBA", im.size, (0, 0, 0, 0))
+            idr = ImageDraw.Draw(ice)
+            r2 = random.Random(4)
+            for _ in range(70):                       # skate scratches
+                sx, sy = r2.uniform(X - hw + 40, X + hw - 40), r2.uniform(Y - hh + 40, Y + hh - 40)
+                rr = r2.uniform(60, 260)
+                a0 = r2.uniform(0, 360)
+                idr.arc((sx - rr, sy - rr, sx + rr, sy + rr), a0, a0 + r2.uniform(15, 60), fill=(180, 206, 228, 200),
+                        width=3)
+            m = Image.new("L", im.size, 0)
+            ImageDraw.Draw(m).rounded_rectangle((X - hw, Y - hh, X + hw, Y + hh), cr, fill=255)
+            im.paste(ice, (0, 0), Image.fromarray(np.minimum(np.asarray(m), np.asarray(ice.getchannel("A")))))
+            d = ImageDraw.Draw(im)
+            d.line([(X - hw + 8, Y), (X + hw - 8, Y)], fill=(225, 60, 70, 255), width=10)
+            d.ellipse((X - 110, Y - 110, X + 110, Y + 110), outline=(70, 110, 220, 255), width=8)
+            for yy in (Y - hh * 0.45, Y + hh * 0.45):
+                d.line([(X - hw + 8, yy), (X + hw - 8, yy)], fill=(70, 110, 220, 255), width=8)
+            self.trail_col = (150, 186, 220, 170)
+            self.ball_ring = (255, 255, 255)
+            return im
+        # boxing
+        r2 = random.Random(2)
+        for _ in range(1800):                         # the crowd
+            x, y = r2.uniform(0, W), r2.uniform(480, H)
+            c = r2.choice([(56, 56, 76), (78, 68, 60), (48, 58, 70), (88, 88, 108), (70, 50, 60)])
+            d.ellipse((x - 11, y - 11, x + 11, y + 11), fill=c + (255,))
+        d.rectangle((X - hw - 26, Y - hh - 26, X + hw + 26, Y + hh + 26), fill=(18, 18, 28, 255))
+        d.rectangle((X - hw, Y - hh, X + hw, Y + hh), fill=(64, 104, 186, 255))
+        for k, col in enumerate(((230, 50, 60), (245, 245, 245), (60, 100, 220))):
+            o = 6 + k * 16
+            d.rectangle((X - hw + o, Y - hh + o, X + hw - o, Y + hh - o), outline=col + (255,), width=7)
+        for (px, py), col in zip(((X - hw, Y - hh), (X + hw, Y - hh), (X - hw, Y + hh), (X + hw, Y + hh)),
+                                 ((230, 50, 60), (60, 100, 220), (60, 100, 220), (230, 50, 60))):
+            d.rectangle((px - 26, py - 26, px + 26, py + 26), fill=col + (255,), outline=(255, 255, 255, 255), width=5)
+        self.trail_col = None
+        return im
+
     def held(self, im, b):
         w = b["weapon"]
         if not w:
@@ -1206,6 +1838,11 @@ class DuelPainter:
             img, dist, rot = self.saw, D_BALL + 74, -math.degrees(a) * 4
         elif w == "bomb":
             img, dist, rot = self.bomb, D_BALL + 30, -math.degrees(a) * 0.3
+        elif w in EMOJI_ARMS:
+            img = self.icons[w]
+            base = HELD_ANGLE.get(w)
+            rot = 0 if base is None else -(math.degrees(a) - base)
+            dist = D_BALL + img.width * 0.38 - b["kick"] * 14
         else:
             img = self.guns[w]
             if math.cos(a) < 0:              # keep the gun upright on the left side
@@ -1288,6 +1925,32 @@ class DuelPainter:
             elif k == "ring":
                 r = sl(D_BALL + 8 + (1 - L) * 50)
                 d.ellipse((ex - r, ey - r, ex + r, ey + r), outline=e["col"] + (int(200 * L),), width=sw(6))
+            elif k == "wave":
+                r = sl(60 + (e["r"] - 60) * (1 - L))
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), outline=(255, 255, 255, int(230 * L)), width=sw(10))
+                r2 = r * 0.82
+                d.ellipse((ex - r2, ey - r2, ex + r2, ey + r2), outline=(255, 220, 120, int(150 * L)), width=sw(5))
+            elif k == "bolt":
+                rng = random.Random(e["seed"] + int(sim.t * 30))
+                pts = [P(*p) for p in e["pts"]]
+                path = [pts[0]]
+                for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+                    nx, ny = -(y1 - y0), x1 - x0
+                    ln = math.hypot(nx, ny) or 1
+                    for j in range(1, 9):
+                        o = rng.uniform(-1, 1) * sl(26)
+                        path.append((x0 + (x1 - x0) * j / 9 + nx / ln * o, y0 + (y1 - y0) * j / 9 + ny / ln * o))
+                    path.append((x1, y1))
+                d.line(path, fill=(255, 230, 90, int(140 * L)), width=sw(22), joint="curve")
+                d.line(path, fill=(255, 255, 255, int(255 * L)), width=sw(7), joint="curve")
+            elif k == "flame":
+                r = sl(e["r"])
+                col = (255, int(120 + 120 * L), int(40 * L), int(220 * L))
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=col)
+            elif k == "slashfx":
+                a0 = math.degrees(e["ang"]) - 60
+                r = sl(110 + (1 - L) * 30)
+                d.arc((ex - r, ey - r, ex + r, ey + r), a0, a0 + 120, fill=(255, 255, 255, int(255 * L)), width=sw(12))
             elif k == "beam":
                 x1, y1 = P(e["x1"], e["y1"])
                 for wd, col in ((46, (255, 40, 60, int(110 * L))), (24, (255, 120, 140, int(200 * L))),
@@ -2166,6 +2829,15 @@ R_ZONE_AT, R_ZONE_SPEED = 3.0, 16.0
 R_HEARTS = 3
 R_SPAWN = 420                     # where the 16 start, from the middle
 R_FIRST_KO = 3.5                  # a seed needs its first knockout by then
+# The falling floor (Dean picked it from the idea board, 29 Oct): half the new
+# royales stand on hex tiles instead of a closing ring. From F_START the tiles
+# crack (F_CRACK s of warning) and drop, outside first (F_SPEED px/s inward,
+# a bit of jitter); the middle (F_KEEP) never drops. A ball over a hole falls
+# and is out. Balls see a hole coming and turn back F_DODGE of the time, so
+# falls are a moment, not a constant.
+F_TILE, F_START, F_SPEED, F_CRACK, F_KEEP, F_DODGE = 70, 4.0, 12.0, 1.0, 260, 0.95
+FLOOR_HOOKS = ["The floor falls away. Last one standing wins", "16 balls, the floor is falling. Who's left?",
+               "Don't fall: last one standing wins", "Pick one before the floor goes"]
 ROYALE_HOOKS = ["16 balls, 1 circle -- who survives?", "Last ball standing wins", "16 balls enter. 1 leaves.",
                 "Pick a ball: last one alive wins"]
 FLAG_ROYALE_HOOKS = ["16 countries, 1 circle -- who survives?", "Last country standing wins",
@@ -2184,6 +2856,10 @@ def royale_recipe(recipe: dict, force: Optional[str] = None) -> dict:
         players = [list(c) for c in rng.sample(COLOURS + EXTRA_COLOURS, 16)]
         recipe.update(hook=rng.choice(ROYALE_HOOKS))
     recipe.update(players=players, bed="off", ending="WINS!")
+    fl = random.Random(f"floor-{recipe['seed']}")               # own rng: the draws above stay as they were
+    recipe["floor"] = fl.random() < 0.5
+    if recipe["floor"]:
+        recipe["hook"] = fl.choice(FLOOR_HOOKS)
     return recipe
 
 
@@ -2201,6 +2877,64 @@ class RoyaleSim(TeamDuelSim):
             b["team"] = b["i"]                       # everyone for themselves
             b["x"], b["y"] = D_CX + math.cos(a) * R_SPAWN, D_CY + math.sin(a) * R_SPAWN
         self.kos: list = []                          # (t, ball index)
+        self.tiles: dict = {}                        # the falling floor: (q, r) -> tile
+        if recipe.get("floor"):
+            frng = random.Random(f"floor-tiles-{recipe['seed']}")
+            n = int(R_START / F_TILE) + 2
+            for q in range(-n, n + 1):
+                for r in range(-n, n + 1):
+                    x, y = self._hex_xy(q, r)
+                    dd = math.hypot(x - D_CX, y - D_CY)
+                    if dd > R_START + F_TILE * 0.3:
+                        continue
+                    drop = None if dd < F_KEEP else F_START + (R_START - dd) / F_SPEED + frng.uniform(-0.9, 0.9)
+                    self.tiles[(q, r)] = {"x": x, "y": y, "drop": drop}
+
+    # -- the falling floor
+    @staticmethod
+    def _hex_xy(q, r):
+        return D_CX + F_TILE * 1.5 * q, D_CY + F_TILE * math.sqrt(3) * (r + q / 2)
+
+    def _tile_at(self, x, y):
+        fq = (x - D_CX) / (F_TILE * 1.5)
+        fr = (y - D_CY) / (F_TILE * math.sqrt(3)) - fq / 2
+        # cube rounding
+        cx, cz = fq, fr
+        cy = -cx - cz
+        rx, ry, rz = round(cx), round(cy), round(cz)
+        dx, dy, dz = abs(rx - cx), abs(ry - cy), abs(rz - cz)
+        if dx > dy and dx > dz:
+            rx = -ry - rz
+        elif dy <= dz:
+            rz = -rx - ry
+        return self.tiles.get((rx, rz))
+
+    def _hole(self, x, y, ahead=0.0):
+        t = self._tile_at(x, y)
+        return t is None or (t["drop"] is not None and self.t + ahead >= t["drop"])
+
+    def _floor(self):
+        for b in self.balls:
+            if not b["alive"]:
+                continue
+            if self._hole(b["x"], b["y"]):
+                b["alive"], b["hp"] = False, 0
+                self.effects.append({"k": "fall", "x": b["x"], "y": b["y"], "life": 1.0, "col": b["col"],
+                                     "flag": b.get("flag")})
+                self.sfx.append((self.t, "out", b["i"] % 3))
+                self._ko(b, b)
+                if self.winner is not None:
+                    return
+                continue
+            if b["frozen"] > 0 or self.t < b.get("edge_cd", 0):
+                continue
+            sp = math.hypot(b["vx"], b["vy"]) or 1
+            if self._hole(b["x"] + b["vx"] / sp * (D_BALL + 50), b["y"] + b["vy"] / sp * (D_BALL + 50), 0.15):
+                b["edge_cd"] = self.t + 0.5
+                if self.rng.random() < F_DODGE:          # it sees the hole and turns back
+                    a = math.atan2(-b["vy"], -b["vx"]) + self.rng.uniform(-0.6, 0.6)
+                    b["vx"], b["vy"] = sp * math.cos(a), sp * math.sin(a)
+        self.pickups = [p for p in self.pickups if not self._hole(p["x"], p["y"], F_CRACK)]
 
     def left(self) -> int:
         return sum(1 for b in self.balls if b["alive"])
@@ -2225,7 +2959,10 @@ class RoyaleSim(TeamDuelSim):
 
     def step(self):
         super().step()
-        if self.winner is None and self.t > R_ZONE_AT:
+        if self.tiles:
+            if self.winner is None:
+                self._floor()
+        elif self.winner is None and self.t > R_ZONE_AT:
             self.ring = max(R_MIN, R_START - (self.t - R_ZONE_AT) * R_ZONE_SPEED)
             self.pickups = [p for p in self.pickups if math.hypot(p["x"] - D_CX, p["y"] - D_CY) < self.ring - 60]
         for b in self.balls:
@@ -2251,9 +2988,35 @@ class RoyalePainter(DuelPainter):
         self.pip_empty = _heart_sprite(18, None, (90, 94, 120, 255))
         self.dead_at: dict = {}
 
+    def floor(self, im, sim):
+        """The hex floor: blue tiles, orange (blinking) when cracked, gone
+        when dropped. Redrawn only when a tile changes."""
+        state = tuple(0 if t["drop"] is None or sim.t < t["drop"] - F_CRACK else
+                      1 if sim.t < t["drop"] else 2 for t in sim.tiles.values())
+        blink = int(sim.t * 8) % 2
+        key = (state, blink if 1 in state else 0)
+        if getattr(self, "_floor_key", None) != key:
+            lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(lay)
+            k = self.k
+            for t, st in zip(sim.tiles.values(), state):
+                if st == 2:
+                    continue
+                x, y = D_CX + (t["x"] - D_CX) * k, D_CY + (t["y"] - D_CY) * k
+                rr = F_TILE * k * 0.95
+                pts = [(x + rr * math.cos(j * math.pi / 3), y + rr * math.sin(j * math.pi / 3)) for j in range(6)]
+                fill = (70, 92, 205, 255) if st == 0 else ((255, 130, 80, 255) if blink else (220, 90, 60, 255))
+                d.polygon(pts, fill=fill, outline=(150, 176, 255, 255) if st == 0 else (255, 210, 160, 255))
+            self._floor_layer, self._floor_key = lay, key
+        im.alpha_composite(self._floor_layer)
+
     def frame(self, sim: RoyaleSim) -> Image.Image:
         im = self.bg.copy().convert("RGBA")
         d = ImageDraw.Draw(im)
+        if sim.tiles:
+            q = D_R - 4
+            d.ellipse((D_CX - q, D_CY - q, D_CX + q, D_CY + q), fill=(4, 5, 12, 255))       # the void under it
+            self.floor(im, sim)
         if sim.ring < R_START - 0.5:
             # the zone closing in, in red
             rr = sim.ring * self.k
@@ -2264,6 +3027,17 @@ class RoyalePainter(DuelPainter):
         self.hud(im, d, sim)
         self.place(D_CX, D_CY, self.k)
         self.draw_match(im, d, sim, ending=False)
+        for e in sim.effects:                        # falling through the floor: it shrinks away
+            if e["k"] == "fall":
+                x, y = self.P(e["x"], e["y"])
+                r = D_BALL * self.k * max(0.0, e["life"])
+                if r > 2:
+                    if e.get("flag"):
+                        g = _flag(e["flag"], max(4, int(2 * r)))
+                        im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+                    else:
+                        d.ellipse((x - r, y - r, x + r, y + r), fill=e["col"] + (255,))
+                    d.ellipse((x - r, y - r, x + r, y + r), outline=(255, 255, 255, int(255 * e["life"])), width=3)
         for b in sim.balls:                          # each ball's hearts as pips above it
             if not b["alive"] or sim.winner is not None:
                 continue
@@ -2424,6 +3198,65 @@ def _sound(kind: str, seed: int = 0) -> np.ndarray:
             beeps[i:i + n] += np.sin(2 * np.pi * 1500 * t[:n]) * np.exp(-t[:n] * 40)
             bt += 0.32 * (1 - bt / BOMB_FUSE) + 0.06
         return beeps * 0.25
+    if kind == "slash":               # katana dash: a sharp swish
+        t = tt(0.3)
+        sw = _lp(_noise(len(t), seed), 2) * np.sin(np.pi * np.minimum(1, t / 0.3)) ** 2
+        return sw * np.exp(-t * 4) * 0.55
+    if kind == "slam":                # hammer: a deep thud + crunch
+        t = tt(0.8)
+        thud = np.sin(2 * np.pi * np.cumsum(55 + 120 * np.exp(-t * 14)) / SR) * np.exp(-t * 5)
+        return np.tanh((thud * 1.6 + _lp(_noise(len(t), seed), 6) * np.exp(-t * 12) * 1.2) * 2) * 0.9
+    if kind == "throw":               # boomerang / axe leaving the hand
+        t = tt(0.35)
+        return _lp(_noise(len(t), seed), 5) * np.sin(np.pi * t / 0.35) * 0.35
+    if kind == "twang":               # the bow
+        t = tt(0.45)
+        f = 220 * (1 + 0.04 * np.exp(-t * 30))
+        return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 9) + _lp(_noise(len(t), seed), 2)
+                * np.exp(-t * 60) * 0.4) * 0.55
+    if kind == "thunder":             # lightning: a crack and a rumble
+        t = tt(1.0)
+        crack = _noise(len(t), seed) * np.exp(-t * 30)
+        rumble = _lp(_noise(len(t), seed + 1), 60) * 8 * np.exp(-t * 3)
+        return np.tanh((crack + rumble) * 1.6) * 0.85
+    if kind == "fire":                # the flamethrower's roar, FLAME_S long
+        t = tt(FLAME_S)
+        roar = _lp(_noise(len(t), seed), 8) * 3 * np.minimum(1, t / 0.08) * np.minimum(1, (FLAME_S - t) / 0.2)
+        return np.tanh(roar) * 0.45
+    if kind == "magnet":              # a rising electric hum
+        t = tt(0.9)
+        f = 110 + 120 * t
+        return np.sign(np.sin(2 * np.pi * np.cumsum(f) / SR)) * np.minimum(1, t / 0.05) * np.exp(-t * 2) * 0.12
+    if kind == "slip":                # a banana spin-out: a slide whistle down
+        t = tt(0.5)
+        f = 1400 * np.exp(-t * 3) + 300
+        return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 3) * 0.3
+    if kind == "punch":
+        t = tt(0.3)
+        body = np.sin(2 * np.pi * np.cumsum(70 + 220 * np.exp(-t * 35)) / SR) * np.exp(-t * 16)
+        return np.tanh((body * 1.4 + _lp(_noise(len(t), seed), 3) * np.exp(-t * 50)) * 2.4) * 0.85
+    if kind == "bonk":                # the frying pan
+        t = tt(0.6)
+        return sum(np.sin(2 * np.pi * f * t) * np.exp(-t * k) for f, k in ((310, 6), (620, 9), (1240, 14))) * 0.3
+    if kind == "wind":                # a tornado
+        t = tt(1.4)
+        w = _lp(_noise(len(t), seed), 12) * 4 * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))
+        return np.tanh(w) * np.minimum(1, t / 0.2) * np.exp(-t * 1.2) * 0.4
+    if kind == "hole":                # a black hole opening: a low falling swirl
+        t = tt(1.2)
+        f = 180 * np.exp(-t * 1.5) + 40
+        return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.minimum(1, t / 0.1) * np.exp(-t * 1.5) * 0.5
+    if kind == "rumble":              # the boulder rolling in
+        t = tt(1.0)
+        return np.tanh(_lp(_noise(len(t), seed), 50) * 10) * np.minimum(1, t / 0.1) * np.exp(-t * 2) * 0.6
+    if kind == "sparkle":             # the wand
+        t = tt(0.5)
+        return sum(np.sin(2 * np.pi * f * t) * np.exp(-t * 10) * (t > d)
+                   for f, d in ((1568, 0), (2093, 0.06), (2637, 0.12))) * 0.15
+    if kind == "gulp":                # a potion
+        t = tt(0.4)
+        return sum(np.sin(2 * np.pi * (300 + 200 * k) * t) * np.exp(-((t - 0.1 * k) * 30) ** 2)
+                   for k in range(3)) * 0.35
     if kind == "out":                 # a country falls out of the ring (survivor): a quick drop
         t = tt(0.32)
         f = 900 * np.exp(-t * 7) + 160 + 40 * seed
