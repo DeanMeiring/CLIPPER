@@ -1124,6 +1124,68 @@ merge it yourself; merging stays Dean's call per the rule above.
   18-38 (12 of 40 seeds pass). Claude's mix is limited to the
   `BALLS_FORMAT_CYCLE` kinds (the first run brought back rays/touch/break
   in/trail). The report's `pictures` for fights names the contestants.
+- **Survivor, new weapons, clean look (29 Oct):** Dean: "change the
+  visuals a bit... new weapons or new battle royale or whatever", after the
+  research. (1) `format: "survivor"` (`clipper/ball_survivor.py`, NO_PACK,
+  `be._parts` dispatches; label "🌍 Countries, 1 ring, 1 survivor"): 24
+  flag balls (`S_N`) bounce at a steady speed in a ring whose gap turns
+  (`S_SPIN`) and widens as they go (`S_GAP0` x (N/left)^`S_GAP_GROW`); a
+  ball that finds the gap falls out and is crossed out in the grid on top
+  ("N LEFT", "X IS OUT"), the last one wins ("X SURVIVES!"). Red caps mark
+  the gap's ends. ok = first out by 2.5 s, no wait over 4.5 s; `good_end`
+  20-36, ~1 seed in 2, ~23 s long. Description opens "Comment your country
+  before you watch 👇" (the reel it's from asked that). In the cycle x2
+  (22 slots) and `BALLS_DEBUT` 2. (2) `recipe["arsenal"] = 2` (every new
+  duel / 2v2 / tournament / royale) adds `WEAPONS2`: laser (aims with a
+  red sight line `LASER_CHARGE` 0.5 s, then a beam to the ring's edge, 2
+  hearts to everyone on it), saw (spinning blade, 3 hits), freeze gun (1
+  heart + frozen `FREEZE_S` 1.5 s: can't move or use its weapon), bomb (put
+  down near the enemy, `BOMB_FUSE` 1.4 s, the blast zone pulses red; uses
+  `_boom`). Weapons drop every 1.5-2.5 s with it (was 2-3.2): duels median
+  ~34 s (was ~36). Recipes without `arsenal` simulate exactly as before
+  (hash-checked on 12 duels/tournaments). (3) `recipe["style"] = "clean"`
+  (new duels and 2v2s only; royale/tournament keep their own HUDs): the
+  arena drawn 1.08x and higher (`C_CY` 1050, via `place`), fighting-game
+  health bars (a segment per heart, the ones just lost turn red and drain),
+  a VS badge, the hook under them, colour trails, a white flash on the
+  knockout, and 2v2 rings in the team's own colours (they used to follow
+  the team's place, so a blue team could have orange rings).
+- **Idea board: weapons + arenas (29 Oct):** Dean was shown a board of 9
+  arena and 16 weapon mockups (sandbox only). He dropped lava ring, the
+  cage, black hole and comic; kept the rest and all the weapons.
+  (1) `WEAPONS2` gained katana (dash, 2 hearts), hammer (shockwave), boomerang
+  (curves back, can hit twice), axe (thrown, 2), bow (draws, arrow goes
+  through everyone, 2), lightning (chains to 3 enemies), flamethrower (cone,
+  `FLAME_S`, max 3 hearts), magnet (pulls in, contact = 1), banana (peel
+  trap: 1 + spin-out, reuses `frozen` + `spin`), glove (fling; a wall right
+  after = 1 more, `_wall_slam`), pan (bats bullets back, bonks on contact),
+  tornado / black hole / Moai boulder (`self.things`, `_things`), wand
+  (`small` for `SMALL_S`: +1 per hit, drawn 0.65x), potion (heal 2 / fast /
+  giant). New duels pick `recipe["weapons"]` (4 `CLASSICS` + 6 `NEWER`,
+  own rng `weapons-<seed>`); tournaments and royales draw from all of
+  `WEAPONS2`. Status timers live in `_status`, speeds in `_spd` (always
+  `D_SPEED` for older fights). Pictures: Fluent Emoji 3D as white-outlined
+  stickers (`_sticker`, `EMOJI_ARMS`, `HELD_ANGLE` turns each to aim; 7 more
+  emoji copied in from `@lobehub/fluent-emoji-3d`); sounds are numpy
+  (`_sound`: slash, slam, twang, thunder, fire, magnet, slip, punch, bonk,
+  wind, hole, rumble, sparkle, gulp). Duels median ~32 s, every weapon
+  gets used (80-seed run).
+  (2) `recipe["arena"]` for new duels / 2v2s (`ARENAS`, own rng): neon (the
+  clean look), notebook (lined paper, pen-drawn ring, ink outlines, pencil
+  trails, Permanent Marker titles), chalk (chalkboard, chalk ring, Gochi Hand
+  titles), ice (rounded rink, skate-mark trails) and boxing (square ring,
+  ropes, crowd). Ice and boxing have box walls (`ARENA_SHAPES`, `_box_wall`
+  / `_box_bounce` / `_outside`; spawns, bullets, rockets and the laser use
+  them). Fonts: `PermanentMarker-Regular.woff` (Apache 2.0) and
+  `GochiHand-Regular.woff` (OFL) from @fontsource, opened by path like the
+  others.
+  (3) Falling floor (`recipe["floor"]`, half of new royales, own rng
+  `floor-<seed>`, `FLOOR_HOOKS`): hex tiles (`F_TILE`) crack `F_CRACK` s
+  before they drop, outside first from `F_START` at `F_SPEED`, the middle
+  `F_KEEP` stays; a ball over a hole falls (shrinks away) and is out; balls
+  turn back from a hole `F_DODGE` of the time. ~17 s, ~6 falls, `good_end`
+  15-34 (1 seed in 3). Recipes without these fields simulate and draw
+  exactly as before (hash + pixel checks on duels, tournaments, royales).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
