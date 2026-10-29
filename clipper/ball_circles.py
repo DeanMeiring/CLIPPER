@@ -30,7 +30,7 @@ W, H, FPS = be.W, be.H, be.FPS
 CX, CY, RING_R = 540, 1010, 410
 BALL_R = 22
 SECONDS_CAP = 75.0
-END_HOLD = 4.0
+END_HOLD = 1.8              # see ball_evolution.END_HOLD
 FORMATS = ("escape", "touch")
 FILL_SHARE = 0.74          # escape with recipe["fill"]: done at this share of the ring's area
 

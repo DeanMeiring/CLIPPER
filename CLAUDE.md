@@ -1113,6 +1113,17 @@ merge it yourself; merging stays Dean's call per the rule above.
   Use it to change the videos themselves (pacing, hooks, endings, sounds),
   not just the mix; tell Dean what the numbers showed. Dean can download
   it from the page (`GET /api/balls/report`).
+- **First report's fixes (29 Oct):** the watch curves showed viewers
+  leaving the moment the result shows (best duel: 80% still watching at
+  90%, 26% at the end), so `END_HOLD` is 1.8 s in every kind (was 3.2-4;
+  every end animation is done within ~1 s) and `render` fades the last
+  `END_FADE` 0.35 s of audio so the loop back isn't a cut-off sound. The
+  flag royale lost half its viewers 5-10 s in, before any knockout: now
+  `R_HEARTS` 3, `R_SPAWN` 420, zone from 3 s at 16/s, first knockout by
+  `R_FIRST_KO` 3 s (median 3.2 s, was 6.2), ~22 s long, `good_end`
+  18-38 (12 of 40 seeds pass). Claude's mix is limited to the
+  `BALLS_FORMAT_CYCLE` kinds (the first run brought back rays/touch/break
+  in/trail). The report's `pictures` for fights names the contestants.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
