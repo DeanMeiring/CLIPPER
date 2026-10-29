@@ -6367,21 +6367,25 @@ def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
 def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict) -> str:
     """A kind drawn by the learned mix for the slot at dt -- the same answer
     every time it's asked (seeded by the slot and when it learned), and
-    never the kind the slot before got: the draws are chained over the
-    slots of the last few days."""
+    never the kind the slot before got: the draws are chained slot by slot
+    from a fixed start (a day before it learned), so every slot sees the
+    same chain."""
     tz = _balls_tz()
     local = dt.astimezone(tz)
-    before = []
-    for d in range(3, -1, -1):
-        day = local.date() - datetime.timedelta(days=d)
+    at = int(learned.get("at") or 0)
+    start = datetime.datetime.fromtimestamp(at, tz) - datetime.timedelta(days=1)
+    slots = []
+    day = min(start, local).date()
+    while day <= local.date():
         for t in times:
             hh, mm = (int(x) for x in t.split(":"))
             x = datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=tz)
-            if x < local:
-                before.append(x)
+            if (start <= x or day == local.date()) and x < local:
+                slots.append(x)
+        day += datetime.timedelta(days=1)
     kind = None
-    for x in before[-6:] + [local]:
-        kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{int(learned.get('at') or 0)}", avoid=kind)
+    for x in slots + [local]:
+        kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{at}", avoid=kind)
     return kind or BALLS_FORMAT_CYCLE[0]
 
 
@@ -6929,17 +6933,36 @@ def _balls_learn() -> dict:
             raise RuntimeError("YouTube didn't share the channel's numbers: reconnect the channel (top of this "
                                "page) and allow everything it asks for.") from e
         raise
-    tab = ball_learn.table(_balls.videos(), stats)
+    videos = _balls.videos()
+    tab = ball_learn.table(videos, stats)
     allowed = [k for k in BALLS_FORMAT_LABELS if k not in ball_learn.NEVER]
     out = ball_learn.plan(tab, list(dict.fromkeys(BALLS_FORMAT_CYCLE)), allowed, BALLS_FORMAT_LABELS,
                           os.environ.get("ANTHROPIC_API_KEY"), log=lambda m: print(m, flush=True))
     data = {"at": time.time(), "table": tab, **out}
-    f = _balls_learn_file()
+    _balls_write_json(_balls_learn_file(), data)
+    # the full report, per video, for a Claude Code session to read from the
+    # logs (ball_learn.log_report) or for Dean to download
+    rows = ball_learn.video_rows(videos, stats)
+    curves = {}
+    for r in ball_learn.curve_picks(rows):
+        try:
+            curves[r["yt"]] = ball_learn.short_curve(
+                youtube_analytics.get_retention_curve(token, channel, r["yt"], r["posted"][:10]))
+        except Exception as e:      # a curve is a bonus: YouTube has none for some videos
+            print(f"[balls-learn] no retention curve for {r['yt']}: {e}", flush=True)
+    report = {"at": data["at"], "source": out["source"], "notes": out["notes"], "weights": out["weights"],
+              "looks": out["looks"], "channel": tab["channel"], "kinds": tab["kinds"], "videos": rows,
+              "curves": curves}
+    _balls_write_json(_balls.root / "report.json", report)
+    ball_learn.log_report(report, log=lambda m: print(m, flush=True))
+    return data
+
+
+def _balls_write_json(f: Path, data: dict) -> None:
     f.parent.mkdir(parents=True, exist_ok=True)
     tmp = f.with_suffix(".part")
     tmp.write_text(json.dumps(data), encoding="utf-8")
     tmp.replace(f)
-    return data
 
 
 def _balls_learn_bg(reason: str, claimed: bool = False) -> None:
@@ -6973,7 +6996,16 @@ def _balls_learn_view(s: dict) -> dict:
             "at": learned.get("at"), "source": learned.get("source"), "notes": learned.get("notes") or [],
             "weights": learned.get("weights") or {}, "looks": learned.get("looks") or {},
             "kinds": tab.get("kinds") or {}, "channel": tab.get("channel"), "videos": tab.get("videos") or 0,
-            "claude": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "claude": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "report": (_balls.root / "report.json").is_file()}
+
+
+@protected.get("/api/balls/report")
+def balls_report() -> FileResponse:
+    f = _balls.root / "report.json"
+    if not f.is_file():
+        raise HTTPException(404, "No report yet: press 🧠 Learn now.")
+    return FileResponse(f, media_type="application/json", filename="dropvolve-report.json")
 
 
 @protected.post("/api/balls/learn")
@@ -12350,6 +12382,7 @@ __NAV_LINKS__
     <ul class="ln-notes" id="ln-notes"></ul>
     <div class="ln-wrap"><table class="ln" id="ln-table"></table></div>
     <button id="ln-now" type="button" class="secondary">🧠 Learn now</button>
+    <div class="hint" id="ln-report" style="display:none">Every run also writes a full report (each video: kind, pictures, sound, length, views, kept watching, likes, and where viewers drop off on the best and worst ones) to the app’s logs, where Claude Code can read it to improve the videos themselves. <a href="/api/balls/report">⬇ Download it</a></div>
   </div>
 
   <div class="section">
@@ -12526,6 +12559,7 @@ function renderLearn() {
     st.textContent = `Learned ${sa(L.at * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })} from ${L.videos} videos`
       + (L.source === 'claude' ? ', mix set by Claude.' : ', mix set by a formula (Claude didn’t answer).');
   } else st.style.display = 'none';
+  $('ln-report').style.display = L.report ? '' : 'none';
   const notes = $('ln-notes'); notes.innerHTML = '';
   for (const n of L.notes) notes.appendChild(el('li', '', n));
   const t = $('ln-table'); t.innerHTML = '';

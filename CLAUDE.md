@@ -1099,6 +1099,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   table, share of the next videos). Store: `BASE_DIR/_balls/learn.json`.
   Dean was told it shifts the mix toward kinds that keep viewers, but
   can't promise a breakout: most Shorts sit at the 1-2k test audience.
+- **The daily report, for Claude Code (29 Oct):** Dean: "let it pull a
+  report ... so that you can read it. Then you can edit it as you see
+  fit." Each learning run also writes `BASE_DIR/_balls/report.json` and
+  prints it to the app's logs as `[balls-report] {json}` lines, all with
+  the same `run` time: `summary` (channel middle, Claude's notes), `mix`,
+  one `kind` line per kind, one `video` line per posted video (kind/look,
+  title, hook, pictures, sound, length, views, stayed %, avg % watched,
+  likes, comments, shares, age) and `curve` lines (share still watching
+  at 5%, 10% ... 100%) for the 3 best and 3 worst videos over 48 h old,
+  then `end`. **To read it:** Railway `get-logs` (project/service above)
+  with `filter: "balls-report"`, `limit: 500`, and keep the latest `run`.
+  Use it to change the videos themselves (pacing, hooks, endings, sounds),
+  not just the mix; tell Dean what the numbers showed. Dean can download
+  it from the page (`GET /api/balls/report`).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
