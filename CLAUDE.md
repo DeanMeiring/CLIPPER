@@ -1077,6 +1077,28 @@ merge it yourself; merging stays Dean's call per the rule above.
   Adds ~1-8 s. Recipes without the field (every older video) simulate
   exactly as before (checked on 12 recipes of 6 kinds). Shrink, touch,
   zen, merge, center, jaws, break in already ended on a finished job.
+- **Learns from its numbers (29 Oct):** Dean: views aren't climbing, "it
+  sees which video gets a lot of views ... and then it decides which videos
+  to make". `clipper/ball_learn.py`: once a day (`_balls_autopilot_tick`,
+  when `learn.json` is over 20 h old; or "🧠 Learn now", `POST
+  /api/balls/learn`) it reads the channel's own YouTube Analytics per video
+  (views, engagedViews = kept watching, likes, shares, average % watched;
+  report sorted by views, retried without engagedViews on a 400), matches
+  them to each video's recipe (fights split by look: `duel:flags`...),
+  counts only videos at least 48 h old, and Claude sets the mix
+  (`weights` per kind, `looks` per fight, 2-4 plain `notes`). Guardrails
+  in code (`clamp` / `_spread`): every `BALLS_FORMAT_CYCLE` kind >= 2%,
+  none over 34%, each fight look >= 10%, Evolve never. No key or no answer:
+  the same table by a formula (`formula_mix`). `_balls_format_for` then
+  draws each slot's kind from the mix (`_balls_learned_kind`: seeded by
+  slot + learn time, never the kind the slot before got), `_balls_make`
+  forces the fight's look (`duel_recipe(recipe, force=...)` etc.; with no
+  `force` the recipes are byte for byte as before, checked on 1,200), and
+  `BALLS_DEBUT` still goes first. Setting `learn` (default on); off = the
+  fixed cycle. Page: "🧠 Learning from your numbers" (notes, per-kind
+  table, share of the next videos). Store: `BASE_DIR/_balls/learn.json`.
+  Dean was told it shifts the mix toward kinds that keep viewers, but
+  can't promise a breakout: most Shorts sit at the 1-2k test audience.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

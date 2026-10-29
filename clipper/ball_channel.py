@@ -32,6 +32,7 @@ DEFAULT_SETTINGS = {
     "slots": ["08:00", "15:00"],
     "auto_instagram": True,
     "ahead_days": 2,
+    "learn": True,          # the autopilot's mix of kinds follows the channel's numbers (ball_learn)
 }
 
 

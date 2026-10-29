@@ -49,6 +49,8 @@ from clipper import longform_thumbnail
 from clipper import ranking
 from clipper import rocket_league
 from clipper import ball_channel
+from clipper import ball_learn
+from clipper import ball_duel
 from clipper import ball_packs
 from clipper import ball_review
 from clipper import ball_starters
@@ -6033,6 +6035,11 @@ def _balls_make(vid: str) -> None:
         fmt = _balls_debut_kind(_balls.videos()) or fmt
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
+    learned = _balls_learned() if settings.get("learn") else None
+    looks = ((learned or {}).get("looks") or {}).get(fmt)
+    if looks and fmt in ball_learn.LOOKS:
+        # the fights' look (colours / flags / 2 VS 2) by the learned mix too
+        getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
@@ -6343,13 +6350,39 @@ def _balls_tz():
 
 
 def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
-    """The kind of video for the posting slot at dt (BALLS_FORMAT_CYCLE)."""
-    times = _balls_slot_times(s or _balls.settings())
+    """The kind of video for the posting slot at dt: by the mix learned from
+    the channel's numbers when learning is on, else BALLS_FORMAT_CYCLE."""
+    s = s or _balls.settings()
+    times = _balls_slot_times(s)
+    learned = _balls_learned() if s.get("learn") else None
+    if learned and learned.get("weights"):
+        return _balls_learned_kind(dt, times, learned)
     local = dt.astimezone(_balls_tz())
     hm = local.strftime("%H:%M")
     pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
     i = local.date().toordinal() * len(times) + pos
     return BALLS_FORMAT_CYCLE[i % len(BALLS_FORMAT_CYCLE)]
+
+
+def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict) -> str:
+    """A kind drawn by the learned mix for the slot at dt -- the same answer
+    every time it's asked (seeded by the slot and when it learned), and
+    never the kind the slot before got: the draws are chained over the
+    slots of the last few days."""
+    tz = _balls_tz()
+    local = dt.astimezone(tz)
+    before = []
+    for d in range(3, -1, -1):
+        day = local.date() - datetime.timedelta(days=d)
+        for t in times:
+            hh, mm = (int(x) for x in t.split(":"))
+            x = datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=tz)
+            if x < local:
+                before.append(x)
+    kind = None
+    for x in before[-6:] + [local]:
+        kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{int(learned.get('at') or 0)}", avoid=kind)
+    return kind or BALLS_FORMAT_CYCLE[0]
 
 
 def _balls_debut_kind(videos: List[dict]) -> Optional[str]:
@@ -6489,7 +6522,7 @@ def balls_state() -> dict:
             "youtube_channel": (_youtube_token_stores[BALLS_PROFILE].load() or {}).get("channel"),
             "storage_mb": round(used / 1e6),
             "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
-            "autopilot": autopilot,
+            "autopilot": autopilot, "learn": _balls_learn_view(s),
             "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS,
                         "formats": [{"key": k, "label": BALLS_FORMAT_LABELS[k]} for k in BALLS_FORMAT_ROTATION]}}
 
@@ -6857,6 +6890,102 @@ def balls_post_both(vid: str) -> dict:
     return view
 
 
+# ---- learning: the mix of kinds follows the channel's own numbers -------------
+# Dean (29 Oct): "it sees which video gets a lot of views ... and then it
+# decides which videos to make based on that". Once a day (from the autopilot
+# tick, or "🧠 Learn now"): YouTube Analytics per video, summed up per kind,
+# Claude sets the mix (clipper/ball_learn.py); _balls_format_for draws each
+# slot's kind from it. New kinds (BALLS_DEBUT) still go first.
+BALLS_LEARN_EVERY = 20 * 3600
+_balls_learn_state: dict = {"running": False, "tried": 0.0, "error": None}
+
+
+def _balls_learn_file() -> Path:
+    return _balls.root / "learn.json"
+
+
+def _balls_learned() -> Optional[dict]:
+    try:
+        return json.loads(_balls_learn_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _balls_learn() -> dict:
+    store = _youtube_token_stores[BALLS_PROFILE]
+    token = store.get_valid_access_token()
+    if not token:
+        raise RuntimeError("Connect the Ball Evolution YouTube channel first (top of this page).")
+    channel = ((store.load() or {}).get("channel") or {}).get("id") or \
+        (youtube_analytics.get_own_channel(token) or {}).get("id")
+    if not channel:
+        raise RuntimeError("The connected Google account has no YouTube channel.")
+    import requests
+    try:
+        stats = ball_learn.fetch_stats(token, channel)
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code in (401, 403):
+            raise RuntimeError("YouTube didn't share the channel's numbers: reconnect the channel (top of this "
+                               "page) and allow everything it asks for.") from e
+        raise
+    tab = ball_learn.table(_balls.videos(), stats)
+    allowed = [k for k in BALLS_FORMAT_LABELS if k not in ball_learn.NEVER]
+    out = ball_learn.plan(tab, list(dict.fromkeys(BALLS_FORMAT_CYCLE)), allowed, BALLS_FORMAT_LABELS,
+                          os.environ.get("ANTHROPIC_API_KEY"), log=lambda m: print(m, flush=True))
+    data = {"at": time.time(), "table": tab, **out}
+    f = _balls_learn_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".part")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(f)
+    return data
+
+
+def _balls_learn_bg(reason: str, claimed: bool = False) -> None:
+    st = _balls_learn_state
+    if st["running"] and not claimed:
+        return
+    st.update(running=True, tried=time.time())
+    try:
+        data = _balls_learn()
+        st["error"] = None
+        top = ", ".join(f"{k} {v:g}%" for k, v in list(data["weights"].items())[:5])
+        print(f"[balls-learn] {reason}: {data['table']['videos']} videos, mix by {data['source']}: {top}", flush=True)
+    except Exception as e:
+        st["error"] = str(e)[:300] or "Learning failed."
+        print(f"[balls-learn] {reason} failed: {e}", flush=True)
+    finally:
+        st["running"] = False
+
+
+def _balls_learn_due(s: dict) -> bool:
+    if not s.get("learn") or _balls_learn_state["running"] or time.time() - _balls_learn_state["tried"] < 3 * 3600:
+        return False
+    learned = _balls_learned()
+    return not learned or time.time() - (learned.get("at") or 0) > BALLS_LEARN_EVERY
+
+
+def _balls_learn_view(s: dict) -> dict:
+    learned = _balls_learned() or {}
+    tab = learned.get("table") or {}
+    return {"on": bool(s.get("learn")), "running": _balls_learn_state["running"], "error": _balls_learn_state["error"],
+            "at": learned.get("at"), "source": learned.get("source"), "notes": learned.get("notes") or [],
+            "weights": learned.get("weights") or {}, "looks": learned.get("looks") or {},
+            "kinds": tab.get("kinds") or {}, "channel": tab.get("channel"), "videos": tab.get("videos") or 0,
+            "claude": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+@protected.post("/api/balls/learn")
+def balls_learn_now() -> dict:
+    if not _youtube_token_stores[BALLS_PROFILE].is_connected():
+        raise HTTPException(409, "Connect the Ball Evolution YouTube channel first (top of this page).")
+    if not _balls_learn_state["running"]:
+        _balls_learn_state["running"] = True     # claimed here, so the page shows it at once
+        threading.Thread(target=_balls_learn_bg, args=("by hand", True), daemon=True).start()
+    return balls_state()
+
+
 # ---- autopilot: two videos a day, made ahead, posted at the slots -------------
 # A Railway cron service ("ball-autopilot-waker") calls /autopilot/tick at the
 # slot times: that wakes the sleeping app, which makes the coming days' videos,
@@ -6876,6 +7005,8 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         if not s.get("autopilot"):
             return {"autopilot": False}
         _balls_resume()
+        if _balls_learn_due(s) and _youtube_token_stores[BALLS_PROFILE].is_connected():
+            threading.Thread(target=_balls_learn_bg, args=("daily",), daemon=True).start()
         tz = _balls_tz()
         now = datetime.datetime.now(tz)
         out = {"reason": reason, "at": now.isoformat(), "planned": 0, "scheduled": 0, "instagram": 0, "errors": []}
@@ -7130,6 +7261,7 @@ class BallsSettings(BaseModel):
     watermark: Optional[str] = None
     description: Optional[str] = None
     bed: Optional[str] = None
+    learn: Optional[bool] = None
 
 
 @protected.put("/api/balls/settings")
@@ -7156,6 +7288,8 @@ def balls_settings(req: BallsSettings) -> dict:
         data["autopilot"] = bool(req.autopilot)
     if req.auto_instagram is not None:
         data["auto_instagram"] = bool(req.auto_instagram)
+    if req.learn is not None:
+        data["learn"] = bool(req.learn)
     if req.ahead_days is not None:
         data["ahead_days"] = max(1, min(int(req.ahead_days), 3))
     out = _balls.save_settings(data)
@@ -12095,6 +12229,16 @@ __CSS__
   .plan .when { flex: none; width: 104px; font-weight: 600; }
   .plan .what { flex: 1; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
   .day.half { border-color: var(--warn); color: var(--warn); }
+  .ln-notes { margin: 10px 0 0; padding-left: 20px; font-size: 0.9rem; }
+  .ln-notes li { margin-top: 4px; }
+  .ln-wrap { overflow-x: auto; margin-top: 10px; }
+  .ln { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .ln th, .ln td { padding: 6px 8px; border-top: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  .ln th { color: var(--muted); font-weight: 600; border-top: none; }
+  .ln th:first-child, .ln td:first-child { text-align: left; white-space: normal; min-width: 130px; }
+  .ln td.share { font-weight: 700; }
+  .ln .sub td:first-child { padding-left: 22px; color: var(--muted); }
+  .ln .none td { color: var(--muted); }
   .pk { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
   .pk-head { display: flex; gap: 8px; align-items: baseline; }
   .pk-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -12199,6 +12343,16 @@ __NAV_LINKS__
   </div>
 
   <div class="section">
+    <h3>🧠 Learning from your numbers</h3>
+    <label class="toggle"><input id="ln-on" type="checkbox"> Pick the kinds by what does well on the channel</label>
+    <div class="hint" id="ln-hint"></div>
+    <div class="status" id="ln-status" style="display:none;margin-top:10px"></div>
+    <ul class="ln-notes" id="ln-notes"></ul>
+    <div class="ln-wrap"><table class="ln" id="ln-table"></table></div>
+    <button id="ln-now" type="button" class="secondary">🧠 Learn now</button>
+  </div>
+
+  <div class="section">
     <h3>🎞 Your videos</h3>
     <div class="tabs" id="tabs"></div>
     <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
@@ -12228,7 +12382,7 @@ async function load() {
   S = await api('/api/balls');
   render();
   clearTimeout(poll);
-  if (S.videos.some(v => MAKING.includes(v.status) || (v.instagram || {}).status === 'posting'))
+  if (S.videos.some(v => MAKING.includes(v.status) || (v.instagram || {}).status === 'posting') || (S.learn || {}).running)
     poll = setTimeout(() => load().catch(() => {}), 3000);
 }
 function fillOptions() {
@@ -12277,6 +12431,7 @@ function render() {
   renderInstagram();
   const st = S.settings;
   renderAutopilot();
+  renderLearn();
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
   $('s-bed').value = st.bed || 'auto';
@@ -12332,9 +12487,10 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t1')) $('ap-t1').value = t1 || '';
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
+  const mix = S.learn.on ? 'The kinds follow what does well on the channel (🧠 below).' : 'The kinds take turns in a fixed order.';
   $('ap-hint').textContent = ap.on
-    ? `It makes the next ${st.ahead_days || 2} days' videos ahead and posts each one to YouTube (public) and Instagram a few minutes after its time. Nothing goes to YouTube before then, so Remake and changes don't use up the day's uploads. Mostly ring videos: 8 in 10 are ⭕ / ✨ / 🧱, every 5th is 🧬 Evolve. You can still change titles, delete one (another is made for that time) or post your own.`
-    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day, mostly ring videos (8 in 10) with 🧬 Evolve every 5th.`;
+    ? `It makes the next ${st.ahead_days || 2} days' videos ahead and posts each one to YouTube (public) and Instagram a few minutes after its time. Nothing goes to YouTube before then, so Remake and changes don't use up the day's uploads. ${mix} You can still change titles, delete one (another is made for that time) or post your own.`
+    : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day. ${mix}`;
   const plan = $('ap-plan'); plan.innerHTML = '';
   plan.style.display = ap.on ? '' : 'none';
   const word = { queued: '⏳ waiting to be made', picking: '🧪 being made', rendering: '🎬 being made', ready: '✅ made, uploads soon',
@@ -12354,6 +12510,71 @@ function renderAutopilot() {
   warn.style.display = msgs.length ? '' : 'none';
   warn.textContent = msgs.join(' ');
 }
+const LOOK_WORD = { colours: '🎨 colours', flags: '🏳️ flags', teams: '👥 2 VS 2' };
+function renderLearn() {
+  const L = S.learn;
+  $('ln-on').checked = L.on;
+  $('ln-hint').textContent = L.on
+    ? 'Once a day it reads the channel’s YouTube numbers (views, how many keep watching instead of swiping away, likes) for every video at least 2 days old, adds them up per kind, and ' + (L.claude ? 'Claude' : 'a formula') + ' sets the mix for the next videos: more of what does well. Every kind keeps at least 2% so it still gets tried, none goes over 34%, and new kinds still go first.'
+    : 'Off: the autopilot’s kinds take turns in a fixed order.';
+  const st = $('ln-status');
+  st.style.display = '';
+  if (L.running) { st.className = 'status'; st.textContent = '🧠 Reading the channel’s numbers…'; }
+  else if (L.error) { st.className = 'status bad'; st.textContent = '⚠️ ' + L.error; }
+  else if (L.at) {
+    st.className = 'status ok';
+    st.textContent = `Learned ${sa(L.at * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })} from ${L.videos} videos`
+      + (L.source === 'claude' ? ', mix set by Claude.' : ', mix set by a formula (Claude didn’t answer).');
+  } else st.style.display = 'none';
+  const notes = $('ln-notes'); notes.innerHTML = '';
+  for (const n of L.notes) notes.appendChild(el('li', '', n));
+  const t = $('ln-table'); t.innerHTML = '';
+  const fmts = [...new Set([...Object.keys(L.weights), ...Object.keys(L.kinds).map(k => k.split(':')[0])])];
+  t.style.display = fmts.length ? '' : 'none';
+  if (!fmts.length) return;
+  const head = el('tr');
+  for (const h of ['Kind', 'Next videos', 'Videos', 'Middle views', 'Kept watching', 'Likes / 100']) head.appendChild(el('th', '', h));
+  t.appendChild(head);
+  const pct = (v) => (v === undefined || v === null) ? '—' : `${v}%`;
+  const nums = (row, r) => {
+    for (const v of r ? [r.videos, r.median_views.toLocaleString(), pct(r.stayed_pct), r.likes_per_100] : ['0', '—', '—', '—'])
+      row.appendChild(el('td', '', String(v)));
+  };
+  fmts.sort((a, b) => (L.weights[b] || 0) - (L.weights[a] || 0));
+  for (const f of fmts) {
+    const looks = [...new Set([...Object.keys(L.kinds).filter(k => k.startsWith(f + ':')),
+      ...Object.keys((L.looks || {})[f] || {}).map(lk => `${f}:${lk}`)])].sort();
+    const r = L.kinds[f];
+    const row = el('tr', r || looks.length ? '' : 'none');
+    row.appendChild(el('td', '', fmtLabel(f)));
+    row.appendChild(el('td', 'share', L.weights[f] ? `${L.weights[f]}%` : '—'));
+    if (looks.length) for (let i = 0; i < 4; i++) row.appendChild(el('td'));
+    else nums(row, r);
+    t.appendChild(row);
+    for (const k of looks) {
+      const lk = k.split(':')[1], sub = el('tr', 'sub');
+      sub.appendChild(el('td', '', LOOK_WORD[lk] || lk));
+      const share = ((L.looks || {})[f] || {})[lk];
+      sub.appendChild(el('td', '', share ? `${share}% of them` : ''));
+      nums(sub, L.kinds[k]);
+      t.appendChild(sub);
+    }
+  }
+  if (L.channel) {
+    const row = el('tr');
+    row.appendChild(el('td', '', 'Whole channel'));
+    row.appendChild(el('td'));
+    nums(row, L.channel);
+    t.appendChild(row);
+  }
+}
+$('ln-on').addEventListener('change', () => saveSettings({ learn: $('ln-on').checked }));
+$('ln-now').onclick = async () => {
+  const b = $('ln-now'); b.disabled = true;
+  try { S = await api('/api/balls/learn', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 3000); }
+  catch (e) { alert(e.message); }
+  b.disabled = false;
+};
 $('remake').onclick = async () => {
   if (!confirm('Make every video that isn’t public yet again, with the newest look? Ones already scheduled on YouTube stay there until you delete them in YouTube Studio (the page lists them).')) return;
   const b = $('remake'); b.disabled = true;
