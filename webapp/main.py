@@ -6303,7 +6303,7 @@ def _balls_view(v: dict) -> dict:
 
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-                         "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale")
+                         "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6324,14 +6324,19 @@ BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "cente
 # race, merge, jaws, box, spikes. Rays, break in, trail and touch are out
 # (still in Make by hand). Then (26 Oct) Dean asked for "16 balls, one
 # circle, 1v1v1": the battle royale, x2 -- 20 slots, 8 of them fights.
+# Then (29 Oct) "N countries, 1 ring, 1 survivor" (clipper/ball_survivor.py,
+# from the research: a 1.4M-view reel of that shape), x2 -- 22 slots. With
+# learning on (🧠, the default), the mix comes from the channel's numbers
+# instead and this is only the list of kinds it may use.
 BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center", "duel", "zen", "spiral", "duel",
-                      "race", "royale", "shrink", "escape", "tourney", "merge", "duel", "jaws", "box", "spikes")
+                      "survivor", "race", "royale", "shrink", "escape", "tourney", "merge", "duel", "jaws", "box",
+                      "spikes", "survivor")
 # New kinds go first (Dean, 19 Oct: "the newest one added takes precedence"
 # -- he didn't want to wait days for the rotation to reach them): until each
 # has this many videos made since BALLS_DEBUT_SINCE, the autopilot's next
 # video is the one furthest from its count. Merge is here for its new
 # pictures (logos, flags) and cursed noises.
-BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2}   # ties go to the first
+BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "survivor": 2}   # ties go to the first
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
@@ -6341,7 +6346,7 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something",
                        "trail": "🌈 Every bounce, it evolves", "duel": "⚔️ Ball duel",
                        "race": "🏁 First to N wins", "tourney": "🏆 16-ball tournament",
-                       "royale": "👑 16-ball battle royale"}
+                       "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor"}
 
 
 def _balls_tz():
@@ -6760,6 +6765,7 @@ def balls_song_audio(tid: str) -> FileResponse:
 BALLS_SONG_KINDS = ("shrink",)
 BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
+                       "survivor": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -12512,7 +12518,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {

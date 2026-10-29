@@ -171,10 +171,10 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 # ---- recipes -----------------------------------------------------------
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale")
+           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
-NO_PACK = ("duel", "race", "tourney", "royale")
+NO_PACK = ("duel", "race", "tourney", "royale", "survivor")
 FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
@@ -280,7 +280,10 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
         tunes = ball_merge.SEASON_TUNES.get(datetime.date.today().month) or ball_merge.EVERYDAY_TUNES
         recipe.update(backdrop=a.choice(_BREAKIN_BACKDROP_DRAW), hook=a.choice(ARENA_HOOKS[fmt]),
                       ending=a.choice(ARENA_ENDINGS[fmt]), tune=a.choice(tunes), bed="off", skin="plain")
-    if fmt in NO_PACK:
+    if fmt == "survivor":
+        from clipper import ball_survivor
+        ball_survivor.survivor_recipe(recipe)
+    elif fmt in NO_PACK:
         from clipper import ball_duel
         {"duel": ball_duel.duel_recipe, "race": ball_duel.race_recipe,
          "tourney": ball_duel.tourney_recipe, "royale": ball_duel.royale_recipe}[fmt](recipe)
@@ -838,6 +841,9 @@ def _parts(recipe: dict):
     if recipe.get("format") in ARENA_HOOKS:
         from clipper import ball_arenas
         return ball_arenas.PARTS[recipe["format"]]
+    if recipe.get("format") == "survivor":
+        from clipper import ball_survivor
+        return ball_survivor.SurvivorSim, ball_survivor.SurvivorPainter
     if recipe.get("format") in NO_PACK:
         from clipper import ball_duel
         return ball_duel.PARTS[recipe["format"]]
@@ -862,6 +868,8 @@ def good_end(recipe: dict) -> tuple:
         return (36.0, 58.0)
     if recipe.get("format") == "royale":
         return (18.0, 38.0)
+    if recipe.get("format") == "survivor":
+        return (20.0, 36.0)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -1538,6 +1546,19 @@ def publish_text(recipe: dict) -> dict:
 
 
 def _duel_text(recipe: dict) -> dict:
+    text = _duel_text_base(recipe)
+    if recipe.get("arsenal") == 2:
+        # the new weapons (ball_duel.WEAPONS2)
+        text["description"] = text["description"].replace(
+            "pistol, shotgun, minigun, rocket launcher -- and every gun fires once",
+            "pistol, shotgun, minigun, rocket launcher, laser, freeze gun, saw, bomb -- and every gun fires once")
+        text["description"] = text["description"].replace(
+            "Weapons drop in, every gun fires once",
+            "Weapons drop in (lasers, freeze guns, saws and bombs too), every gun fires once")
+    return text
+
+
+def _duel_text_base(recipe: dict) -> dict:
     if recipe.get("format") == "duel" and recipe.get("look") == "teams":
         desc = ("Two teams of two, six hearts each. Weapons drop into the ring -- pistol, shotgun, minigun, "
                 "rocket launcher -- and every gun fires once. A team is out when both its balls are.\n\n"
@@ -1554,6 +1575,12 @@ def _duel_text(recipe: dict) -> dict:
                 f"hits everyone near it, and the circle keeps closing in. Last one standing wins.\n\n"
                 f"Who did you pick? 👇\n\n#satisfying #physics #bouncingball #battleroyale")
         title = f"{recipe['hook']} 👑"
+    elif recipe.get("format") == "survivor":
+        n = len(recipe.get("players") or [])
+        desc = (f"Comment your country before you watch 👇\n\n{n} countries bounce in a ring with one gap, and the "
+                f"gap gets wider as they go. Fall out and you're out: the last country in the ring wins.\n\n"
+                f"#satisfying #physics #bouncingball #countryballs")
+        title = f"{recipe['hook']} 🌍"
     elif recipe.get("format") == "tourney":
         desc = (f"16 {'countries' if recipe.get('look') == 'flags' else 'balls'}, one bracket. All the fights of a round happen at once: 8, then 4, then 2, then the "
                 "final. Every gun fires once, and when a fight runs long it's sudden death -- one heart, a rocket "

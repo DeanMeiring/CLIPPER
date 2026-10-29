@@ -1124,6 +1124,32 @@ merge it yourself; merging stays Dean's call per the rule above.
   18-38 (12 of 40 seeds pass). Claude's mix is limited to the
   `BALLS_FORMAT_CYCLE` kinds (the first run brought back rays/touch/break
   in/trail). The report's `pictures` for fights names the contestants.
+- **Survivor, new weapons, clean look (29 Oct):** Dean: "change the
+  visuals a bit... new weapons or new battle royale or whatever", after the
+  research. (1) `format: "survivor"` (`clipper/ball_survivor.py`, NO_PACK,
+  `be._parts` dispatches; label "🌍 Countries, 1 ring, 1 survivor"): 24
+  flag balls (`S_N`) bounce at a steady speed in a ring whose gap turns
+  (`S_SPIN`) and widens as they go (`S_GAP0` x (N/left)^`S_GAP_GROW`); a
+  ball that finds the gap falls out and is crossed out in the grid on top
+  ("N LEFT", "X IS OUT"), the last one wins ("X SURVIVES!"). Red caps mark
+  the gap's ends. ok = first out by 2.5 s, no wait over 4.5 s; `good_end`
+  20-36, ~1 seed in 2, ~23 s long. Description opens "Comment your country
+  before you watch 👇" (the reel it's from asked that). In the cycle x2
+  (22 slots) and `BALLS_DEBUT` 2. (2) `recipe["arsenal"] = 2` (every new
+  duel / 2v2 / tournament / royale) adds `WEAPONS2`: laser (aims with a
+  red sight line `LASER_CHARGE` 0.5 s, then a beam to the ring's edge, 2
+  hearts to everyone on it), saw (spinning blade, 3 hits), freeze gun (1
+  heart + frozen `FREEZE_S` 1.5 s: can't move or use its weapon), bomb (put
+  down near the enemy, `BOMB_FUSE` 1.4 s, the blast zone pulses red; uses
+  `_boom`). Weapons drop every 1.5-2.5 s with it (was 2-3.2): duels median
+  ~34 s (was ~36). Recipes without `arsenal` simulate exactly as before
+  (hash-checked on 12 duels/tournaments). (3) `recipe["style"] = "clean"`
+  (new duels and 2v2s only; royale/tournament keep their own HUDs): the
+  arena drawn 1.08x and higher (`C_CY` 1050, via `place`), fighting-game
+  health bars (a segment per heart, the ones just lost turn red and drain),
+  a VS badge, the hook under them, colour trails, a white flash on the
+  knockout, and 2v2 rings in the team's own colours (they used to follow
+  the team's place, so a blue team could have orange rings).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
