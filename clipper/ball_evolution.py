@@ -63,7 +63,8 @@ SPAWN_CAP = 2500
 PULL_FROM_TIER = 2       # third item and up attract their match in the jar
 PULL = 900.0             # px/s^2, a bit more than gravity
 SECONDS_CAP = 90.0
-END_HOLD = 4.0
+END_HOLD = 1.8           # was 4: viewers swipe once the result shows (29 Oct curves)
+END_FADE = 0.35          # s of audio fade at the very end
 MAX_UNLOCK_GAP = 18.0
 GATE_DRIP = 1.5          # gates course: the hole drips every this many s at first
 
@@ -860,7 +861,7 @@ def good_end(recipe: dict) -> tuple:
     if recipe.get("format") == "tourney":
         return (36.0, 58.0)
     if recipe.get("format") == "royale":
-        return (24.0, 45.0)
+        return (18.0, 38.0)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -1599,7 +1600,14 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     finally:
         proc.stdin.close()
         proc.wait()
-    pcm = (mix_audio(sim) * 32767).astype(np.int16)
+    mix = mix_audio(sim)
+    # fade the last moment out: the video loops back to its start, and a
+    # sound cut off mid-way there sounds like a glitch
+    end = int(SR * frame / FPS)
+    k = int(SR * END_FADE)
+    if 0 < k < end <= len(mix):
+        mix[end - k:end] *= np.linspace(1.0, 0.0, k)
+    pcm = (mix * 32767).astype(np.int16)
     with wave.open(str(wav), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)

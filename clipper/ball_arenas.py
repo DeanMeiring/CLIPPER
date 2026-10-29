@@ -32,7 +32,7 @@ from clipper import ball_merge as bm
 
 W, H, FPS = be.W, be.H, be.FPS
 CX, CY = 540, 1060
-END_HOLD = 4.0
+END_HOLD = 1.8              # see ball_evolution.END_HOLD
 SECONDS_CAP = 70.0
 KINDS = ("center", "spikes", "shrink", "jaws")
 

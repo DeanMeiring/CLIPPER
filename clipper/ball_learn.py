@@ -274,6 +274,21 @@ def _sound(recipe: dict) -> str:
     return recipe.get("bounce_sound") or recipe.get("bed") or ""
 
 
+def _pictures(recipe: dict) -> str:
+    """What the balls were: a fight's contestants, else the picture pack
+    or the emoji theme. (A fight's recipe still carries a theme it never
+    shows.)"""
+    players = recipe.get("players")
+    if recipe.get("format") in LOOKS or recipe.get("format") == "race":
+        if recipe.get("team_names"):
+            return " VS ".join(recipe["team_names"])
+        if not players:
+            return ""
+        names = [" ".join(x for x in p[:2] if x) for p in players]
+        return " VS ".join(names) if len(names) <= 4 else f"{len(names)} {'countries' if recipe.get('look') == 'flags' else 'colours'}"
+    return (recipe.get("pack") or {}).get("title") or recipe.get("theme") or ""
+
+
 def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] = None) -> List[dict]:
     """One row per posted video with numbers: what it was (kind, look, hook,
     pictures, sound, length) next to how it did. Newest first."""
@@ -290,7 +305,7 @@ def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] 
         row = {"yt": yt["video_id"], "posted": datetime.datetime.fromtimestamp(posted, datetime.timezone.utc)
                .strftime("%Y-%m-%d %H:%M"), "age_h": round((now - posted) / 3600),
                "kind": kind_of(rec), "title": (v.get("title") or "")[:90], "hook": (rec.get("hook") or "")[:80],
-               "pictures": ((rec.get("pack") or {}).get("title") or rec.get("theme") or "")[:60],
+               "pictures": _pictures(rec)[:60],
                "sound": _sound(rec)[:60], "seconds": round(v.get("seconds") or 0, 1),
                "views": round(views), "avg_pct": round(st.get("avg_pct", 0), 1),
                "likes": round(st.get("likes", 0)), "comments": round(st.get("comments", 0)),

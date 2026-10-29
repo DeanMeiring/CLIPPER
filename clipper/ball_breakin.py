@@ -43,7 +43,7 @@ SPEED = 520
 TILE_W, TILE_H, TILE_GAP = 44, 22, 3
 HP_NEAR, HP_DEEP = 1, 8              # hits a tile needs: the entrance row .. the far row
 MAX_BALLS = 600
-END_HOLD = 4.0
+END_HOLD = 1.8              # see ball_evolution.END_HOLD
 SECONDS_CAP = 75.0
 
 

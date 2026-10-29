@@ -40,7 +40,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from clipper import ball_evolution as be
 
 W, H, FPS, SR = be.W, be.H, be.FPS, be.SR
-END_HOLD = 3.2
+END_HOLD = 1.8              # see ball_evolution.END_HOLD
 SECONDS_CAP = 70.0
 KINDS = ("duel", "race", "tourney", "royale")
 
@@ -1850,16 +1850,21 @@ def _duel_painter(recipe: dict):
 # ---- battle royale (26 Oct: Dean, "16 balls, one circle, 1v1v1...") ------------
 #
 # 16 duel balls in one ring, every ball for itself: it aims at the nearest
-# ball, bullets hit whoever they reach, a rocket hurts everyone near it. 4
-# hearts each. After R_ZONE_AT the ring closes in like a battle-royale zone
+# ball, bullets hit whoever they reach, a rocket hurts everyone near it.
+# R_HEARTS each. After R_ZONE_AT the ring closes in like a battle-royale zone
 # (red on screen), so the last fights can't drag on; once it is smaller
 # than the duel's ring, guns fire without waiting to aim. The fight runs in
 # a bigger ring (R_START) in the duel's own units and is drawn scaled down,
 # so 16 balls have room. Last ball standing wins.
 
+# 29 Oct: the first royale lost half its viewers 5-10 s in, before the
+# knockouts started, so it starts closer, with 3 hearts and the zone at 3 s:
+# first knockout ~3 s (was ~6), third ~7 s (was ~11), ~22 s long.
 R_START, R_MIN = 800, 250
-R_ZONE_AT, R_ZONE_SPEED = 8.0, 14.0
-R_HEARTS = 4
+R_ZONE_AT, R_ZONE_SPEED = 3.0, 16.0
+R_HEARTS = 3
+R_SPAWN = 420                     # where the 16 start, from the middle
+R_FIRST_KO = 3.0                  # a seed needs its first knockout by then
 ROYALE_HOOKS = ["16 balls, 1 circle -- who survives?", "Last ball standing wins", "16 balls enter. 1 leaves.",
                 "Pick a ball: last one alive wins"]
 FLAG_ROYALE_HOOKS = ["16 countries, 1 circle -- who survives?", "Last country standing wins",
@@ -1892,7 +1897,7 @@ class RoyaleSim(TeamDuelSim):
         for b in self.balls:
             a = 2 * math.pi * b["i"] / n - math.pi / 2
             b["team"] = b["i"]                       # everyone for themselves
-            b["x"], b["y"] = D_CX + math.cos(a) * 560, D_CY + math.sin(a) * 560
+            b["x"], b["y"] = D_CX + math.cos(a) * R_SPAWN, D_CY + math.sin(a) * R_SPAWN
         self.kos: list = []                          # (t, ball index)
 
     def left(self) -> int:
@@ -1914,7 +1919,7 @@ class RoyaleSim(TeamDuelSim):
         self.sfx.append((self.t + 0.3, "win", 0))
         times = [0.0] + [t for t, _ in self.kos]
         self.max_gap = max(b - a for a, b in zip(times, times[1:]))     # longest wait between knockouts
-        self.ok = winner["hp"] <= 2 and times[1] <= 6.0
+        self.ok = winner["hp"] <= 2 and times[1] <= R_FIRST_KO
 
     def step(self):
         super().step()

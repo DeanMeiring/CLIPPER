@@ -6935,8 +6935,10 @@ def _balls_learn() -> dict:
         raise
     videos = _balls.videos()
     tab = ball_learn.table(videos, stats)
-    allowed = [k for k in BALLS_FORMAT_LABELS if k not in ball_learn.NEVER]
-    out = ball_learn.plan(tab, list(dict.fromkeys(BALLS_FORMAT_CYCLE)), allowed, BALLS_FORMAT_LABELS,
+    # only the kinds in the rotation: Dean took rays, break in, trail and
+    # touch out on 25 Oct, and Claude brought them back on the first run
+    rotation = list(dict.fromkeys(BALLS_FORMAT_CYCLE))
+    out = ball_learn.plan(tab, rotation, rotation, BALLS_FORMAT_LABELS,
                           os.environ.get("ANTHROPIC_API_KEY"), log=lambda m: print(m, flush=True))
     data = {"at": time.time(), "table": tab, **out}
     _balls_write_json(_balls_learn_file(), data)

@@ -45,7 +45,7 @@ MAX_DROP_TIER = 4
 PACE = {9: (0.3, 4), 8: (0.38, 3), 7: (0.5, 2), 6: (0.85, 1)}
 BOUNCE = 0.92
 NOTE_GAP = 0.14
-END_HOLD = 4.0
+END_HOLD = 1.8              # see ball_evolution.END_HOLD
 SECONDS_CAP = 80.0
 
 
