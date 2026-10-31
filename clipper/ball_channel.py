@@ -33,6 +33,11 @@ DEFAULT_SETTINGS = {
     "auto_instagram": True,
     "ahead_days": 2,
     "learn": True,          # the autopilot's mix of kinds follows the channel's numbers (ball_learn)
+    # comment fights (ball_crowd): the crowd_slot's video is always one;
+    # crowd_blocked = channel ids Dean took out
+    "crowd": True,
+    "crowd_slot": "15:00",
+    "crowd_blocked": [],
 }
 
 

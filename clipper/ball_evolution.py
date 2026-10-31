@@ -174,7 +174,7 @@ FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", 
            "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
-NO_PACK = ("duel", "race", "tourney", "royale", "survivor")
+NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd")   # crowd: ball_crowd (commenters)
 FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
@@ -844,6 +844,9 @@ def _parts(recipe: dict):
     if recipe.get("format") == "survivor":
         from clipper import ball_survivor
         return ball_survivor.SurvivorSim, ball_survivor.SurvivorPainter
+    if recipe.get("format") == "crowd":
+        from clipper import ball_crowd
+        return ball_crowd.parts(recipe)
     if recipe.get("format") in NO_PACK:
         from clipper import ball_duel
         return ball_duel.PARTS[recipe["format"]]
@@ -870,6 +873,9 @@ def good_end(recipe: dict) -> tuple:
         return (15.0, 34.0) if recipe.get("floor") else (18.0, 38.0)
     if recipe.get("format") == "survivor":
         return (20.0, 36.0)
+    if recipe.get("format") == "crowd":
+        from clipper import ball_crowd
+        return ball_crowd.good_end(recipe)
     n = len(recipe_chain(recipe))
     return (28.0, 52.0) if n <= 8 else (38.0, 62.0)
 
@@ -904,7 +910,7 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
         # the crowned picture wins / the ball survives on only some seeds,
         # and these simulate in ~0.1 s, so try many more
         tries = max(tries, 240)
-    if recipe.get("format") == "duel":
+    if recipe.get("format") == "duel" or (recipe.get("crowd") or {}).get("look") == "duel":
         # a close fight with a comeback: ~1 seed in 15, ~0.03 s each
         tries = max(tries, 480)
     lo, hi = good_end(recipe)
@@ -1478,6 +1484,9 @@ def publish_text(recipe: dict) -> dict:
     question; nothing names the last item, so the reveal isn't spoiled."""
     pack = recipe.get("pack")
     fmt = recipe.get("format")
+    if fmt == "crowd":
+        from clipper import ball_crowd
+        return ball_crowd.publish_text(recipe)
     if fmt in NO_PACK:
         return _duel_text(recipe)
     if pack:
@@ -1651,6 +1660,9 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     info = dict(recipe, seconds=round(sim.t, 1), dropped=sim.spawned,
                 done_at=sim.done_at and round(sim.done_at, 1),
                 unlocks={chain[k][1]: round(t, 1) for k, t in sorted(sim.unlocked_at.items())})
+    if recipe.get("crowd") and getattr(sim, "winner", None):
+        # who won the comment fight: they hold the crown in the next one (ball_crowd)
+        info["crowd"] = dict(recipe["crowd"], winner=sim.winner["i"])
     log(f"rendered {out_path}: {info}")
     return info
 

@@ -50,6 +50,7 @@ from clipper import ranking
 from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_learn
+from clipper import ball_crowd
 from clipper import ball_duel
 from clipper import ball_packs
 from clipper import ball_review
@@ -6030,14 +6031,25 @@ def _balls_make(vid: str) -> None:
         try:
             at = datetime.datetime.strptime(opts["slot"], "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
             fmt = _balls_format_for(at, settings)
+            if not _balls_crowd_slot(at, settings):        # the comment fight's slot is always one
+                fmt = _balls_debut_kind(_balls.videos()) or fmt
         except ValueError:
-            pass
-        fmt = _balls_debut_kind(_balls.videos()) or fmt
+            fmt = _balls_debut_kind(_balls.videos()) or fmt
+    crowd = None
+    if fmt == "crowd":
+        # the commenters (ball_crowd): read the newest comments, then who's in
+        _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
+                                              note="Reading the comments..."))
+        crowd = _balls_crowd_cast(video)
+    base = ball_crowd.base_format(crowd) if crowd else fmt
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
-                                        opts.get("theme"), opts.get("course"), opts.get("jar"), fmt)
+                                        opts.get("theme"), opts.get("course"), opts.get("jar"), base)
     learned = _balls_learned() if settings.get("learn") else None
     looks = ((learned or {}).get("looks") or {}).get(fmt)
-    if looks and fmt in ball_learn.LOOKS:
+    if crowd:
+        getattr(ball_duel, f"{base}_recipe")(recipe, force="colours")
+        ball_crowd.apply(recipe, crowd)
+    elif looks and fmt in ball_learn.LOOKS:
         # the fights' look (colours / flags / 2 VS 2) by the learned mix too
         getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
     recipe["watermark"] = settings.get("watermark") or ""
@@ -6303,7 +6315,8 @@ def _balls_view(v: dict) -> dict:
 
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-                         "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor")
+                         "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
+                         "crowd")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6346,7 +6359,8 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "box": "📦 +3 after each escape", "zen": "🦈 Reminds me of something",
                        "trail": "🌈 Every bounce, it evolves", "duel": "⚔️ Ball duel",
                        "race": "🏁 First to N wins", "tourney": "🏆 16-ball tournament",
-                       "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor"}
+                       "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor",
+                       "crowd": "💬 Comment fight"}
 
 
 def _balls_tz():
@@ -6354,14 +6368,160 @@ def _balls_tz():
     return ZoneInfo(rocket_league.TZ)
 
 
+# ---- comment fights (clipper/ball_crowd.py, 31 Oct): the people who comment
+# on the channel's videos are the balls. The crowd_slot's video (15:00) is
+# always one, made at most BALLS_CROWD_AHEAD_H before its slot so the newest
+# comments get in. Comments are read with the channel's own token (its
+# youtube.readonly scope: no reconnect), checked once per comment by Claude,
+# and kept in BASE_DIR/_balls/crowd.json. Who has been in a fight, and who
+# holds the crown, come from the videos' own recipes.
+BALLS_CROWD_AHEAD_H = 8
+BALLS_CROWD_FRESH_S = 20 * 60          # comments read this recently aren't read again for a make
+_balls_crowd_lock = threading.Lock()
+_balls_crowd_state = {"running": False}
+
+
+def _balls_crowd_file() -> Path:
+    return _balls.root / "crowd.json"
+
+
+def _balls_crowd_load() -> dict:
+    try:
+        return json.loads(_balls_crowd_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"people": {}}
+
+
+def _balls_when(v: dict) -> float:
+    """When a video posts (or posted): its YouTube time, else its slot, else
+    when it was made -- the order the comment fights' crown passes in."""
+    yt = v.get("youtube") or {}
+    if yt.get("publish_at_ts") or yt.get("uploaded_at"):
+        return float(yt.get("publish_at_ts") or yt.get("uploaded_at"))
+    slot = (v.get("options") or {}).get("slot")
+    if slot:
+        try:
+            return datetime.datetime.strptime(slot, "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz()).timestamp()
+        except ValueError:
+            pass
+    return float(v.get("made_at") or v.get("created_at") or time.time())
+
+
+def _balls_crowd_videos(exclude: Optional[str] = None) -> List[dict]:
+    """Made comment-fight videos that count (not removed from YouTube, not
+    taken off the list before they posted), oldest first."""
+    out = []
+    for v in _balls.videos():
+        yt = v.get("youtube") or {}
+        if (not (v.get("recipe") or {}).get("crowd") or v["id"] == exclude or yt.get("removed")
+                or (v.get("hidden") and not yt.get("video_id")) or v.get("status") == "error"):
+            continue
+        out.append(v)
+    return sorted(out, key=_balls_when)
+
+
+def _balls_crowd_used(exclude: Optional[str] = None) -> set:
+    return {m["channel"] for v in _balls_crowd_videos(exclude) for m in v["recipe"]["crowd"]["cast"]
+            if m.get("channel")}
+
+
+def _balls_crowd_champ(video: Optional[dict] = None) -> Optional[dict]:
+    """Who won the last comment fight before this video (the crown)."""
+    before = _balls_when(video) if video else float("inf")
+    champ = None
+    for v in _balls_crowd_videos(video["id"] if video else None):
+        c = v["recipe"]["crowd"]
+        if _balls_when(v) < before and isinstance(c.get("winner"), int) and c["winner"] < len(c["cast"]):
+            champ = c["cast"][c["winner"]]
+    return champ
+
+
+def _balls_crowd_refresh(force: bool = False) -> dict:
+    """Read the newest comments on the channel's videos and check the new
+    people (ball_crowd.fetch / update_people / moderate)."""
+    with _balls_crowd_lock:
+        st = _balls_crowd_load()
+        if not force and time.time() - (st.get("fetched_at") or 0) < BALLS_CROWD_FRESH_S:
+            return st
+        store = _youtube_token_stores[BALLS_PROFILE]
+        token = store.get_valid_access_token()
+        st["fetched_at"] = time.time()
+        if not token:
+            st["error"] = "Connect the Ball Evolution YouTube channel to read its comments."
+        else:
+            try:
+                channel = ((store.load() or {}).get("channel") or {}).get("id") or \
+                    (youtube_analytics.get_own_channel(token) or {}).get("id")
+                since = time.time() - ball_crowd.LOOKBACK_DAYS * 86400
+                ids = []
+                for v in _balls.videos():
+                    yt = v.get("youtube") or {}
+                    ts = yt.get("publish_at_ts") or yt.get("uploaded_at") or 0
+                    if yt.get("video_id") and not yt.get("removed") and since <= ts <= time.time():
+                        ids.append(yt["video_id"])
+                log = lambda m: print(m, flush=True)
+                comments = ball_crowd.fetch(token, ids, channel, log=log)
+                new = ball_crowd.update_people(st, comments)
+                checked = ball_crowd.moderate(st, os.environ.get("ANTHROPIC_API_KEY"), log=log)
+                st["error"] = None
+                st["last"] = {"comments": len(comments), "videos": len(ids), "new": new, "checked": checked}
+                print(f"[crowd] {len(comments)} comments, {new} new or changed, {checked} checked", flush=True)
+            except Exception as e:
+                st["error"] = f"Couldn't read the comments: {str(e)[:200]}"
+                print(f"[crowd] reading comments failed: {e}", flush=True)
+        _balls_write_json(_balls_crowd_file(), st)
+        return st
+
+
+def _balls_crowd_cast(video: dict) -> dict:
+    """Who's in this comment fight (ball_crowd.cast)."""
+    st = _balls_crowd_refresh()
+    s = _balls.settings()
+    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), set(s.get("crowd_blocked") or []),
+                            _balls_crowd_champ(video))
+    print(f"[crowd] {video['id']}: {block['look']}, {block['fresh']} new, "
+          f"{sum(1 for m in block['cast'] if not m.get('bot'))} people", flush=True)
+    return block
+
+
+def _balls_crowd_view(s: dict) -> dict:
+    st = _balls_crowd_load()
+    blocked = set(s.get("crowd_blocked") or [])
+    used = _balls_crowd_used()
+    people = list((st.get("people") or {}).values())
+    champ = _balls_crowd_champ()
+
+    def row(p):
+        return {"name": p["name"], "channel": p["channel"], "char": ball_crowd.character_for(p["channel"]),
+                "quote": p.get("quote"), "text": (p.get("text") or "")[:120]}
+    wait = ball_crowd.waiting(st, used, blocked)
+    return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "fetched_at": st.get("fetched_at"),
+            "error": st.get("error"), "last": st.get("last"), "running": _balls_crowd_state["running"],
+            "people": len(people), "waiting": [row(p) for p in wait[:40]], "waiting_n": len(wait),
+            "been_in": len(used), "champ": champ and {"name": champ["name"], "char": champ.get("char")},
+            "left_out": [row(p) for p in people if p.get("checked") and (not p.get("name_ok") or p.get("opt_out"))][:20],
+            "blocked": [row(p) for p in people if p["channel"] in blocked],
+            "claude": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+def _balls_crowd_slot(dt: datetime.datetime, s: dict) -> bool:
+    """The slot whose video is always the comment fight (ball_crowd; 15:00
+    SA by default), when comment fights are on."""
+    t = s.get("crowd_slot") or ""
+    return bool(s.get("crowd")) and t in _balls_slot_times(s) and dt.astimezone(_balls_tz()).strftime("%H:%M") == t
+
+
 def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
     """The kind of video for the posting slot at dt: by the mix learned from
-    the channel's numbers when learning is on, else BALLS_FORMAT_CYCLE."""
+    the channel's numbers when learning is on, else BALLS_FORMAT_CYCLE. The
+    comment-fight slot is always a comment fight."""
     s = s or _balls.settings()
+    if _balls_crowd_slot(dt, s):
+        return "crowd"
     times = _balls_slot_times(s)
     learned = _balls_learned() if s.get("learn") else None
     if learned and learned.get("weights"):
-        return _balls_learned_kind(dt, times, learned)
+        return _balls_learned_kind(dt, times, learned, s)
     local = dt.astimezone(_balls_tz())
     hm = local.strftime("%H:%M")
     pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
@@ -6369,7 +6529,7 @@ def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
     return BALLS_FORMAT_CYCLE[i % len(BALLS_FORMAT_CYCLE)]
 
 
-def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict) -> str:
+def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, s: Optional[dict] = None) -> str:
     """A kind drawn by the learned mix for the slot at dt -- the same answer
     every time it's asked (seeded by the slot and when it learned), and
     never the kind the slot before got: the draws are chained slot by slot
@@ -6390,7 +6550,10 @@ def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict) 
         day += datetime.timedelta(days=1)
     kind = None
     for x in slots + [local]:
-        kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{at}", avoid=kind)
+        # the comment fight's slot keeps its own kind; the draws around it
+        # go on as they would
+        if not (s and _balls_crowd_slot(x, s)):
+            kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{at}", avoid=kind)
     return kind or BALLS_FORMAT_CYCLE[0]
 
 
@@ -6455,7 +6618,8 @@ def _balls_next_free_slot(videos: List[dict], s: dict, exclude: Optional[str] = 
     taken = _balls_taken_slots(videos) - ({exclude} if exclude else set())
     soon = datetime.datetime.now(_balls_tz()) + datetime.timedelta(minutes=30)
     for dt in _balls_slots_ahead(s, 400):
-        if dt >= soon and _slot_key(dt) not in taken:
+        # the comment fight's slot is kept for it (it's planned only hours ahead)
+        if dt >= soon and _slot_key(dt) not in taken and not _balls_crowd_slot(dt, s):
             return dt
     raise RuntimeError("no free slot in the next year")
 
@@ -6531,7 +6695,7 @@ def balls_state() -> dict:
             "youtube_channel": (_youtube_token_stores[BALLS_PROFILE].load() or {}).get("channel"),
             "storage_mb": round(used / 1e6),
             "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
-            "autopilot": autopilot, "learn": _balls_learn_view(s),
+            "autopilot": autopilot, "learn": _balls_learn_view(s), "crowd": _balls_crowd_view(s),
             "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS,
                         "formats": [{"key": k, "label": BALLS_FORMAT_LABELS[k]} for k in BALLS_FORMAT_ROTATION]}}
 
@@ -6765,7 +6929,7 @@ def balls_song_audio(tid: str) -> FileResponse:
 BALLS_SONG_KINDS = ("shrink",)
 BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
-                       "survivor": "none",
+                       "survivor": "none", "crowd": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -7013,6 +7177,37 @@ def _balls_learn_view(s: dict) -> dict:
             "report": (_balls.root / "report.json").is_file()}
 
 
+class BallsCrowdBlockRequest(BaseModel):
+    channel: str
+    blocked: bool = True
+
+
+@protected.post("/api/balls/crowd/refresh")
+def balls_crowd_refresh() -> dict:
+    """Read the comments now (the page's button); the page polls for the result."""
+    st = _balls_crowd_state
+    if not st["running"]:
+        st["running"] = True
+
+        def run():
+            try:
+                _balls_crowd_refresh(force=True)
+            finally:
+                st["running"] = False
+        threading.Thread(target=run, daemon=True).start()
+    return balls_state()
+
+
+@protected.post("/api/balls/crowd/block")
+def balls_crowd_block(req: BallsCrowdBlockRequest) -> dict:
+    """Keep someone out of the comment fights (or let them back in)."""
+    blocked = [c for c in (_balls.settings().get("crowd_blocked") or []) if c != req.channel]
+    if req.blocked:
+        blocked.append(req.channel)
+    _balls.save_settings({"crowd_blocked": blocked})
+    return balls_state()
+
+
 @protected.get("/api/balls/report")
 def balls_report() -> FileResponse:
     f = _balls.root / "report.json"
@@ -7062,6 +7257,8 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         for dt in _balls_slots_ahead(s, max(1, min(int(s.get("ahead_days") or 2), 3)), now):
             if dt < now + datetime.timedelta(minutes=20) or _slot_key(dt) in taken or making >= BALLS_MAX_QUEUE:
                 continue
+            if _balls_crowd_slot(dt, s) and dt > now + datetime.timedelta(hours=BALLS_CROWD_AHEAD_H):
+                continue        # the comment fight is made late, so the newest comments get in
             _balls.new_video({"format": _balls_format_for(dt, s), "slot": _slot_key(dt), "auto": True})
             taken.add(_slot_key(dt))
             making += 1
@@ -7307,6 +7504,7 @@ class BallsSettings(BaseModel):
     description: Optional[str] = None
     bed: Optional[str] = None
     learn: Optional[bool] = None
+    crowd: Optional[bool] = None
 
 
 @protected.put("/api/balls/settings")
@@ -7335,6 +7533,8 @@ def balls_settings(req: BallsSettings) -> dict:
         data["auto_instagram"] = bool(req.auto_instagram)
     if req.learn is not None:
         data["learn"] = bool(req.learn)
+    if req.crowd is not None:
+        data["crowd"] = bool(req.crowd)
     if req.ahead_days is not None:
         data["ahead_days"] = max(1, min(int(req.ahead_days), 3))
     out = _balls.save_settings(data)
@@ -12282,6 +12482,14 @@ __CSS__
   .ln th { color: var(--muted); font-weight: 600; border-top: none; }
   .ln th:first-child, .ln td:first-child { text-align: left; white-space: normal; min-width: 130px; }
   .ln td.share { font-weight: 700; }
+  .cr-list { list-style: none; padding: 0; margin: 8px 0 0; }
+  .cr-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--border); }
+  .cr-list .ch { font-size: 1.6rem; line-height: 1; }
+  .cr-list .who { flex: 1; min-width: 0; }
+  .cr-list .nm { font-weight: 700; }
+  .cr-list .tx { color: var(--muted); font-size: 0.82rem; overflow-wrap: anywhere; }
+  .cr-list button { padding: 4px 10px; font-size: 0.8rem; }
+  .cr-champ { margin: 10px 0 4px; font-weight: 600; }
   .ln .sub td:first-child { padding-left: 22px; color: var(--muted); }
   .ln .none td { color: var(--muted); }
   .pk { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
@@ -12399,6 +12607,18 @@ __NAV_LINKS__
   </div>
 
   <div class="section">
+    <h3>💬 Comment fights</h3>
+    <label class="toggle"><input id="cr-on" type="checkbox"> Make the 15:00 video a comment fight every day</label>
+    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own character. 3 or more new people: a 16-ball battle royale; fewer: a 1v1 with their comments as trash talk. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: the app reads the comments a few hours before 15:00, Claude checks every name and comment, and “remove me” takes someone out. You only need this box to take someone out by hand.</div>
+    <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
+    <div class="cr-champ" id="cr-champ"></div>
+    <div class="hint" id="cr-wait-h"></div>
+    <ul class="cr-list" id="cr-wait"></ul>
+    <details id="cr-out-d" style="display:none"><summary id="cr-out-s"></summary><ul class="cr-list" id="cr-out"></ul></details>
+    <button id="cr-now" type="button" class="secondary">💬 Read the comments now</button>
+  </div>
+
+  <div class="section">
     <h3>🎞 Your videos</h3>
     <div class="tabs" id="tabs"></div>
     <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
@@ -12478,6 +12698,7 @@ function render() {
   const st = S.settings;
   renderAutopilot();
   renderLearn();
+  renderCrowd();
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
   $('s-bed').value = st.bed || 'auto';
@@ -12523,7 +12744,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {
@@ -12557,6 +12778,53 @@ function renderAutopilot() {
   warn.textContent = msgs.join(' ');
 }
 const LOOK_WORD = { colours: '🎨 colours', flags: '🏳️ flags', teams: '👥 2 VS 2' };
+function renderCrowd() {
+  const C = S.crowd;
+  if (!C) return;
+  $('cr-on').checked = C.on;
+  const ch = (code) => String.fromCodePoint(parseInt(code, 16));
+  const st = $('cr-status');
+  st.style.display = '';
+  if (C.running) { st.className = 'status'; st.textContent = '💬 Reading the comments…'; }
+  else if (C.error) { st.className = 'status bad'; st.textContent = '⚠️ ' + C.error; }
+  else if (C.fetched_at) {
+    st.className = 'status ok';
+    st.textContent = `Read ${sa(C.fetched_at * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ${C.people} ${C.people === 1 ? 'person has' : 'people have'} commented, ${C.been_in} ${C.been_in === 1 ? 'has' : 'have'} been in a fight` + (C.claude ? '.' : ' (no Claude key: names checked by a word list, no trash-talk lines).');
+  } else st.style.display = 'none';
+  $('cr-champ').textContent = C.champ ? `👑 Holding the crown: ${ch(C.champ.char)} ${C.champ.name}` : '👑 Nobody holds the crown yet.';
+  $('cr-wait-h').textContent = C.waiting_n ? `Waiting for their first fight (${C.waiting_n}), oldest first:` : 'Nobody new is waiting: the next fight fills up with people who were in before, then bots.';
+  const row = (p, label, blocked) => {
+    const li = el('li');
+    li.appendChild(el('span', 'ch', ch(p.char)));
+    const who = el('div', 'who');
+    who.appendChild(el('div', 'nm', p.name));
+    who.appendChild(el('div', 'tx', p.quote ? `Trash talk: “${p.quote}”` : (p.text || '')));
+    li.appendChild(who);
+    const b = el('button', 'secondary', label);
+    b.onclick = async () => {
+      b.disabled = true;
+      try { S = await api('/api/balls/crowd/block', jsonOpts('POST', { channel: p.channel, blocked })); render(); }
+      catch (e) { alert(e.message); b.disabled = false; }
+    };
+    li.appendChild(b);
+    return li;
+  };
+  const wl = $('cr-wait'); wl.innerHTML = '';
+  for (const p of C.waiting) wl.appendChild(row(p, 'Take out', true));
+  const out = [...C.blocked.map(p => ({ ...p, by: 'you' })), ...C.left_out.filter(p => !C.blocked.some(b => b.channel === p.channel))];
+  $('cr-out-d').style.display = out.length ? '' : 'none';
+  $('cr-out-s').textContent = `Left out (${out.length}): taken out by you, asked to be removed, or a name that isn’t OK to show`;
+  const ol = $('cr-out'); ol.innerHTML = '';
+  for (const p of out) ol.appendChild(p.by === 'you' ? row(p, 'Let back in', false) : (() => { const li = el('li'); li.appendChild(el('span', 'ch', ch(p.char))); const who = el('div', 'who'); who.appendChild(el('div', 'nm', p.name)); who.appendChild(el('div', 'tx', p.text || '')); li.appendChild(who); return li; })());
+}
+$('cr-on').addEventListener('change', () => saveSettings({ crowd: $('cr-on').checked }));
+$('cr-now').onclick = async () => {
+  const b = $('cr-now'); b.disabled = true;
+  try { S = await api('/api/balls/crowd/refresh', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 4000); }
+  catch (e) { alert(e.message); }
+  b.disabled = false;
+};
+
 function renderLearn() {
   const L = S.learn;
   $('ln-on').checked = L.on;

@@ -35,7 +35,7 @@ import subprocess
 from typing import Optional
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from clipper import ball_evolution as be
 
@@ -437,6 +437,7 @@ class DuelSim:
             a = self.rng.uniform(0, 2 * math.pi)
             self.balls.append({
                 "i": i, "name": f"{w1} {w2}" if w2 else w1, "col": tuple(col), "flag": p[3] if len(p) > 3 else None,
+                "pic": p[4] if len(p) > 4 else None,         # a character emoji on the ball (ball_crowd)
                 "x": D_CX + (-170 if i == 0 else 170), "y": D_CY + self.rng.uniform(-120, 120),
                 "vx": D_SPEED * math.cos(a), "vy": D_SPEED * math.sin(a),
                 "hp": hearts, "weapon": None, "uses": 0, "wang": self.rng.uniform(0, 6.28), "held": 0.0,
@@ -1269,6 +1270,7 @@ def _arena_bg(cx, cy, r, grid=True, ring=(245, 245, 255)) -> Image.Image:
 
 
 class DuelPainter:
+    UPPER_NAMES = True        # commenters' handles (ball_crowd) keep their own case
     def __init__(self, recipe: dict):
         self.recipe = recipe
         self.bg = _arena_bg(D_CX, D_CY, D_R)
@@ -1380,7 +1382,7 @@ class DuelPainter:
         r = D_BALL if self.plain else max(8, int(round(D_BALL * self.k)))
         q = 1 if self.plain else r / D_BALL
         key = (b["i"], b["col"], b.get("flag"), b.get("ring"), r, round(look / (math.pi / 12)), mood, blink, flash,
-               cracks)
+               cracks, b.get("pic"))
         if key in self.cache:
             return self.cache[key]
         S3 = 3
@@ -1395,6 +1397,19 @@ class DuelPainter:
         if b.get("flag") and not flash:
             im.alpha_composite(_flag(b["flag"], int(2 * R)), (int(c - R), int(c - R)))
             d.ellipse((c - R, c - R, c + R, c + R), outline=ring, width=rw)
+        elif b.get("pic"):
+            # a commenter's character (ball_crowd): the picture is the face
+            d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=ring, width=rw)
+            g = _emoji(b["pic"], int(1.62 * R))
+            if mood == "dead":
+                g = ImageOps.grayscale(g.convert("RGB")).convert("RGBA")
+                g.putalpha(_emoji(b["pic"], int(1.62 * R)).getchannel("A"))
+            im.alpha_composite(g, (int(c - g.width / 2), int(c - g.height / 2)))
+            out = im.resize((r * 2 + 8, r * 2 + 8), Image.LANCZOS)
+            if len(self.cache) > 1500:
+                self.cache.clear()
+            self.cache[key] = out
+            return out
         else:
             d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=ring, width=rw)
         rng = np.random.default_rng(b["i"] * 7 + 3)
@@ -1637,7 +1652,7 @@ class DuelPainter:
                 bx0, bx1 = (px + size + 16, x1) if k == 0 else (x0, px - 16)
                 bh = 42 if big else 28
                 by = y + size - bh - (8 if big else 2)
-                name = b["name"].upper()
+                name = b["name"].upper() if self.UPPER_NAMES else b["name"]
                 f = self.f_name if big else self.f_name_s
                 while d.textlength(name, font=f) > bx1 - bx0 and f.size > 18:
                     f = _font(f.size - 2, self.hand_font or "Inter-Black.ttf")
@@ -1662,6 +1677,9 @@ class DuelPainter:
             im.alpha_composite(_flag(b["flag"], size), (int(x), int(y)))
         else:
             d.ellipse((x, y, x + size, y + size), fill=b["col"] + (255,))
+            if b.get("pic"):
+                g = _emoji(b["pic"], int(size * 0.8))
+                im.alpha_composite(g, (int(x + size * 0.1), int(y + size * 0.1)))
         d.ellipse((x, y, x + size, y + size), outline=ring + (255,), width=5)
         if not b["alive"]:
             d.ellipse((x, y, x + size, y + size), fill=(10, 12, 26, 170))

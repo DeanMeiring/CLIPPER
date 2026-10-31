@@ -1193,6 +1193,56 @@ merge it yourself; merging stays Dean's call per the rule above.
   turn back from a hole `F_DODGE` of the time. ~17 s, ~6 falls, `good_end`
   15-34 (1 seed in 3). Recipes without these fields simulate and draw
   exactly as before (hash + pixel checks on duels, tournaments, royales).
+- **Comment fights (31 Oct):** Dean asked for numbers + research + one idea
+  to grow the channel (one video in a few takes off). The colour duel was
+  the only breakout (Purple VS Red 14.6k); a "Ball League" of colours was
+  built (PR #142) but Dean said nobody relates to "Royal Purple", so it's
+  parked. Pitched three relatable ideas (viewers' names as the balls,
+  "which one are you" groups, everyday debates); he picked the first, asked
+  for "better images", the 15:00 video always a comment fight, the 08:00
+  one still changing, and no need to check on it. Research: Marble Drop
+  Daily runs the same idea with marbles on Shorts (no growth numbers found);
+  YouTube's fake-engagement policy bans content whose *only* purpose is
+  rewarding comments, so: no prizes, never "like/subscribe to enter",
+  "remove me" takes a person out. `clipper/ball_crowd.py` (`format:
+  "crowd"`, NO_PACK; label "💬 Comment fight"): `fetch` reads top-level
+  comments (commentThreads.list, the channel's own token -- its
+  `youtube.readonly` scope already covers it, 1 unit per video) on the
+  channel's videos from the last `LOOKBACK_DAYS` 21, never its own;
+  `update_people` keeps one entry per channel (newest comment);
+  `moderate` (Claude, batches of 40, once per comment) sets `name_ok`,
+  `quote` (<= 48 chars of their own words, family-friendly, or null) and
+  `opt_out`; the word list `_BAD` / `_OPT_OUT` also has a say, and is all
+  there is without a key (no quotes then). `cast`: 3+ people waiting
+  (`ROYALE_MIN`) -> a 16-ball royale (champion, the waiting ones oldest
+  first, then people who were in before, then "Bot N" balls); fewer -> a
+  1v1 duel, champion VS the next one, each with their comment as a card
+  (character, name, line) for the first `CARD_S` 4 s. Every person gets a
+  fixed character (`CHARACTERS`, 55 bundled Fluent 3D emoji, by channel id)
+  and colour. A bot never wins while real people are in it (`_real_wins`
+  makes that seed not ok). The royale shows everyone's character + name in
+  the top grid (crown on the champ), names under the balls, "@x IS OUT";
+  the end says "@x WINS!", "Keeps / Takes / Wins the crown. Defends it next
+  fight." and a "Comment to get in the next one" button. Names keep their
+  case (`Handle`, `DuelPainter.UPPER_NAMES`). The sims are RoyaleSim /
+  DuelSim (draws from `royale_recipe` / `duel_recipe` with colours, then
+  `apply`); a ball with `pic` (5th player field) draws the character
+  instead of the face -- duels/royales without it draw byte for byte as
+  before (checked). After render, `info["crowd"]["winner"]` (cast index).
+  App: `settings["crowd"]` (on), `crowd_slot` "15:00", `crowd_blocked`.
+  `_balls_format_for` gives the crowd slot "crowd" (before the learned mix
+  and BALLS_DEBUT; the learned chain skips it), the planner only plans it
+  `BALLS_CROWD_AHEAD_H` 8 h ahead (made at the 08:05 waker, so the newest
+  comments get in), and `_balls_next_free_slot` keeps it free. At make:
+  `_balls_crowd_cast` -> `_balls_crowd_refresh` (skipped if read < 20 min
+  ago) -> `cast` with who's been in (`_balls_crowd_used`) and the champion
+  (`_balls_crowd_champ`: winner of the latest earlier comment fight,
+  `_balls_when` order), both from the videos' recipes; the store is only
+  `BASE_DIR/_balls/crowd.json` (people + checks). Page "💬 Comment fights":
+  on/off, last read, the crown, who's waiting (with "Take out"), who's left
+  out (and "Let back in"), "Read the comments now"
+  (`POST /api/balls/crowd/refresh`, `POST /api/balls/crowd/block`). The
+  report names the commenters (`ball_learn._pictures`).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
