@@ -37,7 +37,10 @@ def fetch_stats(access_token: str, channel_id: str, days: int = LOOKBACK_DAYS, h
     what made the main channel's report answer 400)."""
     import requests
     http = http or requests
-    end = datetime.date.today()
+    # yesterday (UTC): a date that's still tomorrow on YouTube's Pacific
+    # clock gave an empty report (31 Oct, 05:07 UTC), and today has no
+    # numbers yet anyway
+    end = datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)
     params = {"ids": f"channel=={channel_id}", "startDate": (end - datetime.timedelta(days=days)).isoformat(),
               "endDate": end.isoformat(), "dimensions": "video", "sort": "-views", "maxResults": 200}
     names = ["views", "engaged_views", "likes", "comments", "shares", "avg_pct"]

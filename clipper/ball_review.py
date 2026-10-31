@@ -79,6 +79,21 @@ Answer with JSON only:
 (point 3), "notes": "one short plain sentence on what you saw"}}"""
 
 
+def _style_note(pack: dict) -> str:
+    """What the bundled packs' pictures look like, so a small flag isn't
+    taken for a wrong picture (31 Oct: Japan's countryball, a white ball
+    with a red disc and eyes, was called "a generic red smiley")."""
+    credit = (pack.get("credit") or "").lower()
+    if "flag-icons" in credit:
+        return ("The pictures are countryballs: each country's real flag drawn as a round ball with two "
+                "eyes (Japan is a white ball with a big red disc), the last one wears a crown. Small on "
+                "screen they can look like plain coloured balls; that is not a wrong picture.")
+    if "simple icons" in credit:
+        return ("The pictures are the brands' simple one-colour logos on a round badge; small on screen "
+                "they can look plain; that is not a wrong picture.")
+    return ""
+
+
 def frame_times(info: dict) -> List[float]:
     secs = float(info.get("seconds") or 30)
     end = info.get("done_at")
@@ -110,8 +125,12 @@ def review(video: Path, info: dict, title: str, api_key: str,
         content.append({"type": "text", "text": f"Frame {k}:"})
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                     "data": base64.b64encode(jpg).decode()}})
-    content.append({"type": "text", "text": _PROMPT.format(kind=KINDS.get(info.get("format"), KINDS["merge"]), title=title or "",
-                                                         names=" > ".join(names))})
+    prompt = _PROMPT.format(kind=KINDS.get(info.get("format"), KINDS["merge"]), title=title or "",
+                            names=" > ".join(names))
+    style = _style_note(pack)
+    if style:
+        prompt = prompt.replace("\n\nFrame 1 is", f"\n{style}\n\nFrame 1 is", 1)
+    content.append({"type": "text", "text": prompt})
     raw = ball_packs._claude_text(content, api_key, max_tokens=4000, log=log)
     return parse(raw)
 
