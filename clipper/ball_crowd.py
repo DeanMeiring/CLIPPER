@@ -296,7 +296,7 @@ def publish_text(recipe: dict) -> dict:
     real = [m["name"] for m in block["cast"] if not m.get("bot")]
     who = ("Everyone in this video commented on one of our videos" if len(real) == len(block["cast"])
            else "The named balls in this video commented on one of our videos")
-    desc = (f"{who}. Comment anything to get your name on a ball in a next fight 👇 "
+    desc = (f"{who}. Comment anything here on YouTube to get your name on a ball in a next fight 👇 "
             f"(just your name, no prizes). The winner keeps the crown until someone beats them.\n\n"
             f"Don't want to be in one? Comment \"remove me\".\n\n"
             f"#satisfying #bouncingball #battle #comments")
@@ -341,6 +341,52 @@ W, H = bd.W, bd.H
 CTA = "Comment to get in the next one"
 GOLD = (255, 205, 60)
 CARD_S = 4.0                      # how long the comment cards stay up
+# Dean (31 Oct): say it at the start too -- most viewers swipe before the
+# end button. A red banner for the first INVITE_S seconds, then it fades.
+INVITE = "Comment to be in the next fight"
+INVITE_S = 4.0
+# what the other videos' descriptions say (``invite``), so their viewers
+# know they can get in
+INVITE_LINE = ("💬 Want your name on a ball? Comment on any of our YouTube Shorts and you'll be in one of "
+               "the next comment fights.")
+_INVITE_IMG: dict = {}
+
+
+def invite(desc: str) -> str:
+    """The invite line in a description, before its hashtags."""
+    if INVITE_LINE in desc:
+        return desc
+    head, sep, tags = desc.rpartition("\n\n#")
+    if sep:
+        return f"{head}\n\n{INVITE_LINE}{sep}{tags}"
+    return f"{desc}\n\n{INVITE_LINE}" if desc else INVITE_LINE
+
+
+def _invite_img() -> Image.Image:
+    im = _INVITE_IMG.get("pill")
+    if im is None:
+        f = bd._font(34)
+        tw = int(ImageDraw.Draw(Image.new("RGBA", (1, 1))).textlength(INVITE, font=f))
+        w, h = tw + 46 + 56, 64
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle((2, 2, w - 3, h - 3), 30, fill=(230, 40, 64, 255), outline=(255, 255, 255, 255), width=4)
+        im.alpha_composite(bd._emoji("1f4ac", 40), (24, 12))
+        d.text((24 + 40 + 14, h / 2), INVITE, font=f, fill=(255, 255, 255, 255), anchor="lm")
+        im = _INVITE_IMG["pill"] = im
+    return im
+
+
+def _invite(im: Image.Image, t: float, y: int) -> None:
+    """The start banner, centred on y, while t < INVITE_S (+ a 0.4 s fade)."""
+    a = 1.0 if t < INVITE_S else max(0.0, 1.0 - (t - INVITE_S) / 0.4)
+    if a <= 0:
+        return
+    g = _invite_img()
+    if a < 1:
+        g = g.copy()
+        g.putalpha(g.getchannel("A").point(lambda v: int(v * a)))
+    im.alpha_composite(g, (int(W / 2 - g.width / 2), int(y - g.height / 2)))
 
 
 def _names(recipe: dict) -> None:
@@ -439,7 +485,8 @@ class CrowdRoyalePainter(bd.RoyalePainter):
         return g
 
     def ending(self, im, d, sim):
-        _ending(self, im, d, sim, bd.D_CY + 230, bd.D_CY + 330, 1760)
+        # the button above the bottom ~20% YouTube covers with the title and buttons
+        _ending(self, im, d, sim, bd.D_CY + 230, bd.D_CY + 330, bd.D_CY + 440)
 
     def frame(self, sim):
         im = super().frame(sim).convert("RGBA")
@@ -455,6 +502,7 @@ class CrowdRoyalePainter(bd.RoyalePainter):
             if recent:
                 d.text((W / 2, 1720), f"{recent[-1]} IS OUT", font=self.f_out, fill=(255, 255, 255, 255),
                        anchor="mm", stroke_width=7, stroke_fill=(200, 40, 60, 255))
+        _invite(im, sim.t, 128)
         return im.convert("RGB")
 
 
@@ -521,7 +569,8 @@ class CrowdDuelPainter(bd.DuelPainter):
                         c.putalpha(c.getchannel("A").point(lambda v: int(v * a)))
                     x = 30 if k == 0 else W - 30 - c.width
                     im.alpha_composite(c, (x, 440 + k * 18))
+        _invite(im, sim.t, 92)
         return im.convert("RGB")
 
     def ending(self, im, d, sim):
-        _ending(self, im, d, sim, self.end_y, self.end_y + 100, 1790)
+        _ending(self, im, d, sim, self.end_y, self.end_y + 100, self.end_y + 220)

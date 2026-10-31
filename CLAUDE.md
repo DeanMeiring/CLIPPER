@@ -1283,6 +1283,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   out (and "Let back in"), "Read the comments now"
   (`POST /api/balls/crowd/refresh`, `POST /api/balls/crowd/block`). The
   report names the commenters (`ball_learn._pictures`).
+  Same day, Dean asked that it says so on the video, not only at the end
+  (most viewers swipe first): a red "💬 Comment to be in the next fight"
+  banner for the first `INVITE_S` 4 s (`_invite`; royale over the "every
+  name here..." line, 1v1 at the very top), the end button moved up out
+  of the bottom ~20% Shorts covers with the title / buttons (royale D_CY+440,
+  1v1 end_y+220), the description says "here on YouTube" (Instagram gets
+  the same caption, and its comments aren't read), and every other video's
+  description gets `INVITE_LINE` before its hashtags when comment fights
+  are on (`ball_crowd.invite`, in `_balls_make`).
 - **Art looks (31 Oct):** Dean asked for new designs / 2D art on the 08:00
   videos, rotating, after research. Research: no study says one art style
   wins for ball videos (sources are mostly tool sellers); what holds is a
