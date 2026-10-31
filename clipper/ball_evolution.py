@@ -1555,6 +1555,9 @@ def publish_text(recipe: dict) -> dict:
 
 
 def _duel_text(recipe: dict) -> dict:
+    if recipe.get("format") == "duel" and recipe.get("league"):
+        from clipper import ball_league
+        return ball_league.publish_text(recipe)
     text = _duel_text_base(recipe)
     if recipe.get("arsenal") == 2:
         # the new weapons (ball_duel.WEAPONS2)
@@ -1663,6 +1666,9 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     if recipe.get("crowd") and getattr(sim, "winner", None):
         # who won the comment fight: they hold the crown in the next one (ball_crowd)
         info["crowd"] = dict(recipe["crowd"], winner=sim.winner["i"])
+    if recipe.get("league") and getattr(sim, "winner", None):
+        # the fight's result, for the next league fight's records (ball_league)
+        info["league"] = dict(recipe["league"], winner=sim.winner["name"], winner_hp=sim.winner["hp"])
     log(f"rendered {out_path}: {info}")
     return info
 

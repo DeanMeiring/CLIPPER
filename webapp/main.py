@@ -51,6 +51,7 @@ from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_learn
 from clipper import ball_crowd
+from clipper import ball_league
 from clipper import ball_duel
 from clipper import ball_packs
 from clipper import ball_review
@@ -6031,7 +6032,7 @@ def _balls_make(vid: str) -> None:
         try:
             at = datetime.datetime.strptime(opts["slot"], "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
             fmt = _balls_format_for(at, settings)
-            if not _balls_crowd_slot(at, settings):        # the comment fight's slot is always one
+            if not (_balls_crowd_slot(at, settings) or _balls_league_slot(at, settings)):   # those slots keep their kind
                 fmt = _balls_debut_kind(_balls.videos()) or fmt
         except ValueError:
             fmt = _balls_debut_kind(_balls.videos()) or fmt
@@ -6052,6 +6053,16 @@ def _balls_make(vid: str) -> None:
     elif looks and fmt in ball_learn.LOOKS:
         # the fights' look (colours / flags / 2 VS 2) by the learned mix too
         getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
+    league_pick = None
+    if fmt == "duel" and settings.get("league"):
+        # every 1v1 duel is a Ball League fight (ball_league): the colours, the
+        # champion against the next challenger, with their records
+        ball_duel.duel_recipe(recipe, force="colours")
+        league_pick = settings.get("league_next") or None
+        match = ball_league.next_match(_balls_league_history(video), recipe["seed"], league_pick)
+        ball_league.apply(recipe, match)
+        if match["tag"] != "YOUR PICK":
+            league_pick = None
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
@@ -6121,6 +6132,8 @@ def _balls_make(vid: str) -> None:
             v["title"] = v.get("title") or text["title"]
             v["description"] = v.get("description") if v.get("description") is not None else text["description"]
         _balls.update(vid, done)
+        if league_pick and _balls.settings().get("league_next") == league_pick:
+            _balls.save_settings({"league_next": ""})       # Dean's pick has had its fight
     except (KeyError, OSError, ValueError):
         pass                # deleted mid-way
     finally:
@@ -6394,7 +6407,7 @@ def _balls_crowd_load() -> dict:
 
 def _balls_when(v: dict) -> float:
     """When a video posts (or posted): its YouTube time, else its slot, else
-    when it was made -- the order the comment fights' crown passes in."""
+    when it was made -- the order the comment fights' crown and the league's story pass in."""
     yt = v.get("youtube") or {}
     if yt.get("publish_at_ts") or yt.get("uploaded_at"):
         return float(yt.get("publish_at_ts") or yt.get("uploaded_at"))
@@ -6511,13 +6524,45 @@ def _balls_crowd_slot(dt: datetime.datetime, s: dict) -> bool:
     return bool(s.get("crowd")) and t in _balls_slot_times(s) and dt.astimezone(_balls_tz()).strftime("%H:%M") == t
 
 
+def _balls_league_history(video: Optional[dict] = None) -> List[dict]:
+    """The league fights before this video (all of them without one), in
+    posting order: every made league video, minus ones removed from YouTube
+    and ones taken off the list before they posted."""
+    before = _balls_when(video) if video else float("inf")
+    out = []
+    for v in _balls.videos():
+        lg = (v.get("recipe") or {}).get("league")
+        yt = v.get("youtube") or {}
+        if (not lg or not lg.get("winner") or (video and v["id"] == video["id"]) or yt.get("removed")
+                or (v.get("hidden") and not yt.get("video_id"))):
+            continue
+        w = _balls_when(v)
+        if w < before:
+            out.append((w, lg))
+    return [lg for _, lg in sorted(out, key=lambda x: x[0])]
+
+
+def _balls_league_slot(dt: datetime.datetime, s: dict) -> bool:
+    """The slot whose video is always the day's league fight, when the
+    league is on and one is set (none by default since comment fights took
+    15:00)."""
+    t = s.get("league_slot") or ""
+    # the comment fight's slot is the comment fight's (Dean, 31 Oct: the
+    # afternoon video is just the comments one)
+    return (bool(s.get("league")) and t in _balls_slot_times(s)
+            and dt.astimezone(_balls_tz()).strftime("%H:%M") == t and not _balls_crowd_slot(dt, s))
+
+
 def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
     """The kind of video for the posting slot at dt: by the mix learned from
     the channel's numbers when learning is on, else BALLS_FORMAT_CYCLE. The
-    comment-fight slot is always a comment fight."""
+    comment-fight slot is always a comment fight; the league's slot (when
+    one is set) a league duel."""
     s = s or _balls.settings()
     if _balls_crowd_slot(dt, s):
         return "crowd"
+    if _balls_league_slot(dt, s):
+        return "duel"
     times = _balls_slot_times(s)
     learned = _balls_learned() if s.get("learn") else None
     if learned and learned.get("weights"):
@@ -6550,10 +6595,11 @@ def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, 
         day += datetime.timedelta(days=1)
     kind = None
     for x in slots + [local]:
-        # the comment fight's slot keeps its own kind; the draws around it
-        # go on as they would
-        if not (s and _balls_crowd_slot(x, s)):
-            kind = ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{at}", avoid=kind)
+        if s and _balls_crowd_slot(x, s):
+            continue        # the comment fight's slot keeps its own kind; the draws around it go on
+        # the league's slot is a duel, so the slot after it isn't one too
+        kind = "duel" if s and _balls_league_slot(x, s) else \
+            ball_learn.pick(learned["weights"], f"{_slot_key(x)}-{at}", avoid=kind)
     return kind or BALLS_FORMAT_CYCLE[0]
 
 
@@ -6696,6 +6742,7 @@ def balls_state() -> dict:
             "storage_mb": round(used / 1e6),
             "instagram": {"configured": instagram.is_configured(), **_instagram_stores["balls"].status()},
             "autopilot": autopilot, "learn": _balls_learn_view(s), "crowd": _balls_crowd_view(s),
+            "league": _balls_league_view(s),
             "options": {"themes": themes, "courses": ball_evolution.COURSES, "jars": ball_evolution.JARS,
                         "formats": [{"key": k, "label": BALLS_FORMAT_LABELS[k]} for k in BALLS_FORMAT_ROTATION]}}
 
@@ -7166,6 +7213,16 @@ def _balls_learn_due(s: dict) -> bool:
     return not learned or time.time() - (learned.get("at") or 0) > BALLS_LEARN_EVERY
 
 
+def _balls_league_view(s: dict) -> dict:
+    hist = _balls_league_history()
+    nxt = ball_league.next_match(hist, "preview", s.get("league_next") or None)
+    return {"on": bool(s.get("league")), "slot": s.get("league_slot") or "", "pick": s.get("league_next") or "",
+            "fights": len(hist), "table": ball_league.table(hist), "next": {"names": nxt["names"], "tag": nxt["tag"]},
+            "last": [{"no": f.get("no"), "names": f["names"], "winner": f["winner"], "tag": f.get("tag")}
+                     for f in hist[-5:]][::-1],
+            "colours": list(ball_league.BY_NAME)}
+
+
 def _balls_learn_view(s: dict) -> dict:
     learned = _balls_learned() or {}
     tab = learned.get("table") or {}
@@ -7505,6 +7562,9 @@ class BallsSettings(BaseModel):
     bed: Optional[str] = None
     learn: Optional[bool] = None
     crowd: Optional[bool] = None
+    league: Optional[bool] = None
+    league_slot: Optional[str] = None
+    league_next: Optional[str] = None
 
 
 @protected.put("/api/balls/settings")
@@ -7535,6 +7595,16 @@ def balls_settings(req: BallsSettings) -> dict:
         data["learn"] = bool(req.learn)
     if req.crowd is not None:
         data["crowd"] = bool(req.crowd)
+    if req.league is not None:
+        data["league"] = bool(req.league)
+    if req.league_slot is not None:
+        if req.league_slot and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", req.league_slot):
+            raise HTTPException(400, "Use a time like 15:00.")
+        data["league_slot"] = req.league_slot
+    if req.league_next is not None:
+        if req.league_next and req.league_next not in ball_league.BY_NAME:
+            raise HTTPException(400, "unknown colour")
+        data["league_next"] = req.league_next
     if req.ahead_days is not None:
         data["ahead_days"] = max(1, min(int(req.ahead_days), 3))
     out = _balls.save_settings(data)
@@ -12490,6 +12560,9 @@ __CSS__
   .cr-list .tx { color: var(--muted); font-size: 0.82rem; overflow-wrap: anywhere; }
   .cr-list button { padding: 4px 10px; font-size: 0.8rem; }
   .cr-champ { margin: 10px 0 4px; font-weight: 600; }
+  .lg-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  .lg-next { margin: 10px 0 4px; font-weight: 600; font-size: 0.95rem; }
+  .lg-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
   .ln .sub td:first-child { padding-left: 22px; color: var(--muted); }
   .ln .none td { color: var(--muted); }
   .pk { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
@@ -12619,6 +12692,17 @@ __NAV_LINKS__
   </div>
 
   <div class="section">
+    <h3>🏆 Ball League</h3>
+    <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a league fight</label>
+    <div class="hint">A running series of the colour duels: the champion against a challenger, both with their win-loss record on screen, and the winner holds the belt. A close loss gets a rematch, new colours step up, and the description asks viewers who should fight the champion next. When the 08:00 mix picks a 1v1 duel, it’s a league fight (15:00 is the comment fight).</div>
+    <div class="lg-next" id="lg-next"></div>
+    <div class="lg-row"><label for="lg-pick">Next challenger (from the comments):</label>
+      <select id="lg-pick"></select></div>
+    <div class="ln-wrap"><table class="ln" id="lg-table"></table></div>
+    <ul class="ln-notes" id="lg-last"></ul>
+  </div>
+
+  <div class="section">
     <h3>🎞 Your videos</h3>
     <div class="tabs" id="tabs"></div>
     <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
@@ -12699,6 +12783,7 @@ function render() {
   renderAutopilot();
   renderLearn();
   renderCrowd();
+  renderLeague();
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
   $('s-bed').value = st.bed || 'auto';
@@ -12824,6 +12909,42 @@ $('cr-now').onclick = async () => {
   catch (e) { alert(e.message); }
   b.disabled = false;
 };
+
+function renderLeague() {
+  const G = S.league;
+  if (!G) return;
+  $('lg-on').checked = G.on;
+  const dot = (name) => {
+    const r = G.table.find(x => x.name === name);
+    const d = el('span', 'lg-dot'); d.style.background = r ? r.col : '#888'; return d;
+  };
+  const nx = $('lg-next'); nx.innerHTML = '';
+  nx.append(`Next fight (#${G.fights + 1}, ${G.next.tag.toLowerCase()}): `, dot(G.next.names[0]), G.next.names[0], ' VS ', dot(G.next.names[1]), G.next.names[1]);
+  const sel = $('lg-pick'); sel.innerHTML = '';
+  sel.appendChild(new Option('Auto (rematch / new challenger)', ''));
+  for (const c of G.colours) sel.appendChild(new Option(c, c));
+  sel.value = G.pick || '';
+  const t = $('lg-table'); t.innerHTML = '';
+  const played = G.table.filter(r => r.w || r.l);
+  t.style.display = played.length ? '' : 'none';
+  if (played.length) {
+    const head = el('tr');
+    for (const h of ['Ball', 'Won', 'Lost']) head.appendChild(el('th', '', h));
+    t.appendChild(head);
+    for (const r of played) {
+      const row = el('tr'), td = el('td');
+      td.append(dot(r.name), (r.champ ? '👑 ' : '') + r.name + (r.streak >= 2 ? ` (${r.streak} in a row)` : ''));
+      row.appendChild(td);
+      row.appendChild(el('td', '', String(r.w)));
+      row.appendChild(el('td', '', String(r.l)));
+      t.appendChild(row);
+    }
+  }
+  const last = $('lg-last'); last.innerHTML = '';
+  for (const f of G.last) last.appendChild(el('li', '', `#${f.no}: ${f.names[0]} VS ${f.names[1]} — ${f.winner} won`));
+}
+$('lg-on').addEventListener('change', () => saveSettings({ league: $('lg-on').checked }));
+$('lg-pick').addEventListener('change', () => saveSettings({ league_next: $('lg-pick').value }));
 
 function renderLearn() {
   const L = S.learn;

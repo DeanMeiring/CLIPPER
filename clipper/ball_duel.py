@@ -1664,12 +1664,49 @@ class DuelPainter:
         d.ellipse((W / 2 - 52, cy - 52, W / 2 + 52, cy + 52), fill=(230, 40, 64, 255), outline=(255, 255, 255, 255),
                   width=6)
         d.text((W / 2, cy + 2), "VS", font=self.f_vs, fill=(255, 255, 255, 255), anchor="mm")
+        lg = self.recipe.get("league")
+        if lg:
+            self.league_hud(im, d, lg, top)
         hook = self.recipe.get("hook") or ""
         f = self.f_hook
         while d.textlength(hook, font=f) > W - 80 and f.size > 28:
             f = _font(f.size - 2, self.hand_font or "Inter-Black.ttf")
-        d.text((W / 2, 410 if not teams else 440), hook, font=f, fill=self.ink + (255,), anchor="mm",
+        d.text((W / 2, 450 if lg else 440 if teams else 410), hook, font=f, fill=self.ink + (255,), anchor="mm",
                stroke_width=4, stroke_fill=self.ink_stroke + (255,))
+
+    LEAGUE_TAG_COL = {"REMATCH": (230, 40, 64), "NEW CHALLENGER": (40, 150, 240), "TOP CONTENDER": (150, 80, 230),
+                      "YOUR PICK": (40, 170, 90)}
+
+    def league_hud(self, im, d, lg, top):
+        """Ball League (ball_league): each fighter's record under their bar,
+        a crown on the champion, the fight's tag + number in a pill."""
+        gold = (196, 132, 0) if self.arena == "notebook" else (255, 200, 50)     # paper: a darker gold
+        f = self.fonts.get("rec")
+        if f is None:
+            f = self.fonts["rec"] = _font(30 if not self.hand_font else 34, self.hand_font or "Inter-Black.ttf")
+        y = top + 120 + 34
+        for k in (0, 1):
+            w, l = lg["records"][k]
+            champ = k == 0 and lg.get("champ")
+            txt = (f"CHAMPION  {w}-{l}" if champ else f"{w}-{l}") if (w or l or champ) else "NEW"
+            col = gold if champ else self.ink
+            d.text((32 if k == 0 else W - 32, y), txt, font=f, fill=col + (255,), anchor="lm" if k == 0 else "rm",
+                   stroke_width=3, stroke_fill=self.ink_stroke + (255,))
+        if lg.get("champ"):
+            c = self.scaled.get("crown")
+            if c is None:
+                c = self.scaled["crown"] = _emoji("1f451", 70).rotate(18, resample=Image.BICUBIC, expand=True)
+            im.alpha_composite(c, (32 - 18, top - 46))
+        pill = f"{lg['tag']}  ·  FIGHT #{lg['no']}"
+        fp = self.fonts.get("pill")
+        if fp is None:
+            fp = self.fonts["pill"] = _font(32)
+        tw = d.textlength(pill, font=fp)
+        cy = 362
+        d.rounded_rectangle((W / 2 - tw / 2 - 26, cy - 28, W / 2 + tw / 2 + 26, cy + 28), 28,
+                            fill=self.LEAGUE_TAG_COL.get(lg["tag"], (230, 40, 64)) + (255,),
+                            outline=(255, 255, 255, 255), width=4)
+        d.text((W / 2, cy + 1), pill, font=fp, fill=(255, 255, 255, 255), anchor="mm")
 
     def portrait(self, im, d, b, x, y, size):
         ring = tuple(b.get("ring") or (255, 255, 255))
@@ -2012,6 +2049,22 @@ class DuelPainter:
                                  stroke_width=10, stroke_fill=_stroke(w["col"]) + (255,))
         txt = txt.resize((int(W * s), int(200 * s)), Image.LANCZOS)
         im.alpha_composite(txt, (int((W - txt.width) / 2), int(self.end_y - txt.height / 2)))
+        lg = self.recipe.get("league")
+        if lg and age >= 0.9:
+            # what the win means for the belt
+            if w["i"] == 1 and lg.get("champ"):
+                sub = "NEW CHAMPION!"
+            elif w["i"] == 0 and lg.get("champ"):
+                n = lg.get("streak", 0) + 1
+                sub = f"KEEPS THE BELT · {n} IN A ROW" if n >= 2 else "KEEPS THE BELT"
+            else:
+                sub = "TAKES THE BELT!"
+            fs = self.fonts.get("sub")
+            if fs is None:
+                fs = self.fonts["sub"] = _font(54)
+            a = int(255 * min(1.0, (age - 0.9) / 0.25))
+            d.text((W / 2, self.end_y + 120), sub, font=fs, fill=(255, 200, 50, a), anchor="mm",
+                   stroke_width=7, stroke_fill=(20, 16, 6, a))
 
     def watermark(self, d):
         mark = (self.recipe.get("watermark") or "").strip()

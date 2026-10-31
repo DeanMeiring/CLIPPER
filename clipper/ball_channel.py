@@ -38,6 +38,13 @@ DEFAULT_SETTINGS = {
     "crowd": True,
     "crowd_slot": "15:00",
     "crowd_blocked": [],
+    # Ball League (ball_league): every 1v1 duel is a league fight; a
+    # league_slot's video would always be one (none since 31 Oct: 15:00 is
+    # the comment fight's); league_next = Dean's pick of the next
+    # challenger (from the comments), used once
+    "league": True,
+    "league_slot": "",
+    "league_next": "",
 }
 
 
