@@ -6941,6 +6941,11 @@ def _balls_learn() -> dict:
         raise
     videos = _balls.videos()
     tab = ball_learn.table(videos, stats)
+    if not tab["videos"] and ((_balls_learned() or {}).get("table") or {}).get("videos"):
+        # an empty answer from YouTube must not wipe the learned mix (31 Oct:
+        # every kind went to an even 7%); the next try is in 3 hours
+        raise RuntimeError(f"YouTube sent no numbers for the posted videos ({len(stats)} rows); "
+                           "kept the last mix.")
     # only the kinds in the rotation: Dean took rays, break in, trail and
     # touch out on 25 Oct, and Claude brought them back on the first run
     rotation = list(dict.fromkeys(BALLS_FORMAT_CYCLE))
