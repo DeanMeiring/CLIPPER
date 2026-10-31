@@ -94,6 +94,15 @@ def _style_note(pack: dict) -> str:
     return ""
 
 
+# the art looks (ball_looks) on purpose: not a broken render
+_ART_NOTES = {
+    "pixel": "The whole video is drawn in a deliberate pixel-art (8-bit) look: blocky edges and few colours are on purpose.",
+    "arcade": "The whole video is drawn as a green retro arcade screen on purpose: green-only colours, glow and scanlines.",
+    "sticker": "The video uses a deliberate sticker-pop look: yellow striped background and thick black outlines.",
+    "notebook": "The video uses a deliberate notebook-doodle look: lined paper background and ink outlines.",
+}
+
+
 def frame_times(info: dict) -> List[float]:
     secs = float(info.get("seconds") or 30)
     end = info.get("done_at")
@@ -128,6 +137,9 @@ def review(video: Path, info: dict, title: str, api_key: str,
     prompt = _PROMPT.format(kind=KINDS.get(info.get("format"), KINDS["merge"]), title=title or "",
                             names=" > ".join(names))
     style = _style_note(pack)
+    art = _ART_NOTES.get(info.get("art") or "")
+    if art:
+        style = (style + " " + art).strip()
     if style:
         prompt = prompt.replace("\n\nFrame 1 is", f"\n{style}\n\nFrame 1 is", 1)
     content.append({"type": "text", "text": prompt})

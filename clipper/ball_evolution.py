@@ -1624,6 +1624,12 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     wav = out_path.with_suffix(".wav")
     sim_cls, painter_cls = _parts(recipe)
     sim, painter = sim_cls(recipe), painter_cls(recipe)
+    look = None
+    if recipe.get("art") and recipe["art"] != "neon":
+        # an art look over the finished frames (ball_looks); without "art"
+        # every frame is exactly what the painter drew
+        from clipper import ball_looks
+        look = ball_looks.Look(recipe["art"], (W, H), getattr(painter, "bg", None))
     proc = subprocess.Popen(
         [_ffmpeg(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "medium",
@@ -1634,7 +1640,10 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     try:
         while not sim.finished:
             sim.step()
-            proc.stdin.write(painter.frame(sim).tobytes())
+            im = painter.frame(sim)
+            if look:
+                im = look.apply(im)
+            proc.stdin.write(im.tobytes())
             frame += 1
             if progress and frame % 30 == 0:
                 progress(min(0.97, frame / total))

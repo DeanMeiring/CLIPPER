@@ -51,6 +51,7 @@ from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_learn
 from clipper import ball_crowd
+from clipper import ball_looks
 from clipper import ball_league
 from clipper import ball_duel
 from clipper import ball_packs
@@ -6063,6 +6064,14 @@ def _balls_make(vid: str) -> None:
         ball_league.apply(recipe, match)
         if match["tag"] != "YOUR PICK":
             league_pick = None
+    art = ball_looks.pick(recipe, _balls_last_art(vid), recipe["seed"])
+    if art:
+        # the art look (ball_looks), never the one the last video had; the
+        # paper / stripes looks swap the backdrop out and pixels turn a
+        # nebula into blobs, so those get the plain one
+        recipe["art"] = art
+        if art in ("sticker", "notebook", "pixel"):
+            recipe["backdrop"] = "black"
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
@@ -6324,7 +6333,16 @@ def _balls_view(v: dict) -> dict:
             c["chips"] += [x for x in (r.get("skin"), f"🎵 {r['song'].get('name') or 'song'}") if x]
         else:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
+    if r.get("art"):
+        c["chips"].append(f"🎨 {ball_looks.LABELS.get(r['art'], r['art'])}")
     return c
+
+
+def _balls_last_art(exclude: str) -> Optional[str]:
+    """The look of the most recently made video that had one."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("art")]
+    made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
+    return made[-1]["recipe"]["art"] if made else None
 
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
