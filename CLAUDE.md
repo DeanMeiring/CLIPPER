@@ -806,7 +806,9 @@ merge it yourself; merging stays Dean's call per the rule above.
   a new pack, then the theme's emoji; Dean's own uploaded packs are never
   swapped. At most 2 remakes, then it goes out with the note on its card
   (`video["review"]`, past no's in `reviews`). A failed check (no key, API
-  error) lets the video through.
+  error) lets the video through. Flag and logo packs add a note on what their
+  pictures look like (`ball_review._style_note`): on 31 Oct Claude called
+  Japan's countryball "a generic red smiley" and remade a good video.
 - **Pictures in every kind + starter packs (Oct 2026):** Dean found the
   emoji "too generic" and made 4 GIPHY packs; every kind now uses a picture
   pack. `be.recipe_chain` / `be.load_pack_images` / `be.apply_pack` (hook:
@@ -1099,6 +1101,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   table, share of the next videos). Store: `BASE_DIR/_balls/learn.json`.
   Dean was told it shifts the mix toward kinds that keep viewers, but
   can't promise a breakout: most Shorts sit at the 1-2k test audience.
+  31 Oct: a run at 05:07 UTC got no rows from YouTube (its endDate was
+  still tomorrow on Pacific time) and reset every kind to an even 7%.
+  `fetch_stats` now ends yesterday (UTC), and a run that matches 0
+  videos while the last one had some raises instead of saving (the mix
+  stays; it retries in 3 h).
 - **The daily report, for Claude Code (29 Oct):** Dean: "let it pull a
   report ... so that you can read it. Then you can edit it as you see
   fit." Each learning run also writes `BASE_DIR/_balls/report.json` and
