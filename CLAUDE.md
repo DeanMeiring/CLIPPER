@@ -1193,6 +1193,44 @@ merge it yourself; merging stays Dean's call per the rule above.
   turn back from a hole `F_DODGE` of the time. ~17 s, ~6 falls, `good_end`
   15-34 (1 seed in 3). Recipes without these fields simulate and draw
   exactly as before (hash + pixel checks on duels, tournaments, royales).
+- **Ball League (31 Oct):** Dean asked for live numbers + research + one
+  good idea to grow the channel (one video in a few takes off, the rest sit
+  at the 1-2k test audience). Numbers: the colour duels were the only
+  breakout (Purple VS Red 14.6k, 68% kept watching); colour tournament 136,
+  flag royale 877. Research (subagents; vidIQ ran out of credits, YouTube /
+  Social Blade blocked in the sandbox): growing ball-sim channels post daily
+  without gaps and own one promise; the biggest ball-fight channel
+  (Earclacks' Weapon Balls, ~209K) grew on a fixed cast with records and
+  leagues; YouTube pushes a Short past the test audience on "chose to
+  watch" (70-90% in the winners). So every colour 1v1 duel is now a league
+  fight (`clipper/ball_league.py`): the champion (left, 👑, "CHAMPION 5-1")
+  VS a challenger (record or "NEW"), a pill "REMATCH · FIGHT #7", league
+  hooks ("Can anyone stop X? 3 wins in a row"), and under "X WINS!" "NEW
+  CHAMPION!" / "KEEPS THE BELT · N IN A ROW". Title "<hook> ⚔️ Ball League
+  #N"; the description asks "Who should fight the champion next? Comment a
+  colour 👇". Nothing is stored apart from the videos: each league video's
+  recipe has `league` (no, names, records, tag, streak, champ, and after
+  render `winner` / `winner_hp` via `render`'s info), and the standings
+  before a fight are the league videos posted or slotted earlier
+  (`_balls_league_history`, `_balls_when`: YouTube time > slot > made),
+  minus ones removed from YouTube or hidden before posting. Matchmaking
+  (`next_match`): fight #1 is the Purple VS Red rematch; Dean's pick
+  (`settings["league_next"]`, used once, the page's "Next challenger"
+  menu) > a rematch after a close fight (winner on <= 2 hearts; never a
+  rematch of a rematch) > a colour that hasn't fought (seeded by the
+  fight number, so the page's "Next fight" matches) > the best record;
+  nobody from the last two fights, no two of a colour (Lime / Mint Green).
+  Roster: the 8 duel colours + Mint Green, Deep Maroon, Navy Blue, Choco
+  Brown, Shiny Gold (Coal Black, Snow White, Steel Grey left out: they
+  vanish on the dark arenas / the notebook's paper). `settings["league"]`
+  (default on; off = duels as before) and `league_slot` "15:00": that
+  slot is always the day's league fight (`_balls_league_slot`, before the
+  learned mix and BALLS_DEBUT; the learned chain treats it as a duel so
+  the next slot isn't one too). Flag and 2v2 duels only happen with the
+  league off. Page: "🏆 Ball League" (standings, next fight, last 5).
+  Duels without `league` draw byte for byte as before (checked).
+  Not built, told Dean: a first comment and playlists need a reconnect with
+  the `youtube.force-ssl` scope; pinning a comment has no API.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

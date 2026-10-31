@@ -33,6 +33,12 @@ DEFAULT_SETTINGS = {
     "auto_instagram": True,
     "ahead_days": 2,
     "learn": True,          # the autopilot's mix of kinds follows the channel's numbers (ball_learn)
+    # Ball League (ball_league): every 1v1 duel is a league fight, and the
+    # league_slot's video is always one; league_next = Dean's pick of the
+    # next challenger (from the comments), used once
+    "league": True,
+    "league_slot": "15:00",
+    "league_next": "",
 }
 
 
