@@ -313,7 +313,7 @@ def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] 
                .strftime("%Y-%m-%d %H:%M"), "age_h": round((now - posted) / 3600),
                "kind": kind_of(rec), "title": (v.get("title") or "")[:90], "hook": (rec.get("hook") or "")[:80],
                "pictures": _pictures(rec)[:60],
-               "sound": _sound(rec)[:60], "seconds": round(v.get("seconds") or 0, 1),
+               "sound": _sound(rec)[:60], "art": rec.get("art") or "", "seconds": round(v.get("seconds") or 0, 1),
                "views": round(views), "avg_pct": round(st.get("avg_pct", 0), 1),
                "likes": round(st.get("likes", 0)), "comments": round(st.get("comments", 0)),
                "shares": round(st.get("shares", 0))}

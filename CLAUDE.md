@@ -1283,6 +1283,32 @@ merge it yourself; merging stays Dean's call per the rule above.
   out (and "Let back in"), "Read the comments now"
   (`POST /api/balls/crowd/refresh`, `POST /api/balls/crowd/block`). The
   report names the commenters (`ball_learn._pictures`).
+- **Art looks (31 Oct):** Dean asked for new designs / 2D art on the 08:00
+  videos, rotating, after research. Research: no study says one art style
+  wins for ball videos (sources are mostly tool sellers); what holds is a
+  bold, high-contrast first frame and YouTube's July 2026 rule against
+  channels whose videos look like one template. A board of 8 mockups (neon,
+  notebook, chalk, pixel, paper cut-out, blueprint, sticker pop, arcade);
+  Dean said "do it" to the suggested set. `clipper/ball_looks.py`:
+  `ARTS` neon / pixel / sticker / notebook / arcade, `recipe["art"]`,
+  applied over each finished frame in `be.render` (`Look.apply`), so every
+  kind gets it without its painter changing; recipes without `art` (and
+  "neon") render exactly as before. pixel = 1/4 size, 5 levels per
+  channel, NEAREST back up; arcade = brightness to green phosphor + glow +
+  scanlines + vignette; sticker / notebook swap the painter's `bg` (the
+  backdrop it draws on) for yellow stripes / lined paper and outline
+  everything drawn on it (pixels > `FG_DIFF` 40 from `bg`, worked out at
+  half size; cv2 dilate) in thick black / thin ink. Turning white to ink
+  on the paper made white pictures black, so it's outlines only. Kinds:
+  `KINDS` (every non-fight kind but Evolve; fights keep their arenas, 15:00
+  is the comment fight); Hold the center skips sticker / notebook (its
+  black hole is the backdrop's black). `_balls_make` picks one
+  (`ball_looks.pick`: never the last made video's look,
+  `_balls_last_art`) and sets `backdrop` "black" for pixel / sticker /
+  notebook (a space nebula pixelates into blobs). ~40 ms a frame extra.
+  Claude's last look is told the look is on purpose (`ball_review._ART_NOTES`),
+  the report has an `art` field per video so the numbers can show which
+  look keeps viewers, and cards show "🎨 <look>".
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
