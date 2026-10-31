@@ -282,6 +282,10 @@ def _pictures(recipe: dict) -> str:
     or the emoji theme. (A fight's recipe still carries a theme it never
     shows.)"""
     players = recipe.get("players")
+    if recipe.get("format") == "crowd":          # commenters (ball_crowd)
+        cast = (recipe.get("crowd") or {}).get("cast") or []
+        real = [m["name"] for m in cast if not m.get("bot")]
+        return " VS ".join(real) if len(cast) <= 2 else f"{len(real)} commenters + {len(cast) - len(real)} bots"
     if recipe.get("format") in LOOKS or recipe.get("format") in ("race", "survivor"):
         if recipe.get("team_names"):
             return " VS ".join(recipe["team_names"])
