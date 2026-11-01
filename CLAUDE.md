@@ -1349,7 +1349,13 @@ merge it yourself; merging stays Dean's call per the rule above.
   Comment to join!") and the description says bots are holding the spots;
   a bot winner's line is "Comment to take its spot!". `ball_crowd.fetch`
   logs comment reads YouTube refused (403/404), so an access problem can't
-  hide as "0 comments". The same morning the 08:00 video was colour league
+  hide as "0 comments". It did right away: all 35 reads came back 403 --
+  the channel token's `youtube.readonly` doesn't cover commentThreads.list
+  (it wants `youtube.force-ssl`). So `fetch` reads with the public key
+  `YOUTUBE_API_KEY` (no account permission needed for public comments),
+  logs YouTube's reason per refused read ("403 commentsDisabled"...), and
+  a refresh where every read was refused shows an error on the page
+  instead of looking like "nobody commented". The same morning the 08:00 video was colour league
   fight #1 (Purple VS Red): the colour league (#142) is on for the duels
   the 08:00 mix draws; Dean can turn it off in the "🏆 Ball League" box.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on

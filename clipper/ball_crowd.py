@@ -98,20 +98,34 @@ def clean_name(name: str) -> str:
 
 # ---- comments ----------------------------------------------------------------
 
-def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=None,
-          log: Optional[Callable[[str], None]] = None) -> List[dict]:
-    """Top-level comments on these videos (newest 100 each)."""
+def fetch(token: Optional[str], video_ids: List[str], own_channel: Optional[str], http=None,
+          log: Optional[Callable[[str], None]] = None, api_key: Optional[str] = None,
+          stats: Optional[dict] = None) -> List[dict]:
+    """Top-level comments on these videos (newest 100 each).
+
+    With ``api_key`` (YOUTUBE_API_KEY) the public comments are read without
+    the channel's login: on 1 Nov every read with the channel's token came
+    back 403 -- its youtube.readonly scope doesn't cover commentThreads.list,
+    which wants youtube.force-ssl -- while a key reads public comments with
+    no account permission at all."""
     import requests
     http = http or requests
     out = []
     skipped = []
     for vid in video_ids:
-        r = http.get(API, headers={"Authorization": f"Bearer {token}"}, timeout=30,
-                     params={"part": "snippet", "videoId": vid, "maxResults": 100, "order": "time",
-                             "textFormat": "plainText"})
+        params = {"part": "snippet", "videoId": vid, "maxResults": 100, "order": "time", "textFormat": "plainText"}
+        if api_key:
+            r = http.get(API, params={**params, "key": api_key}, timeout=30)
+        else:
+            r = http.get(API, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=30)
         if r.status_code in (403, 404):
-            skipped.append(f"{vid}:{r.status_code}")
-            continue                # comments off, or the video is gone
+            reason = ""
+            try:
+                reason = ((r.json().get("error") or {}).get("errors") or [{}])[0].get("reason") or ""
+            except ValueError:
+                pass
+            skipped.append(f"{vid}:{r.status_code}{' ' + reason if reason else ''}")
+            continue                # comments off, the video is gone, or no access
         r.raise_for_status()
         for item in r.json().get("items") or []:
             sn = ((item.get("snippet") or {}).get("topLevelComment") or {}).get("snippet") or {}
@@ -121,6 +135,8 @@ def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=Non
             out.append({"id": item.get("id"), "video": vid, "channel": ch, "name": sn.get("authorDisplayName") or "",
                         "text": (sn.get("textOriginal") or sn.get("textDisplay") or "")[:500],
                         "at": sn.get("publishedAt") or ""})
+    if stats is not None:
+        stats.update(refused=len(skipped), first=skipped[:1])
     if log:
         log(f"[crowd] read {len(out)} comments on {len(video_ids)} videos"
             + (f" ({len(skipped)} refused: {', '.join(skipped[:5])})" if skipped else ""))
