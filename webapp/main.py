@@ -6043,18 +6043,6 @@ def _balls_make(vid: str) -> None:
         _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
                                               note="Reading the comments..."))
         crowd = _balls_crowd_cast(video)
-        if not any(not m.get("bot") for m in crowd["cast"]):
-            # nobody has commented yet: a "Bot 1 VS Bot 2" fight stars no one
-            # (1 Nov: the first comment fights were all bots), so this slot
-            # gets a normal video from the mix instead
-            crowd = None
-            at = None
-            try:
-                at = datetime.datetime.strptime(opts.get("slot") or "", "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
-            except ValueError:
-                pass
-            fmt = _balls_format_for(at, dict(settings, crowd=False)) if at else "duel"
-            print(f"[crowd] {vid}: no commenters yet, making a {fmt} video instead", flush=True)
     base = ball_crowd.base_format(crowd) if crowd else fmt
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), base)

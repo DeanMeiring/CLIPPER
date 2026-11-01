@@ -1318,16 +1318,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   Claude's last look is told the look is on purpose (`ball_review._ART_NOTES`),
   the report has an `art` field per video so the numbers can show which
   look keeps viewers, and cards show "🎨 <look>".
-- **No bot-only comment fights (1 Nov):** the first comment fights were
-  "Bot 1 VS Bot 2" (`[crowd] read 0 comments on 35 videos`: nobody had
-  commented yet). Now when a cast has no real person, `_balls_make` drops
-  the comment fight and makes the slot's kind from the mix instead
-  (`_balls_format_for` with `crowd` off), logging "[crowd] ... no
-  commenters yet". `ball_crowd.fetch` logs comment reads YouTube refused
-  (403/404), so an access problem can't hide as "0 comments". The same
-  morning the 08:00 video was league fight #1 (Purple VS Red): the league
-  (#142) is on for the duels the 08:00 mix draws; Dean can turn it off in
-  the "🏆 Ball League" box.
+- **Empty league (1 Nov):** the first comment fights were "Bot 1 VS Bot 2"
+  (`[crowd] read 0 comments on 35 videos`: nobody had commented yet). A
+  swap to a normal video was tried and dropped: Dean wants the 15:00 one
+  always a comment fight that says "comment to join the league". So the
+  comment fights are "the league" on screen: `INVITE` / `CTA` read
+  "Comment to join the league"; while bots hold spots the banner stays up
+  for the whole fight (`_invite(keep=...)`, `_has_bots`), not just 4 s; a
+  cast with no real person gets `EMPTY_HOOKS` ("The league is empty.
+  Comment to join!") and the description says bots are holding the spots;
+  a bot winner's line is "Comment to take its spot!". `ball_crowd.fetch`
+  logs comment reads YouTube refused (403/404), so an access problem can't
+  hide as "0 comments". The same morning the 08:00 video was colour league
+  fight #1 (Purple VS Red): the colour league (#142) is on for the duels
+  the 08:00 mix draws; Dean can turn it off in the "🏆 Ball League" box.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
