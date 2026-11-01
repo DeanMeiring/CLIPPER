@@ -6126,6 +6126,9 @@ def _balls_make(vid: str) -> None:
             return
         tmp.replace(out_dir / "video.mp4")
         text = ball_evolution.publish_text(info)
+        if fmt != "crowd" and settings.get("crowd"):
+            # every other video says you can get into a comment fight
+            text["description"] = ball_crowd.invite(text["description"])
         verdict = _balls_review(vid, info, text["title"]) if recipe.get("pack") or fmt == "merge" else None
         if vid in _balls_cancelled or not out_dir.is_dir():
             return

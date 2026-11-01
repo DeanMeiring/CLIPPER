@@ -57,6 +57,10 @@ BOT = "1f916"
 BOT_COL = (150, 156, 172)
 PALETTE = [c[2] for c in bd.COLOURS + bd.EXTRA_COLOURS if c[1] not in ("Black", "Grey")]
 
+# nobody has commented yet (Dean, 1 Nov: the 15:00 fight still goes out,
+# and says "comment to join the league")
+EMPTY_HOOKS = ["The league is empty. Comment to join!", "Bots hold every spot. Comment to join the league!",
+               "Your name could be on this ball. Comment to join!"]
 ROYALE_HOOKS = ["16 commenters. 1 ring. 1 winner.", "You commented. Now you fight.",
                 "Comments become fighters. Who wins?"]
 ROYALE_CHAMP_HOOKS = ["Can anyone take {c}'s crown?", "{c} defends the crown against 15 of you"]
@@ -100,11 +104,13 @@ def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=Non
     import requests
     http = http or requests
     out = []
+    skipped = []
     for vid in video_ids:
         r = http.get(API, headers={"Authorization": f"Bearer {token}"}, timeout=30,
                      params={"part": "snippet", "videoId": vid, "maxResults": 100, "order": "time",
                              "textFormat": "plainText"})
         if r.status_code in (403, 404):
+            skipped.append(f"{vid}:{r.status_code}")
             continue                # comments off, or the video is gone
         r.raise_for_status()
         for item in r.json().get("items") or []:
@@ -116,7 +122,8 @@ def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=Non
                         "text": (sn.get("textOriginal") or sn.get("textDisplay") or "")[:500],
                         "at": sn.get("publishedAt") or ""})
     if log:
-        log(f"[crowd] read {len(out)} comments on {len(video_ids)} videos")
+        log(f"[crowd] read {len(out)} comments on {len(video_ids)} videos"
+            + (f" ({len(skipped)} refused: {', '.join(skipped[:5])})" if skipped else ""))
     return out
 
 
@@ -272,7 +279,9 @@ def apply(recipe: dict, block: dict) -> dict:
     recipe.pop("look", None)
     recipe.pop("team_names", None)
     champ = members[0]["name"] if block.get("champ") is not None else None
-    if block["look"] == "royale":
+    if not any(not m.get("bot") for m in members):
+        hook = rng.choice(EMPTY_HOOKS)
+    elif block["look"] == "royale":
         # "16 commenters" / "15 of you" only when nobody is a bot
         bots = any(m.get("bot") for m in members)
         pool = (ROYALE_CHAMP_HOOKS[:1] if bots else ROYALE_CHAMP_HOOKS) if champ else \
@@ -294,9 +303,13 @@ def publish_text(recipe: dict) -> dict:
     royale = block["look"] == "royale"
     title = f"{recipe['hook']} {'💬' if royale else '⚔️'}"
     real = [m["name"] for m in block["cast"] if not m.get("bot")]
-    who = ("Everyone in this video commented on one of our videos" if len(real) == len(block["cast"])
-           else "The named balls in this video commented on one of our videos")
-    desc = (f"{who}. Comment anything to get your name on a ball in a next fight 👇 "
+    if not real:
+        who = "Nobody has joined the league yet, so bots are holding the spots"
+    elif len(real) == len(block["cast"]):
+        who = "Everyone in this video commented on one of our videos"
+    else:
+        who = "The named balls in this video commented on one of our videos; bots hold the open spots"
+    desc = (f"{who}. Comment anything here on YouTube to join the league: your name goes on a ball in a next fight 👇 "
             f"(just your name, no prizes). The winner keeps the crown until someone beats them.\n\n"
             f"Don't want to be in one? Comment \"remove me\".\n\n"
             f"#satisfying #bouncingball #battle #comments")
@@ -338,9 +351,60 @@ def good_end(recipe: dict) -> tuple:
 # ---- drawing -------------------------------------------------------------------------
 
 W, H = bd.W, bd.H
-CTA = "Comment to get in the next one"
+CTA = "Comment to join the league"
 GOLD = (255, 205, 60)
 CARD_S = 4.0                      # how long the comment cards stay up
+# Dean (31 Oct): say it at the start too -- most viewers swipe before the
+# end button. A red banner for the first INVITE_S seconds, then it fades.
+INVITE = "Comment to join the league"
+INVITE_S = 4.0
+# what the other videos' descriptions say (``invite``), so their viewers
+# know they can get in
+INVITE_LINE = ("💬 Want your name on a ball? Comment on any of our YouTube Shorts to join the league: "
+               "you'll be in one of the next fights.")
+_INVITE_IMG: dict = {}
+
+
+def invite(desc: str) -> str:
+    """The invite line in a description, before its hashtags."""
+    if INVITE_LINE in desc:
+        return desc
+    head, sep, tags = desc.rpartition("\n\n#")
+    if sep:
+        return f"{head}\n\n{INVITE_LINE}{sep}{tags}"
+    return f"{desc}\n\n{INVITE_LINE}" if desc else INVITE_LINE
+
+
+def _invite_img() -> Image.Image:
+    im = _INVITE_IMG.get("pill")
+    if im is None:
+        f = bd._font(34)
+        tw = int(ImageDraw.Draw(Image.new("RGBA", (1, 1))).textlength(INVITE, font=f))
+        w, h = tw + 46 + 56, 64
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle((2, 2, w - 3, h - 3), 30, fill=(230, 40, 64, 255), outline=(255, 255, 255, 255), width=4)
+        im.alpha_composite(bd._emoji("1f4ac", 40), (24, 12))
+        d.text((24 + 40 + 14, h / 2), INVITE, font=f, fill=(255, 255, 255, 255), anchor="lm")
+        im = _INVITE_IMG["pill"] = im
+    return im
+
+
+def _invite(im: Image.Image, t: float, y: int, keep: bool = False) -> None:
+    """The start banner, centred on y, while t < INVITE_S (+ a 0.4 s fade);
+    ``keep``: the whole fight (bots hold spots: there's room to join)."""
+    a = 1.0 if t < INVITE_S or keep else max(0.0, 1.0 - (t - INVITE_S) / 0.4)
+    if a <= 0:
+        return
+    g = _invite_img()
+    if a < 1:
+        g = g.copy()
+        g.putalpha(g.getchannel("A").point(lambda v: int(v * a)))
+    im.alpha_composite(g, (int(W / 2 - g.width / 2), int(y - g.height / 2)))
+
+
+def _has_bots(recipe: dict) -> bool:
+    return any(m.get("bot") for m in recipe["crowd"]["cast"])
 
 
 def _names(recipe: dict) -> None:
@@ -374,7 +438,9 @@ def _ending(painter, im, d, sim, y_win, y_sub, y_cta):
     if age > 0.8:
         crowd = painter.recipe["crowd"]
         champ = crowd.get("champ") is not None
-        sub = ("Keeps the crown. Defends it next fight." if champ and w["i"] == 0 else
+        bot = crowd["cast"][w["i"]].get("bot")
+        sub = ("Comment to take its spot!" if bot else
+               "Keeps the crown. Defends it next fight." if champ and w["i"] == 0 else
                "Takes the crown! Defends it next fight." if champ else "Wins the crown. Defends it next fight.")
         d.text((W / 2, y_sub), sub, font=painter.f_sub, fill=GOLD + (255,), anchor="mm", stroke_width=5,
                stroke_fill=(20, 16, 6, 255))
@@ -439,7 +505,8 @@ class CrowdRoyalePainter(bd.RoyalePainter):
         return g
 
     def ending(self, im, d, sim):
-        _ending(self, im, d, sim, bd.D_CY + 230, bd.D_CY + 330, 1760)
+        # the button above the bottom ~20% YouTube covers with the title and buttons
+        _ending(self, im, d, sim, bd.D_CY + 230, bd.D_CY + 330, bd.D_CY + 440)
 
     def frame(self, sim):
         im = super().frame(sim).convert("RGBA")
@@ -455,6 +522,7 @@ class CrowdRoyalePainter(bd.RoyalePainter):
             if recent:
                 d.text((W / 2, 1720), f"{recent[-1]} IS OUT", font=self.f_out, fill=(255, 255, 255, 255),
                        anchor="mm", stroke_width=7, stroke_fill=(200, 40, 60, 255))
+        _invite(im, sim.t, 128, keep=sim.winner is None and _has_bots(self.recipe))
         return im.convert("RGB")
 
 
@@ -521,7 +589,8 @@ class CrowdDuelPainter(bd.DuelPainter):
                         c.putalpha(c.getchannel("A").point(lambda v: int(v * a)))
                     x = 30 if k == 0 else W - 30 - c.width
                     im.alpha_composite(c, (x, 440 + k * 18))
+        _invite(im, sim.t, 92, keep=sim.winner is None and _has_bots(self.recipe))
         return im.convert("RGB")
 
     def ending(self, im, d, sim):
-        _ending(self, im, d, sim, self.end_y, self.end_y + 100, 1790)
+        _ending(self, im, d, sim, self.end_y, self.end_y + 100, self.end_y + 220)
