@@ -1795,7 +1795,8 @@ class DuelPainter:
             g = g.resize((int(g.width * s2), int(g.height * s2)), Image.LANCZOS)
             im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
         elif k == "hole":
-            grow = min(1.0, age / 0.3) * min(1.0, (m["life"] - age) / 0.3)
+            # max 0: drawn once more on the frame its life runs out (negative: PIL refused the ellipse)
+            grow = max(0.0, min(1.0, age / 0.3) * min(1.0, (m["life"] - age) / 0.3))
             r = sl(170) * grow
             d.ellipse((x - r, y - r, x + r, y + r), fill=(120, 60, 200, 60))
             for j in range(4):                         # rings pulled inward

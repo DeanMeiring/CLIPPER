@@ -730,7 +730,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   has come (up to 3 h late), so it costs one upload only when it posts and
   Remake can swap anything not yet posted. It relies on the Railway waker
   (`ball-autopilot-waker`, cron `5 6,7,8,13 * * *` UTC = 08:05, 09:05,
-  10:05, 15:05 SA): posts go out ~5 min after 08:00 / 15:00. Changing the
+  10:05, 15:05 SA; 18:05 added 1 Nov for call-outs): posts go out ~5 min after 08:00 / 15:00. Changing the
   slot times on the page needs that cron changed too. The manual
   "📅 Schedule" button still schedules ahead with `publishAt`.
 
@@ -1358,6 +1358,29 @@ merge it yourself; merging stays Dean's call per the rule above.
   instead of looking like "nobody commented". The same morning the 08:00 video was colour league
   fight #1 (Purple VS Red): the colour league (#142) is on for the duels
   the 08:00 mix draws; Dean can turn it off in the "🏆 Ball League" box.
+- **Call-outs (1 Nov):** after "me vs levi" appeared under a comment fight,
+  Dean asked: Claude reads the comments 5 h after the 15:00 fight (20:00
+  SA, `BALLS_CALLOUT_AFTER_H`); a "me vs X" there gets that 1v1 made and
+  posted right away; none -> nothing extra, 15:00 stays king of the hill.
+  `ball_crowd.moderate` returns `challenge` (the name as written or
+  "CHAMPION"; `challenge_in` regex without a key), kept on the person
+  (`p["challenge"]`) until fought, so a later "lol" doesn't wipe it.
+  `match_name` maps "levi" to "@Levi-k4z8j" (whole handle, handle minus its
+  random tail, first part, or a 4+ letter prefix; several: latest
+  commenter). `callouts` (oldest first; done = comment ids in made/planned
+  call-out videos, or the pair fought since) and `callout_cast` (champion on
+  the left when in it, then it's for the crown). App: `_balls_callout_due`
+  in the tick (20:00-22:00, once per evening via `crowd.json`
+  `callout_check`) -> `_balls_callout_check` (force-read, one video a night
+  with `options.callout` and slot "<day>T20:00", posted by the normal post
+  step). A call-out without the champion never moves the crown
+  (`_balls_crowd_champ` skips it); its ending says "Wins the call-out!".
+  Comment reads now include the replies YouTube sends with each thread (up
+  to 5), since call-outs are often replies. Setting `crowd_callouts`
+  (default on; page toggle + waiting list in "💬 Comment fights"). The
+  Railway waker now also runs at 18:05 UTC: cron `5 6,7,8,13,18 * * *`.
+  Fixed on the way: the duel's black-hole weapon crashed the render on the
+  frame its life ran out (negative radius); `grow` is clamped at 0.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

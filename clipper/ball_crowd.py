@@ -20,6 +20,14 @@ learned mix.
   comment fight; they defend the crown.
 * Each person always gets the same character (one of ``CHARACTERS``, the
   bundled Fluent 3D emoji) and colour, from their channel id.
+* Call-outs (1 Nov, Dean): a comment like "me vs levi" asks for a fight.
+  Claude spots them in ``moderate`` (``challenge``: the name as written, or
+  "CHAMPION"); ``callouts`` matches the name to someone who commented
+  (``match_name``) and ``callout_cast`` makes that 1v1. The app checks once
+  an evening, 5 hours after the 15:00 fight, and posts the call-out right
+  away; without one nothing extra posts and the next 15:00 fight is king of
+  the hill as before. The crown only changes hands in a call-out when the
+  champion is in it.
 
 YouTube's fake-engagement policy bans content whose only purpose is to reward
 comments; a full fight that stars its commenters isn't that (Marble Drop Daily
@@ -66,6 +74,9 @@ ROYALE_HOOKS = ["16 commenters. 1 ring. 1 winner.", "You commented. Now you figh
 ROYALE_CHAMP_HOOKS = ["Can anyone take {c}'s crown?", "{c} defends the crown against 15 of you"]
 DUEL_HOOKS = ["{a} VS {b}", "{a} VS {b}: who wins?"]
 DUEL_CHAMP_HOOKS = ["Champ {a} VS {b}", "{b} comes for {a}'s crown"]
+# call-outs: {a} asked for the fight, {b} is who they called out
+CALLOUT_HOOKS = ["{a} called out {b}", "{a} wanted {b}. Here it is", "You asked for it: {a} VS {b}"]
+CALLOUT_CHAMP_HOOKS = ["{a} called out the champ {b}", "{a} comes for {b}'s crown"]
 
 _BAD = re.compile(r"(fuck|shit|bitch|cunt|nigg|fag|retard|whore|slut|porn|sex|nazi|hitler|rape|kill ?yourself|kys|"
                   r"https?://|www\.|\.com\b|onlyfans|t\.me/|whatsapp|telegram)", re.I)
@@ -113,7 +124,7 @@ def fetch(token: Optional[str], video_ids: List[str], own_channel: Optional[str]
     out = []
     skipped = []
     for vid in video_ids:
-        params = {"part": "snippet", "videoId": vid, "maxResults": 100, "order": "time", "textFormat": "plainText"}
+        params = {"part": "snippet,replies", "videoId": vid, "maxResults": 100, "order": "time", "textFormat": "plainText"}
         if api_key:
             r = http.get(API, params={**params, "key": api_key}, timeout=30)
         else:
@@ -128,13 +139,18 @@ def fetch(token: Optional[str], video_ids: List[str], own_channel: Optional[str]
             continue                # comments off, the video is gone, or no access
         r.raise_for_status()
         for item in r.json().get("items") or []:
-            sn = ((item.get("snippet") or {}).get("topLevelComment") or {}).get("snippet") or {}
-            ch = (sn.get("authorChannelId") or {}).get("value")
-            if not ch or ch == own_channel:
-                continue
-            out.append({"id": item.get("id"), "video": vid, "channel": ch, "name": sn.get("authorDisplayName") or "",
-                        "text": (sn.get("textOriginal") or sn.get("textDisplay") or "")[:500],
-                        "at": sn.get("publishedAt") or ""})
+            top = (item.get("snippet") or {}).get("topLevelComment") or {}
+            # the replies YouTube sends along (up to 5 a thread): "me vs levi"
+            # is often written under Levi's own comment
+            for c in [top] + list((item.get("replies") or {}).get("comments") or []):
+                sn = c.get("snippet") or {}
+                ch = (sn.get("authorChannelId") or {}).get("value")
+                if not ch or ch == own_channel:
+                    continue
+                out.append({"id": c.get("id") or item.get("id"), "video": vid, "channel": ch,
+                            "name": sn.get("authorDisplayName") or "",
+                            "text": (sn.get("textOriginal") or sn.get("textDisplay") or "")[:500],
+                            "at": sn.get("publishedAt") or ""})
     if stats is not None:
         stats.update(refused=len(skipped), first=skipped[:1])
     if log:
@@ -173,20 +189,49 @@ you may shorten it), fun as trash talk or a cheer, or null. Null when the commen
 just an emoji, a question to the channel, a complaint, personal info, a link, insults \
 at a person or group, anything sexual, or anything you wouldn't show a 12-year-old.
 - "opt_out": true if they ask not to be in a video or to be removed.
+- "challenge": if they ask to fight one particular person ("me vs levi", "1v1 me @sam", \
+"put me against blueman", "levi vs me"), that person's name exactly as they wrote it \
+(without the @); "CHAMPION" if they want to fight the champion / the winner / the king; \
+else null. Null when they pair up two other people or just cheer for someone.
 
 {rows}
 
 Answer with JSON only: {{"people": [{{"id": <number>, "name_ok": true/false, "quote": "..." or null, \
-"opt_out": true/false}}]}}"""
+"opt_out": true/false, "challenge": "..." or null}}]}}"""
 
 
 _LINK = re.compile(r"(https?://|www\.|t\.me/|\b[\w-]+\.(com|net|org|io|ly|me|xyz|shop)\b)", re.I)
 
 
+_ME_VS = re.compile(r"(?:^|\b)(?:me|i)\s*(?:vs\.?|versus|v\.?|against)\s*@?([\w][\w.\-]{1,29})|"
+                    r"1\s*v\s*1\s+me\s+@?([\w][\w.\-]{1,29})|"
+                    r"@?([\w][\w.\-]{1,29})\s+(?:vs\.?|versus|v\.?)\s+me\b", re.I)
+_CHAMP_WORDS = {"champ", "champion", "the", "winner", "king", "you"}
+
+
+def challenge_in(text: str) -> Optional[str]:
+    """The word list's call-out spotting (no Claude key): "me vs levi" -> "levi"."""
+    m = _ME_VS.search(text or "")
+    if not m:
+        return None
+    name = next(g for g in m.groups() if g)
+    if name.lower() in ("me", "i"):
+        return None
+    return "CHAMPION" if name.lower() in _CHAMP_WORDS else name
+
+
 def _fallback(p: dict) -> dict:
     # a link in the comment reads as spam: that person stays out
     return {"name_ok": not _BAD.search(p["name"]) and not _LINK.search(p["text"]), "quote": None,
-            "opt_out": bool(_OPT_OUT.search(p["text"]))}
+            "opt_out": bool(_OPT_OUT.search(p["text"])), "challenge": challenge_in(p["text"])}
+
+
+def _set_challenge(p: dict, target) -> None:
+    """Keep a call-out on the person until it's fought: a later comment that
+    isn't one ("lol") doesn't wipe it."""
+    target = target.strip().lstrip("@").strip() if isinstance(target, str) else ""
+    if target and len(target) <= 40:
+        p["challenge"] = {"target": target, "comment": p.get("comment"), "at": p.get("last_at") or ""}
 
 
 def moderate(store: dict, api_key: Optional[str], claude_json=None,
@@ -213,7 +258,9 @@ def moderate(store: dict, api_key: Optional[str], claude_json=None,
             v = verdicts.get(i)
             fb = _fallback(p)
             if v is None:
+                ch = fb.pop("challenge")
                 p.update(fb)
+                _set_challenge(p, ch)
             else:
                 q = v.get("quote")
                 q = q.strip().strip('"').strip() if isinstance(q, str) else None
@@ -222,6 +269,7 @@ def moderate(store: dict, api_key: Optional[str], claude_json=None,
                 # the word list still has a say: either one saying no is a no
                 p.update(name_ok=bool(v.get("name_ok")) and fb["name_ok"], quote=q or None,
                          opt_out=bool(v.get("opt_out")) or fb["opt_out"])
+                _set_challenge(p, v.get("challenge"))
             p["checked"] = True
     return len(todo)
 
@@ -284,6 +332,80 @@ def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None) -> di
             "fresh": sum(1 for m in members if m["channel"] and m["channel"] in {p["channel"] for p in fresh})}
 
 
+# ---- call-outs ("me vs levi") -----------------------------------------------------
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def match_name(store: dict, target: str, blocked=(), exclude: Optional[str] = None) -> Optional[dict]:
+    """The person a call-out names. YouTube handles carry a random tail
+    ("@Levi-k4z8j"), and people write "levi": the whole handle, the handle
+    without its tail, the part before the first - / _ / . or the start of the
+    handle all count (3+ letters). Several match: the one who commented last."""
+    t = _norm(target)
+    if len(t) < 3:
+        return None
+    hits = []
+    for p in (store.get("people") or {}).values():
+        if p["channel"] == exclude or not _usable(p, blocked):
+            continue
+        raw = (p.get("name") or "").lstrip("@").lower().rstrip("…")
+        full = _norm(raw)
+        head = _norm(re.split(r"[-_.\s]", raw)[0])
+        notail = _norm(re.sub(r"-[a-z0-9]{3,6}$", "", raw))
+        if t in (full, head, notail):
+            hits.append((0, p))
+        elif full.startswith(t) and len(t) >= 4:
+            hits.append((1, p))
+    if not hits:
+        return None
+    best = min(h[0] for h in hits)
+    return max((p for k, p in hits if k == best), key=lambda p: p.get("last_at", ""))
+
+
+def callouts(store: dict, done: set, blocked=(), champ: Optional[dict] = None, fought: Optional[dict] = None) -> List[dict]:
+    """Call-outs still to be fought, oldest first: [{by, vs, comment, at}].
+    ``done``: comment ids already fought; ``fought``: frozenset of the two
+    channels -> when (ISO) they last had a call-out fight -- asking again for
+    a pair that already fought since doesn't count twice."""
+    out = []
+    people = store.get("people") or {}
+    for p in people.values():
+        c = p.get("challenge")
+        if not c or not _usable(p, blocked) or c.get("comment") in done:
+            continue
+        if c["target"] == "CHAMPION":
+            q = people.get((champ or {}).get("channel") or "")
+            q = q if q and q["channel"] != p["channel"] and _usable(q, blocked) else None
+        else:
+            q = match_name(store, c["target"], blocked, exclude=p["channel"])
+        if not q:
+            continue
+        last = (fought or {}).get(frozenset((p["channel"], q["channel"])))
+        if last and last >= (c.get("at") or ""):
+            continue
+        out.append({"by": p["channel"], "vs": q["channel"], "comment": c.get("comment"), "at": c.get("at") or ""})
+    return sorted(out, key=lambda c: c["at"])
+
+
+def callout_cast(store: dict, callout: dict, blocked=(), champ: Optional[dict] = None) -> Optional[dict]:
+    """The call-out's 1v1 (a ``cast`` block): the champion on the left when
+    they're in it (then it's for the crown), else the one who asked."""
+    people = store.get("people") or {}
+    by, vs = people.get(callout["by"]), people.get(callout["vs"])
+    if not (by and vs and _usable(by, blocked) and _usable(vs, blocked)):
+        return None
+    pair = [by, vs]
+    champ_ch = (champ or {}).get("channel")
+    if champ_ch == vs["channel"]:
+        pair = [vs, by]
+    members = [_member(p, True) for p in pair]
+    return {"look": "duel", "cast": members, "champ": 0 if champ_ch in (by["channel"], vs["channel"]) else None,
+            "fresh": 0, "callout": {"by": by["channel"], "vs": vs["channel"], "comment": callout.get("comment"),
+                                    "at": callout.get("at") or "", "by_i": pair.index(by)}}
+
+
 # ---- the recipe -------------------------------------------------------------------
 
 def apply(recipe: dict, block: dict) -> dict:
@@ -295,7 +417,12 @@ def apply(recipe: dict, block: dict) -> dict:
     recipe.pop("look", None)
     recipe.pop("team_names", None)
     champ = members[0]["name"] if block.get("champ") is not None else None
-    if not any(not m.get("bot") for m in members):
+    co = block.get("callout")
+    if co:
+        a, b = members[co["by_i"]]["name"], members[1 - co["by_i"]]["name"]
+        champ_called = block.get("champ") is not None and co["by_i"] == 1
+        hook = rng.choice(CALLOUT_CHAMP_HOOKS if champ_called else CALLOUT_HOOKS).format(a=a, b=b)
+    elif not any(not m.get("bot") for m in members):
         hook = rng.choice(EMPTY_HOOKS)
     elif block["look"] == "royale":
         # "16 commenters" / "15 of you" only when nobody is a bot
@@ -319,7 +446,12 @@ def publish_text(recipe: dict) -> dict:
     royale = block["look"] == "royale"
     title = f"{recipe['hook']} {'💬' if royale else '⚔️'}"
     real = [m["name"] for m in block["cast"] if not m.get("bot")]
-    if not real:
+    co = block.get("callout")
+    if co:
+        a, b = block["cast"][co["by_i"]]["name"], block["cast"][1 - co["by_i"]]["name"]
+        crown = " The champion is in it, so the crown is on the line." if block.get("champ") is not None else ""
+        who = f"{a} called out {b} in the comments, so here it is.{crown} Want a fight? Comment \"me vs\" and a name"
+    elif not real:
         who = "Nobody has joined the league yet, so bots are holding the spots"
     elif len(real) == len(block["cast"]):
         who = "Everyone in this video commented on one of our videos"
@@ -455,7 +587,9 @@ def _ending(painter, im, d, sim, y_win, y_sub, y_cta):
         crowd = painter.recipe["crowd"]
         champ = crowd.get("champ") is not None
         bot = crowd["cast"][w["i"]].get("bot")
+        callout = crowd.get("callout") and not champ
         sub = ("Comment to take its spot!" if bot else
+               "Wins the call-out!" if callout else
                "Keeps the crown. Defends it next fight." if champ and w["i"] == 0 else
                "Takes the crown! Defends it next fight." if champ else "Wins the crown. Defends it next fight.")
         d.text((W / 2, y_sub), sub, font=painter.f_sub, fill=GOLD + (255,), anchor="mm", stroke_width=5,

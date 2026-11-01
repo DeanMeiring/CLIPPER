@@ -6026,7 +6026,9 @@ def _balls_make(vid: str) -> None:
     opts = video.get("options") or {}
     settings = _balls.settings()
     fmt = opts.get("format") or _balls_next_format(settings)
-    if opts.get("auto") and opts.get("slot"):
+    if opts.get("callout"):
+        fmt = "crowd"           # a call-out ("me vs levi"): always that 1v1
+    elif opts.get("auto") and opts.get("slot"):
         # an autopilot video takes its slot's kind from the rotation as it is
         # *now*: a slot planned while Evolve was still in it (Dean dropped
         # Evolve on 11 Oct) must not come back as Evolve on a remake
@@ -6042,7 +6044,11 @@ def _balls_make(vid: str) -> None:
         # the commenters (ball_crowd): read the newest comments, then who's in
         _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
                                               note="Reading the comments..."))
-        crowd = _balls_crowd_cast(video)
+        crowd = _balls_callout_block(video) if opts.get("callout") else _balls_crowd_cast(video)
+        if crowd is None:
+            _balls.update(vid, lambda v: v.update(status="error", error="This call-out can't be made any more: "
+                                                  "one of the two left, asked to be removed or was taken out."))
+            return
     base = ball_crowd.base_format(crowd) if crowd else fmt
     recipe = ball_evolution.pick_recipe(secrets.randbelow(10 ** 6) + 1, _balls.history(),
                                         opts.get("theme"), opts.get("course"), opts.get("jar"), base)
@@ -6465,6 +6471,8 @@ def _balls_crowd_champ(video: Optional[dict] = None) -> Optional[dict]:
     champ = None
     for v in _balls_crowd_videos(video["id"] if video else None):
         c = v["recipe"]["crowd"]
+        if c.get("callout") and c.get("champ") is None:
+            continue        # a call-out between two others: the crown stays where it is
         if _balls_when(v) < before and isinstance(c.get("winner"), int) and c["winner"] < len(c["cast"]):
             champ = c["cast"][c["winner"]]
     return champ
@@ -6523,6 +6531,104 @@ def _balls_crowd_cast(video: dict) -> dict:
     return block
 
 
+# ---- call-outs (1 Nov, Dean): a comment like "me vs levi" gets that 1v1.
+# The app reads the comments BALLS_CALLOUT_AFTER_H after the comment fight
+# (20:00 SA), Claude spots the call-outs (ball_crowd.moderate), and if there
+# is one it's made and posted at once -- one an evening, the oldest first;
+# the rest wait for the next evenings. No call-out: nothing extra posts and
+# the next 15:00 fight is king of the hill as before. Needs the Railway
+# waker at 18:05 UTC (20:05 SA) too, or the sleeping app misses it.
+BALLS_CALLOUT_AFTER_H = 5
+BALLS_CALLOUT_WINDOW_H = 2          # still checked if the app wakes up to this late
+_balls_callout_state = {"running": False}
+
+
+def _balls_callout_time(day: datetime.date, s: dict) -> Optional[datetime.datetime]:
+    """When the evening's call-out check is (the comment fight's slot + 5 h)."""
+    t = s.get("crowd_slot") or ""
+    if not (s.get("crowd") and s.get("crowd_callouts", True) and t in _balls_slot_times(s)):
+        return None
+    hh, mm = (int(x) for x in t.split(":"))
+    return (datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=_balls_tz())
+            + datetime.timedelta(hours=BALLS_CALLOUT_AFTER_H))
+
+
+def _balls_callout_due(s: dict, now: datetime.datetime) -> Optional[datetime.datetime]:
+    for d in (0, -1):
+        at = _balls_callout_time(now.date() + datetime.timedelta(days=d), s)
+        if at and at <= now < at + datetime.timedelta(hours=BALLS_CALLOUT_WINDOW_H):
+            return at
+    return None
+
+
+def _balls_callouts_done() -> tuple:
+    """The call-out comments already fought (or planned), and when each pair
+    last had a call-out fight (ISO, like YouTube's comment times)."""
+    done, fought = set(), {}
+    for v in _balls_crowd_videos():
+        co = v["recipe"]["crowd"].get("callout")
+        if co:
+            done.add(co.get("comment"))
+            key = frozenset((co["by"], co["vs"]))
+            when = datetime.datetime.fromtimestamp(_balls_when(v), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            fought[key] = max(fought.get(key, ""), when)
+    for v in _balls.videos():          # planned, not made yet
+        co = (v.get("options") or {}).get("callout")
+        if co and v.get("status") != "error" and not v.get("hidden"):
+            done.add(co.get("comment"))
+    return done, fought
+
+
+def _balls_callouts_waiting(st: dict, s: dict, at: Optional[datetime.datetime] = None) -> List[dict]:
+    done, fought = _balls_callouts_done()
+    champ = _balls_crowd_champ({"id": "", "options": {"slot": _slot_key(at)}} if at else None)
+    return ball_crowd.callouts(st, done, set(s.get("crowd_blocked") or []), champ, fought)
+
+
+def _balls_callout_block(video: dict) -> Optional[dict]:
+    """The call-out's 1v1 (ball_crowd.callout_cast), with who holds the crown now."""
+    st = _balls_crowd_refresh()
+    s = _balls.settings()
+    block = ball_crowd.callout_cast(st, video["options"]["callout"], set(s.get("crowd_blocked") or []),
+                                    _balls_crowd_champ(video))
+    if block:
+        print(f"[crowd] {video['id']}: call-out {block['cast'][0]['name']} VS {block['cast'][1]['name']}"
+              f"{' (for the crown)' if block.get('champ') is not None else ''}", flush=True)
+    return block
+
+
+def _balls_callout_check(at: datetime.datetime) -> None:
+    """The evening read: a call-out -> its video, made now and posted as soon
+    as it's ready (its slot is this check's time)."""
+    key = _slot_key(at)
+    try:
+        st = _balls_crowd_refresh(force=True)
+        if st.get("error"):
+            print(f"[crowd] call-out check at {key} couldn't read the comments; trying again soon", flush=True)
+            return
+        s = _balls.settings()
+        made = None
+        todo = [] if key in _balls_taken_slots(_balls.videos()) else _balls_callouts_waiting(st, s, at)
+        if todo:
+            co = todo[0]
+            made = _balls.new_video({"format": "crowd", "slot": key, "auto": True, "callout": co})["id"]
+            people = st.get("people") or {}
+            print(f"[crowd] call-out at {key}: {people[co['by']]['name']} VS {people[co['vs']]['name']}"
+                  f" ({len(todo) - 1} more waiting)", flush=True)
+        else:
+            print(f"[crowd] no call-outs at {key}: the next comment fight is king of the hill", flush=True)
+        with _balls_crowd_lock:
+            st2 = _balls_crowd_load()
+            st2["callout_check"] = {"slot": key, "at": time.time(), "found": len(todo), "video": made}
+            _balls_write_json(_balls_crowd_file(), st2)
+        if made:
+            _balls_start_worker()
+    except Exception:
+        traceback.print_exc()
+    finally:
+        _balls_callout_state["running"] = False
+
+
 def _balls_crowd_view(s: dict) -> dict:
     st = _balls_crowd_load()
     blocked = set(s.get("crowd_blocked") or [])
@@ -6534,13 +6640,22 @@ def _balls_crowd_view(s: dict) -> dict:
         return {"name": p["name"], "channel": p["channel"], "char": ball_crowd.character_for(p["channel"]),
                 "quote": p.get("quote"), "text": (p.get("text") or "")[:120]}
     wait = ball_crowd.waiting(st, used, blocked)
+    pp = st.get("people") or {}
+    co_at = _balls_callout_time(datetime.date.today(), s)
     return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "fetched_at": st.get("fetched_at"),
             "error": st.get("error"), "last": st.get("last"), "running": _balls_crowd_state["running"],
             "people": len(people), "waiting": [row(p) for p in wait[:40]], "waiting_n": len(wait),
             "been_in": len(used), "champ": champ and {"name": champ["name"], "char": champ.get("char")},
             "left_out": [row(p) for p in people if p.get("checked") and (not p.get("name_ok") or p.get("opt_out"))][:20],
             "blocked": [row(p) for p in people if p["channel"] in blocked],
-            "claude": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "claude": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "callouts_on": bool(s.get("crowd_callouts", True)),
+            "callout_at": co_at.strftime("%H:%M") if co_at else None,
+            "callout_check": st.get("callout_check"),
+            "callouts": [{"by": (pp.get(c["by"]) or {}).get("name"), "vs": (pp.get(c["vs"]) or {}).get("name"),
+                          "by_char": ball_crowd.character_for(c["by"]), "vs_char": ball_crowd.character_for(c["vs"]),
+                          "text": ((pp.get(c["by"]) or {}).get("text") or "")[:120]}
+                         for c in _balls_callouts_waiting(st, s)][:10]}
 
 
 def _balls_crowd_slot(dt: datetime.datetime, s: dict) -> bool:
@@ -7349,6 +7464,13 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
             out["planned"] += 1
         if out["planned"]:
             _balls_start_worker()
+        # 1b. the evening call-out check (20:00 SA): "me vs levi" -> that 1v1, now
+        at = _balls_callout_due(s, now)
+        if at and not _balls_callout_state["running"] and \
+                (_balls_crowd_load().get("callout_check") or {}).get("slot") != _slot_key(at):
+            _balls_callout_state["running"] = True
+            threading.Thread(target=_balls_callout_check, args=(at,), daemon=True).start()
+            out["callout_check"] = _slot_key(at)
         # 2. post finished ones once their slot has come (public right away,
         # like Instagram). Dean (12 Oct): they used to go up ahead, scheduled
         # with publishAt, so every Remake or change spent another of the
@@ -7589,6 +7711,7 @@ class BallsSettings(BaseModel):
     bed: Optional[str] = None
     learn: Optional[bool] = None
     crowd: Optional[bool] = None
+    crowd_callouts: Optional[bool] = None
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
@@ -7622,6 +7745,8 @@ def balls_settings(req: BallsSettings) -> dict:
         data["learn"] = bool(req.learn)
     if req.crowd is not None:
         data["crowd"] = bool(req.crowd)
+    if req.crowd_callouts is not None:
+        data["crowd_callouts"] = bool(req.crowd_callouts)
     if req.league is not None:
         data["league"] = bool(req.league)
     if req.league_slot is not None:
@@ -12712,6 +12837,9 @@ __NAV_LINKS__
     <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own character. 3 or more new people: a 16-ball battle royale; fewer: a 1v1 with their comments as trash talk. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: the app reads the comments a few hours before 15:00, Claude checks every name and comment, and “remove me” takes someone out. You only need this box to take someone out by hand.</div>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
+    <label class="toggle"><input id="cr-co" type="checkbox"> ⚔️ Call-outs: a comment like “me vs levi” gets that 1v1 the same evening</label>
+    <div class="hint" id="cr-co-h"></div>
+    <ul class="cr-list" id="cr-co-list"></ul>
     <div class="hint" id="cr-wait-h"></div>
     <ul class="cr-list" id="cr-wait"></ul>
     <details id="cr-out-d" style="display:none"><summary id="cr-out-s"></summary><ul class="cr-list" id="cr-out"></ul></details>
@@ -12904,6 +13032,22 @@ function renderCrowd() {
     st.textContent = `Read ${sa(C.fetched_at * 1000, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ${C.people} ${C.people === 1 ? 'person has' : 'people have'} commented, ${C.been_in} ${C.been_in === 1 ? 'has' : 'have'} been in a fight` + (C.claude ? '.' : ' (no Claude key: names checked by a word list, no trash-talk lines).');
   } else st.style.display = 'none';
   $('cr-champ').textContent = C.champ ? `👑 Holding the crown: ${ch(C.champ.char)} ${C.champ.name}` : '👑 Nobody holds the crown yet.';
+  $('cr-co').checked = C.callouts_on;
+  const cc = C.callout_check;
+  const last = cc ? ` Last check ${sa(cc.at * 1000, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ` + (cc.video ? 'made a call-out fight.' : 'no call-outs, so nothing extra posted.') : '';
+  $('cr-co-h').textContent = !C.callouts_on ? 'Off: “me vs” comments are just comments.' :
+    (C.callout_at ? `Every day at ${C.callout_at} the app reads the comments again. A call-out there is made and posted right away (one an evening, oldest first); with none, nothing extra posts and the 15:00 fight stays king of the hill.` : 'Needs the comment fights on.') + last +
+    (C.callouts.length ? ` Waiting (${C.callouts.length}):` : '');
+  const cl = $('cr-co-list'); cl.innerHTML = '';
+  for (const c of C.callouts) {
+    const li = el('li');
+    li.appendChild(el('span', 'ch', ch(c.by_char) + ' ⚔️ ' + ch(c.vs_char)));
+    const who = el('div', 'who');
+    who.appendChild(el('div', 'nm', `${c.by} VS ${c.vs}`));
+    who.appendChild(el('div', 'tx', `“${c.text}”`));
+    li.appendChild(who);
+    cl.appendChild(li);
+  }
   $('cr-wait-h').textContent = C.waiting_n ? `Waiting for their first fight (${C.waiting_n}), oldest first:` : 'Nobody new is waiting: the next fight fills up with people who were in before, then bots.';
   const row = (p, label, blocked) => {
     const li = el('li');
@@ -12930,6 +13074,7 @@ function renderCrowd() {
   for (const p of out) ol.appendChild(p.by === 'you' ? row(p, 'Let back in', false) : (() => { const li = el('li'); li.appendChild(el('span', 'ch', ch(p.char))); const who = el('div', 'who'); who.appendChild(el('div', 'nm', p.name)); who.appendChild(el('div', 'tx', p.text || '')); li.appendChild(who); return li; })());
 }
 $('cr-on').addEventListener('change', () => saveSettings({ crowd: $('cr-on').checked }));
+$('cr-co').addEventListener('change', () => saveSettings({ crowd_callouts: $('cr-co').checked }));
 $('cr-now').onclick = async () => {
   const b = $('cr-now'); b.disabled = true;
   try { S = await api('/api/balls/crowd/refresh', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 4000); }
