@@ -1231,6 +1231,26 @@ merge it yourself; merging stays Dean's call per the rule above.
   Duels without `league` draw byte for byte as before (checked).
   Not built, told Dean: a first comment and playlists need a reconnect with
   the `youtube.force-ssl` scope; pinning a comment has no API.
+- **Brand league (1 Nov):** Dean saw "Royal Purple VS Cherry Red" again on
+  the 08:00 video and said nobody relates to colours, "even I don't watch
+  the video" -- use the brand icons. `clipper/ball_league.py` is now a
+  brand league: the cast is the bundled logo packs (`roster()` /
+  `BY_NAME`: 40 brands in `CATEGORIES` phones / cars / apps / gaming /
+  sports, Simple Icons, `CREDIT` line in the description). The category
+  rotates fight by fight (`next_cat`), each has its own champion and first
+  matchup (`FIRST`: Apple VS Samsung, BMW VS Audi, TikTok VS Instagram,
+  PlayStation VS Steam, Nike VS Adidas), then Dean's pick (used when its
+  category comes up) > rematch after a close fight > a brand that hasn't
+  fought > best record, all within the category. The ball is the brand's
+  badge (`disc`: the badge colour + the logo from the middle, which drops
+  the crown the packs' final picture wears; the crowned five are cut
+  tighter), drawn by `ball_duel._pic` for players whose 5th field is
+  "brand:<pack>/<file>" (full-size disc, no face); near-black badges
+  (Apple, Nike, TikTok...) get a light colour for their health bar and
+  name. Pill "PHONES · FIRST FIGHT", title "<hook> 📱", recipe `look`
+  "brands" (report: `duel:brands`), `league["cat"]`. The old colour-league
+  fights (no `cat`) are ignored, so brand fight #1 starts the count. Page:
+  "Make every 1v1 duel a brand fight", next fight shows the category.
 - **Comment fights (31 Oct):** Dean asked for numbers + research + one idea
   to grow the channel (one video in a few takes off). The colour duel was
   the only breakout (Purple VS Red 14.6k); a "Ball League" of colours was

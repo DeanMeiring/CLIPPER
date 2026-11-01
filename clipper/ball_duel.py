@@ -1399,12 +1399,19 @@ class DuelPainter:
             d.ellipse((c - R, c - R, c + R, c + R), outline=ring, width=rw)
         elif b.get("pic"):
             # a commenter's character (ball_crowd): the picture is the face
-            d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=ring, width=rw)
-            g = _emoji(b["pic"], int(1.62 * R))
-            if mood == "dead":
+            brand = b["pic"].startswith("brand:")      # a brand's badge (ball_league): the whole ball
+            if not brand:
+                d.ellipse((c - R, c - R, c + R, c + R), fill=col + (255,), outline=ring, width=rw)
+            g = _pic(b["pic"], int(2 * R if brand else 1.62 * R))
+            if mood == "dead" or (brand and flash):
+                a = g.getchannel("A")
                 g = ImageOps.grayscale(g.convert("RGB")).convert("RGBA")
-                g.putalpha(_emoji(b["pic"], int(1.62 * R)).getchannel("A"))
+                if flash:
+                    g = Image.new("RGBA", g.size, (255, 255, 255, 255))
+                g.putalpha(a)
             im.alpha_composite(g, (int(c - g.width / 2), int(c - g.height / 2)))
+            if brand:
+                d.ellipse((c - R, c - R, c + R, c + R), outline=ring, width=rw)
             out = im.resize((r * 2 + 8, r * 2 + 8), Image.LANCZOS)
             if len(self.cache) > 1500:
                 self.cache.clear()
@@ -1675,7 +1682,7 @@ class DuelPainter:
                stroke_width=4, stroke_fill=self.ink_stroke + (255,))
 
     LEAGUE_TAG_COL = {"REMATCH": (230, 40, 64), "NEW CHALLENGER": (40, 150, 240), "TOP CONTENDER": (150, 80, 230),
-                      "YOUR PICK": (40, 170, 90)}
+                      "YOUR PICK": (40, 170, 90), "FIRST FIGHT": (245, 130, 30)}
 
     def league_hud(self, im, d, lg, top):
         """Ball League (ball_league): each fighter's record under their bar,
@@ -1697,7 +1704,7 @@ class DuelPainter:
             if c is None:
                 c = self.scaled["crown"] = _emoji("1f451", 70).rotate(18, resample=Image.BICUBIC, expand=True)
             im.alpha_composite(c, (32 - 18, top - 46))
-        pill = f"{lg['tag']}  ·  FIGHT #{lg['no']}"
+        pill = (f"{lg['cat'].upper()}  ·  {lg['tag']}" if lg.get("cat") else f"{lg['tag']}  ·  FIGHT #{lg['no']}")
         fp = self.fonts.get("pill")
         if fp is None:
             fp = self.fonts["pill"] = _font(32)
@@ -1715,8 +1722,11 @@ class DuelPainter:
         else:
             d.ellipse((x, y, x + size, y + size), fill=b["col"] + (255,))
             if b.get("pic"):
-                g = _emoji(b["pic"], int(size * 0.8))
-                im.alpha_composite(g, (int(x + size * 0.1), int(y + size * 0.1)))
+                if b["pic"].startswith("brand:"):
+                    im.alpha_composite(_pic(b["pic"], int(size)), (int(x), int(y)))
+                else:
+                    g = _emoji(b["pic"], int(size * 0.8))
+                    im.alpha_composite(g, (int(x + size * 0.1), int(y + size * 0.1)))
         d.ellipse((x, y, x + size, y + size), outline=ring + (255,), width=5)
         if not b["alive"]:
             d.ellipse((x, y, x + size, y + size), fill=(10, 12, 26, 170))
@@ -2071,6 +2081,15 @@ class DuelPainter:
         if mark:
             d.text((W - 60 - d.textlength(mark, font=self.f_small), H - 70), mark, font=self.f_small,
                    fill=(255, 255, 255, 150))
+
+
+def _pic(code: str, size: int) -> Image.Image:
+    """A ball's picture: "brand:<pack>/<file>" is a brand's badge
+    (ball_league), anything else an emoji code (ball_crowd)."""
+    if code.startswith("brand:"):
+        from clipper import ball_league
+        return ball_league.disc(code[6:], size)
+    return _emoji(code, size)
 
 
 def _emoji(code: str, size: int) -> Image.Image:

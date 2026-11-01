@@ -7238,9 +7238,10 @@ def _balls_league_view(s: dict) -> dict:
     hist = _balls_league_history()
     nxt = ball_league.next_match(hist, "preview", s.get("league_next") or None)
     return {"on": bool(s.get("league")), "slot": s.get("league_slot") or "", "pick": s.get("league_next") or "",
-            "fights": len(hist), "table": ball_league.table(hist), "next": {"names": nxt["names"], "tag": nxt["tag"]},
+            "fights": nxt["no"] - 1, "table": ball_league.table(hist),
+            "next": {"names": nxt["names"], "tag": nxt["tag"], "cat": nxt.get("cat")},
             "last": [{"no": f.get("no"), "names": f["names"], "winner": f["winner"], "tag": f.get("tag")}
-                     for f in hist[-5:]][::-1],
+                     for f in [f for f in hist if f.get("cat")][-5:]][::-1],
             "colours": list(ball_league.BY_NAME)}
 
 
@@ -12714,8 +12715,8 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>🏆 Ball League</h3>
-    <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a league fight</label>
-    <div class="hint">A running series of the colour duels: the champion against a challenger, both with their win-loss record on screen, and the winner holds the belt. A close loss gets a rematch, new colours step up, and the description asks viewers who should fight the champion next. When the 08:00 mix picks a 1v1 duel, it’s a league fight (15:00 is the comment fight).</div>
+    <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a brand fight</label>
+    <div class="hint">The 1v1 duels are one running series of brand fights: Apple VS Samsung, BMW VS Audi, TikTok VS Instagram, PlayStation VS Steam, Nike VS Adidas, with the brands’ logos as the balls. The category changes every fight, each has its own champion, both records are on screen, a close loss gets a rematch and new brands step up. Pick a brand people ask for in the comments and it gets the next fight in its category.</div>
     <div class="lg-next" id="lg-next"></div>
     <div class="lg-row"><label for="lg-pick">Next challenger (from the comments):</label>
       <select id="lg-pick"></select></div>
@@ -12940,7 +12941,7 @@ function renderLeague() {
     const d = el('span', 'lg-dot'); d.style.background = r ? r.col : '#888'; return d;
   };
   const nx = $('lg-next'); nx.innerHTML = '';
-  nx.append(`Next fight (#${G.fights + 1}, ${G.next.tag.toLowerCase()}): `, dot(G.next.names[0]), G.next.names[0], ' VS ', dot(G.next.names[1]), G.next.names[1]);
+  nx.append(`Next fight (#${G.fights + 1}, ${G.next.cat ? G.next.cat + ', ' : ''}${G.next.tag.toLowerCase()}): `, dot(G.next.names[0]), G.next.names[0], ' VS ', dot(G.next.names[1]), G.next.names[1]);
   const sel = $('lg-pick'); sel.innerHTML = '';
   sel.appendChild(new Option('Auto (rematch / new challenger)', ''));
   for (const c of G.colours) sel.appendChild(new Option(c, c));
