@@ -6494,7 +6494,12 @@ def _balls_crowd_refresh(force: bool = False) -> dict:
                     if yt.get("video_id") and not yt.get("removed") and since <= ts <= time.time():
                         ids.append(yt["video_id"])
                 log = lambda m: print(m, flush=True)
-                comments = ball_crowd.fetch(token, ids, channel, log=log)
+                got: dict = {}
+                comments = ball_crowd.fetch(token, ids, channel, log=log,
+                                            api_key=os.environ.get("YOUTUBE_API_KEY"), stats=got)
+                if ids and got.get("refused") == len(ids):
+                    # every read refused: not "nobody commented" -- show it on the page
+                    raise RuntimeError(f"YouTube refused to share the comments ({(got.get('first') or [''])[0]})")
                 new = ball_crowd.update_people(st, comments)
                 checked = ball_crowd.moderate(st, os.environ.get("ANTHROPIC_API_KEY"), log=log)
                 st["error"] = None
