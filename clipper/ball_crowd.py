@@ -100,11 +100,13 @@ def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=Non
     import requests
     http = http or requests
     out = []
+    skipped = []
     for vid in video_ids:
         r = http.get(API, headers={"Authorization": f"Bearer {token}"}, timeout=30,
                      params={"part": "snippet", "videoId": vid, "maxResults": 100, "order": "time",
                              "textFormat": "plainText"})
         if r.status_code in (403, 404):
+            skipped.append(f"{vid}:{r.status_code}")
             continue                # comments off, or the video is gone
         r.raise_for_status()
         for item in r.json().get("items") or []:
@@ -116,7 +118,8 @@ def fetch(token: str, video_ids: List[str], own_channel: Optional[str], http=Non
                         "text": (sn.get("textOriginal") or sn.get("textDisplay") or "")[:500],
                         "at": sn.get("publishedAt") or ""})
     if log:
-        log(f"[crowd] read {len(out)} comments on {len(video_ids)} videos")
+        log(f"[crowd] read {len(out)} comments on {len(video_ids)} videos"
+            + (f" ({len(skipped)} refused: {', '.join(skipped[:5])})" if skipped else ""))
     return out
 
 
