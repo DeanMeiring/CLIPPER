@@ -38,6 +38,8 @@ DEFAULT_SETTINGS = {
     "crowd": True,
     "crowd_slot": "15:00",
     "crowd_blocked": [],
+    # call-outs ("me vs levi"): checked every evening 5 h after crowd_slot
+    "crowd_callouts": True,
     # Ball League (ball_league): every 1v1 duel is a league fight; a
     # league_slot's video would always be one (none since 31 Oct: 15:00 is
     # the comment fight's); league_next = Dean's pick of the next
