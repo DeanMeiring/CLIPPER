@@ -319,7 +319,8 @@ def _bot(k: int) -> dict:
     return {"name": f"Bot {k}", "channel": None, "char": BOT, "col": list(BOT_COL), "quote": None, "bot": True}
 
 
-def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None, royale: bool = True) -> dict:
+def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None, royale: bool = True,
+         royale_min: int = ROYALE_MIN) -> dict:
     """The next comment fight: {look, cast, champ (index or None), fresh}."""
     fresh = waiting(store, used, blocked)
     back = returning(store, used, blocked)
@@ -331,7 +332,7 @@ def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None, royal
     if champ:
         back = [p for p in back if p["channel"] != champ.get("channel")]
         fresh = [p for p in fresh if p["channel"] != champ.get("channel")]
-    look = "royale" if royale and len(fresh) >= ROYALE_MIN else "duel"
+    look = "royale" if royale and len(fresh) >= royale_min else "duel"
     n = ROYALE_N if look == "royale" else 2
     duel = look == "duel"
     members: List[dict] = []

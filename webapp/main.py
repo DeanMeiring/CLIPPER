@@ -6430,6 +6430,7 @@ BALLS_CROWD_AHEAD_H = 8
 # before its slot to 2 hours after it (the waker comes 5 minutes after each
 # slot) -- so the comments up to then, call-outs included, get in
 BALLS_CROWD_SOON_MIN = 25
+BALLS_ROYALE_MIN = 11              # new people waiting before a fight is a 16-ball royale ("more than 10")
 BALLS_CROWD_LATE_H = 2
 BALLS_CROWD_FRESH_S = 20 * 60          # comments read this recently aren't read again for a make
 _balls_crowd_lock = threading.Lock()
@@ -6538,8 +6539,10 @@ def _balls_crowd_refresh(force: bool = False) -> dict:
 def _balls_crowd_cast(video: dict) -> dict:
     """Who's in this comment fight: the oldest call-out ("me vs X") waiting
     first, else the champion against the next one (ball_crowd.cast; the
-    ones who asked for a fight first). A 16-ball royale only with
-    ``crowd_royale`` (Dean, 6 Nov: the fights are 1v1s)."""
+    ones who asked for a fight first). A 16-ball royale only when more than
+    10 new people are waiting (BALLS_ROYALE_MIN; Dean, 6 Nov: with 2-3 fights
+    a day the queue rarely gets that long, and the 1v1s keep viewers better);
+    ``crowd_royale`` off: never."""
     st = _balls_crowd_refresh()
     s = _balls.settings()
     blocked = set(s.get("crowd_blocked") or [])
@@ -6558,7 +6561,8 @@ def _balls_crowd_cast(video: dict) -> dict:
                 print(f"[crowd] {video['id']}: call-out {block['cast'][0]['name']} VS {block['cast'][1]['name']}",
                       flush=True)
                 return block
-    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), blocked, champ, royale=bool(s.get("crowd_royale")))
+    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), blocked, champ,
+                            royale=bool(s.get("crowd_royale", True)), royale_min=BALLS_ROYALE_MIN)
     print(f"[crowd] {video['id']}: {block['look']}, {block['fresh']} new, "
           f"{sum(1 for m in block['cast'] if not m.get('bot'))} people", flush=True)
     return block
@@ -6679,7 +6683,8 @@ def _balls_crowd_view(s: dict) -> dict:
     pp = st.get("people") or {}
     co_at = _balls_callout_time(datetime.date.today(), s)
     return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "times": _balls_crowd_times(s),
-            "royale": bool(s.get("crowd_royale")), "fetched_at": st.get("fetched_at"),
+            "royale": bool(s.get("crowd_royale", True)), "royale_min": BALLS_ROYALE_MIN,
+            "fetched_at": st.get("fetched_at"),
             "error": st.get("error"), "last": st.get("last"), "running": _balls_crowd_state["running"],
             "people": len(people), "waiting": [row(p) for p in wait[:40]], "waiting_n": len(wait),
             "been_in": len(used), "champ": champ and {"name": champ["name"], "char": champ.get("char")},
@@ -12934,8 +12939,8 @@ __NAV_LINKS__
       <div><label for="cr-t2">Afternoon</label><select id="cr-t2"></select></div>
       <div><label for="cr-t3">Evening</label><select id="cr-t3"></select></div>
     </div>
-    <label class="toggle"><input id="cr-roy" type="checkbox"> 👥 A 16-ball battle royale instead, when 3 or more new people are waiting</label>
-    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
+    <label class="toggle"><input id="cr-roy" type="checkbox"> 👥 A 16-ball battle royale instead, when more than 10 new people are waiting</label>
+    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1 (unless more than 10 new people are waiting: then one 16-ball royale clears the queue): a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
     <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
