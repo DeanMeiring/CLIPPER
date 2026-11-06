@@ -38,9 +38,10 @@ DEFAULT_SETTINGS = {
     "crowd": True,
     "crowd_slot": "15:00",
     # Dean (6 Nov): morning, afternoon and evening are all 1v1 comment fights
-    # (crowd_slots replaces crowd_slot); the 16-ball royale only when asked for
+    # (crowd_slots replaces crowd_slot); the 16-ball royale only when more than
+    # 10 new people are waiting (webapp BALLS_ROYALE_MIN)
     "crowd_slots": ["08:00", "15:00", "20:00"],
-    "crowd_royale": False,
+    "crowd_royale": True,
     "crowd_blocked": [],
     # call-outs ("me vs levi"): checked every evening 5 h after crowd_slot
     "crowd_callouts": True,
