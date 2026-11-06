@@ -1439,7 +1439,9 @@ merge it yourself; merging stays Dean's call per the rule above.
   first became a royale of 13 new commenters, who then counted as "been in
   a fight" and would have been skipped at 20:00. `_balls_crowd_videos` (used
   for who's been in, the crown, done call-outs) now only counts fights on
-  YouTube or with a posting slot.
+  YouTube or with a slot that can still post (`_balls_slot_live`: ahead,
+  or under 3 h late) -- that royale had a slot from days before, which
+  another video had posted in.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

@@ -6463,19 +6463,33 @@ def _balls_when(v: dict) -> float:
     return float(v.get("made_at") or v.get("created_at") or time.time())
 
 
+def _balls_slot_live(slot: Optional[str]) -> bool:
+    """A posting slot that can still post: ahead, or passed less than the
+    autopilot's 3 h late window ago. A video whose slot went by without it
+    (another video took the slot) never posts by itself."""
+    if not slot:
+        return False
+    try:
+        dt = datetime.datetime.strptime(slot, "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
+    except ValueError:
+        return False
+    return dt >= datetime.datetime.now(_balls_tz()) - datetime.timedelta(hours=3)
+
+
 def _balls_crowd_videos(exclude: Optional[str] = None) -> List[dict]:
     """Made comment-fight videos that count (not removed from YouTube, not
     taken off the list before they posted), oldest first. Only ones that
-    are on YouTube or have a posting time: a fight made by hand and never
-    posted (6 Nov: a Remake turned one into a royale of 13 new commenters)
-    mustn't hold people back from the fights that do post."""
+    are on YouTube or have a posting time that can still come: a fight made
+    by hand and never posted, or one whose slot went by without it (6 Nov: a
+    Remake turned one into a royale of 13 new commenters), mustn't hold
+    people back from the fights that do post."""
     out = []
     for v in _balls.videos():
         yt = v.get("youtube") or {}
         if (not (v.get("recipe") or {}).get("crowd") or v["id"] == exclude or yt.get("removed")
                 or (v.get("hidden") and not yt.get("video_id")) or v.get("status") == "error"):
             continue
-        if not yt.get("video_id") and not (v.get("options") or {}).get("slot"):
+        if not yt.get("video_id") and not _balls_slot_live((v.get("options") or {}).get("slot")):
             continue
         out.append(v)
     return sorted(out, key=_balls_when)
