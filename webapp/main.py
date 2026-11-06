@@ -6426,6 +6426,11 @@ def _balls_tz():
 # and kept in BASE_DIR/_balls/crowd.json. Who has been in a fight, and who
 # holds the crown, come from the videos' own recipes.
 BALLS_CROWD_AHEAD_H = 8
+# Dean (6 Nov): every comment fight is made just in time -- from 25 minutes
+# before its slot to 2 hours after it (the waker comes 5 minutes after each
+# slot) -- so the comments up to then, call-outs included, get in
+BALLS_CROWD_SOON_MIN = 25
+BALLS_CROWD_LATE_H = 2
 BALLS_CROWD_FRESH_S = 20 * 60          # comments read this recently aren't read again for a make
 _balls_crowd_lock = threading.Lock()
 _balls_crowd_state = {"running": False}
@@ -6531,11 +6536,29 @@ def _balls_crowd_refresh(force: bool = False) -> dict:
 
 
 def _balls_crowd_cast(video: dict) -> dict:
-    """Who's in this comment fight (ball_crowd.cast)."""
+    """Who's in this comment fight: the oldest call-out ("me vs X") waiting
+    first, else the champion against the next one (ball_crowd.cast; the
+    ones who asked for a fight first). A 16-ball royale only with
+    ``crowd_royale`` (Dean, 6 Nov: the fights are 1v1s)."""
     st = _balls_crowd_refresh()
     s = _balls.settings()
-    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), set(s.get("crowd_blocked") or []),
-                            _balls_crowd_champ(video))
+    blocked = set(s.get("crowd_blocked") or [])
+    champ = _balls_crowd_champ(video)
+    if s.get("crowd_callouts", True):
+        slot = (video.get("options") or {}).get("slot")
+        at = None
+        if slot:
+            try:
+                at = datetime.datetime.strptime(slot, "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
+            except ValueError:
+                at = None
+        for co in _balls_callouts_waiting(st, s, at)[:1]:
+            block = ball_crowd.callout_cast(st, co, blocked, champ)
+            if block:
+                print(f"[crowd] {video['id']}: call-out {block['cast'][0]['name']} VS {block['cast'][1]['name']}",
+                      flush=True)
+                return block
+    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), blocked, champ, royale=bool(s.get("crowd_royale")))
     print(f"[crowd] {video['id']}: {block['look']}, {block['fresh']} new, "
           f"{sum(1 for m in block['cast'] if not m.get('bot'))} people", flush=True)
     return block
@@ -6554,13 +6577,16 @@ _balls_callout_state = {"running": False}
 
 
 def _balls_callout_time(day: datetime.date, s: dict) -> Optional[datetime.datetime]:
-    """When the evening's call-out check is (the comment fight's slot + 5 h)."""
+    """When the evening's call-out check is (the comment fight's slot + 5 h).
+    None when that time is a comment fight of its own (since 6 Nov 20:00
+    is): every comment fight takes the oldest call-out first then."""
     t = s.get("crowd_slot") or ""
     if not (s.get("crowd") and s.get("crowd_callouts", True) and t in _balls_slot_times(s)):
         return None
     hh, mm = (int(x) for x in t.split(":"))
-    return (datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=_balls_tz())
-            + datetime.timedelta(hours=BALLS_CALLOUT_AFTER_H))
+    at = (datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=_balls_tz())
+          + datetime.timedelta(hours=BALLS_CALLOUT_AFTER_H))
+    return None if _balls_crowd_slot(at, s) else at
 
 
 def _balls_callout_due(s: dict, now: datetime.datetime) -> Optional[datetime.datetime]:
@@ -6652,7 +6678,8 @@ def _balls_crowd_view(s: dict) -> dict:
     wait = ball_crowd.waiting(st, used, blocked)
     pp = st.get("people") or {}
     co_at = _balls_callout_time(datetime.date.today(), s)
-    return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "fetched_at": st.get("fetched_at"),
+    return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "times": _balls_crowd_times(s),
+            "royale": bool(s.get("crowd_royale")), "fetched_at": st.get("fetched_at"),
             "error": st.get("error"), "last": st.get("last"), "running": _balls_crowd_state["running"],
             "people": len(people), "waiting": [row(p) for p in wait[:40]], "waiting_n": len(wait),
             "been_in": len(used), "champ": champ and {"name": champ["name"], "char": champ.get("char")},
@@ -6670,11 +6697,19 @@ def _balls_crowd_view(s: dict) -> dict:
                          for c in _balls_callouts_waiting(st, s)][:10]}
 
 
+def _balls_crowd_times(s: dict) -> List[str]:
+    """The comment fights' times (SA): ``crowd_slots`` (08:00, 15:00, 20:00
+    since 6 Nov), else the older single ``crowd_slot``."""
+    times = s.get("crowd_slots")
+    if times is None:
+        times = [s.get("crowd_slot") or ""]
+    return sorted({t for t in times if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t or "")})
+
+
 def _balls_crowd_slot(dt: datetime.datetime, s: dict) -> bool:
-    """The slot whose video is always the comment fight (ball_crowd; 15:00
-    SA by default), when comment fights are on."""
-    t = s.get("crowd_slot") or ""
-    return bool(s.get("crowd")) and t in _balls_slot_times(s) and dt.astimezone(_balls_tz()).strftime("%H:%M") == t
+    """A slot whose video is always a comment fight (ball_crowd), when
+    comment fights are on."""
+    return bool(s.get("crowd")) and dt.astimezone(_balls_tz()).strftime("%H:%M") in _balls_crowd_times(s)
 
 
 def _balls_league_history(video: Optional[dict] = None) -> List[dict]:
@@ -6776,6 +6811,8 @@ def _balls_next_format(s: Optional[dict] = None) -> str:
 
 def _balls_slot_times(s: dict) -> List[str]:
     times = [t for t in (s.get("slots") or []) if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t or "")]
+    if s.get("crowd") and s.get("crowd_slots") is not None:
+        times += _balls_crowd_times(s)      # the comment fights' times are posting times too
     return sorted(set(times)) or [s.get("post_time") or "17:00"]
 
 
@@ -6806,7 +6843,10 @@ def _balls_taken_slots(videos: List[dict]) -> set:
         if ts and not v["youtube"].get("removed"):
             out.add(_slot_key(datetime.datetime.fromtimestamp(ts, _balls_tz())))
         slot = (v.get("options") or {}).get("slot")
-        if slot and v.get("status") != "error" and not v.get("youtube"):
+        # a video posted at once keeps its slot too (its upload time is a few
+        # minutes after it), or the just-in-time comment fights would make a
+        # second one for it; one removed from YouTube gives its slot back
+        if slot and v.get("status") != "error" and not (v.get("youtube") or {}).get("removed"):
             out.add(slot)
     return out
 
@@ -7479,12 +7519,28 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         for dt in _balls_slots_ahead(s, max(1, min(int(s.get("ahead_days") or 2), 3)), now):
             if dt < now + datetime.timedelta(minutes=20) or _slot_key(dt) in taken or making >= BALLS_MAX_QUEUE:
                 continue
-            if _balls_crowd_slot(dt, s) and dt > now + datetime.timedelta(hours=BALLS_CROWD_AHEAD_H):
-                continue        # the comment fight is made late, so the newest comments get in
+            if _balls_crowd_slot(dt, s):
+                continue        # comment fights are made just in time (below)
             _balls.new_video({"format": _balls_format_for(dt, s), "slot": _slot_key(dt), "auto": True})
             taken.add(_slot_key(dt))
             making += 1
             out["planned"] += 1
+        # 1a. the comment fights, just in time: from BALLS_CROWD_SOON_MIN before
+        # their slot to BALLS_CROWD_LATE_H after it (made and posted right away),
+        # so every comment up to then gets in
+        for day in (now.date() - datetime.timedelta(days=1), now.date()):
+            for t in (_balls_crowd_times(s) if s.get("crowd") else []):
+                hh, mm = (int(x) for x in t.split(":"))
+                dt = datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=tz)
+                if not (now - datetime.timedelta(hours=BALLS_CROWD_LATE_H) <= dt
+                        <= now + datetime.timedelta(minutes=BALLS_CROWD_SOON_MIN)):
+                    continue
+                if _slot_key(dt) in taken or making >= BALLS_MAX_QUEUE:
+                    continue
+                _balls.new_video({"format": "crowd", "slot": _slot_key(dt), "auto": True})
+                taken.add(_slot_key(dt))
+                making += 1
+                out["planned"] += 1
         if out["planned"]:
             _balls_start_worker()
         # 1b. the evening call-out check (20:00 SA): "me vs levi" -> that 1v1, now
@@ -7736,6 +7792,8 @@ class BallsSettings(BaseModel):
     crowd: Optional[bool] = None
     crowd_callouts: Optional[bool] = None
     crowd_anime: Optional[bool] = None
+    crowd_slots: Optional[List[str]] = None
+    crowd_royale: Optional[bool] = None
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
@@ -7773,6 +7831,13 @@ def balls_settings(req: BallsSettings) -> dict:
         data["crowd_callouts"] = bool(req.crowd_callouts)
     if req.crowd_anime is not None:
         data["crowd_anime"] = bool(req.crowd_anime)
+    if req.crowd_slots is not None:
+        times = [t for t in req.crowd_slots if t]
+        if len(times) > 4 or not all(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t) for t in times):
+            raise HTTPException(400, "Use up to 4 times like 08:00.")
+        data["crowd_slots"] = sorted(set(times))
+    if req.crowd_royale is not None:
+        data["crowd_royale"] = bool(req.crowd_royale)
     if req.league is not None:
         data["league"] = bool(req.league)
     if req.league_slot is not None:
@@ -12689,6 +12754,9 @@ BALLS_HTML = """<!doctype html>
 <title>clipper — Ball Evolution</title>
 <style>
 __CSS__
+  .row3 { display: flex; gap: 10px; margin: 8px 0; }
+  .row3 > div { flex: 1; min-width: 0; }
+  .row3 select { width: 100%; }
   .row2 { display: flex; gap: 10px; flex-wrap: wrap; }
   .row2 > div { flex: 1 1 150px; }
   .days { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 8px; margin-top: 8px; }
@@ -12860,12 +12928,18 @@ __NAV_LINKS__
 
   <div class="section">
     <h3>💬 Comment fights</h3>
-    <label class="toggle"><input id="cr-on" type="checkbox"> Make the 15:00 video a comment fight every day</label>
-    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own character. 3 or more new people: a 16-ball battle royale; fewer: a 1v1 with their comments as trash talk. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: the app reads the comments a few hours before 15:00, Claude checks every name and comment, and “remove me” takes someone out. You only need this box to take someone out by hand.</div>
+    <label class="toggle"><input id="cr-on" type="checkbox"> Post 1v1 comment fights every day at these times</label>
+    <div class="row3">
+      <div><label for="cr-t1">Morning</label><select id="cr-t1"></select></div>
+      <div><label for="cr-t2">Afternoon</label><select id="cr-t2"></select></div>
+      <div><label for="cr-t3">Evening</label><select id="cr-t3"></select></div>
+    </div>
+    <label class="toggle"><input id="cr-roy" type="checkbox"> 👥 A 16-ball battle royale instead, when 3 or more new people are waiting</label>
+    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
     <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
-    <label class="toggle"><input id="cr-co" type="checkbox"> ⚔️ Call-outs: a comment like “me vs levi” gets that 1v1 the same evening</label>
+    <label class="toggle"><input id="cr-co" type="checkbox"> ⚔️ Call-outs: a comment like “me vs levi” gets that 1v1 in the next fight</label>
     <div class="hint" id="cr-co-h"></div>
     <ul class="cr-list" id="cr-co-list"></ul>
     <div class="hint" id="cr-wait-h"></div>
@@ -13050,6 +13124,20 @@ function renderCrowd() {
   const C = S.crowd;
   if (!C) return;
   $('cr-on').checked = C.on;
+  $('cr-roy').checked = C.royale;
+  ['cr-t1', 'cr-t2', 'cr-t3'].forEach((id, i) => {
+    const sel = $(id), want = (C.times || [])[i] || '';
+    if (!sel.options.length || ![...sel.options].some(o => o.value === want)) {
+      sel.innerHTML = '';
+      sel.appendChild(new Option('— none —', ''));
+      for (let m = 0; m < 24 * 60; m += 30) {
+        const t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+        sel.appendChild(new Option(t, t));
+      }
+      if (want && ![...sel.options].some(o => o.value === want)) sel.appendChild(new Option(want, want));
+    }
+    if (document.activeElement !== sel) sel.value = want;
+  });
   const ch = (code) => String.fromCodePoint(parseInt(code, 16));
   const pic = (char, channel) => {
     if (!C.anime || !channel) return el('span', 'ch', ch(char));
@@ -13069,7 +13157,7 @@ function renderCrowd() {
   const cc = C.callout_check;
   const last = cc ? ` Last check ${sa(cc.at * 1000, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ` + (cc.video ? 'made a call-out fight.' : 'no call-outs, so nothing extra posted.') : '';
   $('cr-co-h').textContent = !C.callouts_on ? 'Off: “me vs” comments are just comments.' :
-    (C.callout_at ? `Every day at ${C.callout_at} the app reads the comments again. A call-out there is made and posted right away (one an evening, oldest first); with none, nothing extra posts and the 15:00 fight stays king of the hill.` : 'Needs the comment fights on.') + last +
+    (C.callout_at ? `Every day at ${C.callout_at} the app reads the comments again. A call-out there is made and posted right away (one an evening, oldest first); with none, nothing extra posts and the 15:00 fight stays king of the hill.` : C.on ? 'Every comment fight takes the oldest call-out first; with none waiting, the champion defends the crown.' : 'Needs the comment fights on.') + (C.callout_at ? last : '') +
     (C.callouts.length ? ` Waiting (${C.callouts.length}):` : '');
   const cl = $('cr-co-list'); cl.innerHTML = '';
   for (const c of C.callouts) {
@@ -13107,6 +13195,9 @@ function renderCrowd() {
   for (const p of out) ol.appendChild(p.by === 'you' ? row(p, 'Let back in', false) : (() => { const li = el('li'); li.appendChild(el('span', 'ch', ch(p.char))); const who = el('div', 'who'); who.appendChild(el('div', 'nm', p.name)); who.appendChild(el('div', 'tx', p.text || '')); li.appendChild(who); return li; })());
 }
 $('cr-on').addEventListener('change', () => saveSettings({ crowd: $('cr-on').checked }));
+$('cr-roy').addEventListener('change', () => saveSettings({ crowd_royale: $('cr-roy').checked }));
+for (const id of ['cr-t1', 'cr-t2', 'cr-t3'])
+  $(id).addEventListener('change', () => saveSettings({ crowd_slots: ['cr-t1', 'cr-t2', 'cr-t3'].map(x => $(x).value).filter(Boolean) }));
 $('cr-co').addEventListener('change', () => saveSettings({ crowd_callouts: $('cr-co').checked }));
 $('cr-an').addEventListener('change', () => saveSettings({ crowd_anime: $('cr-an').checked }));
 $('cr-now').onclick = async () => {

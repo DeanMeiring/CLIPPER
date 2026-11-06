@@ -2,9 +2,9 @@
 
 Dean wanted something viewers relate to, not "Royal Purple VS Cherry Red":
 the people who comment on the channel's videos get into a next video as a
-ball with their own name and a character picture. Every day's 15:00 video is
-one (the autopilot's ``crowd_slot``); the 08:00 one keeps following the
-learned mix.
+ball with their own name and a character picture. Since 6 Nov the 08:00,
+15:00 and 20:00 videos are all 1v1 comment fights (the autopilot's
+``crowd_slots``); people who asked for a fight (``wants``) go first.
 
 * Comments: the channel's own videos from the last ``LOOKBACK_DAYS`` are read
   with YouTube's commentThreads.list (the app's ``youtube.readonly`` scope, 1
@@ -189,6 +189,8 @@ you may shorten it), fun as trash talk or a cheer, or null. Null when the commen
 just an emoji, a question to the channel, a complaint, personal info, a link, insults \
 at a person or group, anything sexual, or anything you wouldn't show a 12-year-old.
 - "opt_out": true if they ask not to be in a video or to be removed.
+- "wants_fight": true if they ask to be in a fight ("put me in", "1v1 me", "I want to fight", \
+"add me", "me next", "fight me", or a "me vs" call-out), else false.
 - "challenge": if they ask to fight one particular person ("me vs levi", "1v1 me @sam", \
 "put me against blueman", "levi vs me"), that person's name exactly as they wrote it \
 (without the @); "CHAMPION" if they want to fight the champion / the winner / the king; \
@@ -197,7 +199,7 @@ else null. Null when they pair up two other people or just cheer for someone.
 {rows}
 
 Answer with JSON only: {{"people": [{{"id": <number>, "name_ok": true/false, "quote": "..." or null, \
-"opt_out": true/false, "challenge": "..." or null}}]}}"""
+"opt_out": true/false, "wants_fight": true/false, "challenge": "..." or null}}]}}"""
 
 
 _LINK = re.compile(r"(https?://|www\.|t\.me/|\b[\w-]+\.(com|net|org|io|ly|me|xyz|shop)\b)", re.I)
@@ -207,6 +209,9 @@ _ME_VS = re.compile(r"(?:^|\b)(?:me|i)\s*(?:vs\.?|versus|v\.?|against)\s*@?([\w]
                     r"1\s*v\s*1\s+me\s+@?([\w][\w.\-]{1,29})|"
                     r"@?([\w][\w.\-]{1,29})\s+(?:vs\.?|versus|v\.?)\s+me\b", re.I)
 _CHAMP_WORDS = {"champ", "champion", "the", "winner", "king", "you"}
+# asking to be in a fight (the word list's version of Claude's "wants_fight")
+_WANTS = re.compile(r"(put me in|add me|me next|pick me|i want (in|to fight|a fight|a 1 ?v ?1)|1 ?v ?1|fight me|"
+                    r"\bme vs\b|vs me\b|let me (fight|in)|can i (fight|join|be in))", re.I)
 
 
 def challenge_in(text: str) -> Optional[str]:
@@ -223,7 +228,8 @@ def challenge_in(text: str) -> Optional[str]:
 def _fallback(p: dict) -> dict:
     # a link in the comment reads as spam: that person stays out
     return {"name_ok": not _BAD.search(p["name"]) and not _LINK.search(p["text"]), "quote": None,
-            "opt_out": bool(_OPT_OUT.search(p["text"])), "challenge": challenge_in(p["text"])}
+            "opt_out": bool(_OPT_OUT.search(p["text"])), "challenge": challenge_in(p["text"]),
+            "wants_fight": bool(_WANTS.search(p["text"]))}
 
 
 def _set_challenge(p: dict, target) -> None:
@@ -268,7 +274,8 @@ def moderate(store: dict, api_key: Optional[str], claude_json=None,
                     q = None
                 # the word list still has a say: either one saying no is a no
                 p.update(name_ok=bool(v.get("name_ok")) and fb["name_ok"], quote=q or None,
-                         opt_out=bool(v.get("opt_out")) or fb["opt_out"])
+                         opt_out=bool(v.get("opt_out")) or fb["opt_out"],
+                         wants_fight=bool(v.get("wants_fight")) or fb["wants_fight"])
                 _set_challenge(p, v.get("challenge"))
             p["checked"] = True
     return len(todo)
@@ -280,16 +287,27 @@ def _usable(p: dict, blocked) -> bool:
     return p.get("checked") and p.get("name_ok") and not p.get("opt_out") and p["channel"] not in blocked
 
 
+def wants(p: dict) -> bool:
+    """Asked to be in a fight (Claude's check; the word list for people
+    checked before it asked)."""
+    if "wants_fight" in p:
+        return bool(p["wants_fight"])
+    return bool(_WANTS.search(p.get("text") or "")) or bool(p.get("challenge"))
+
+
 def waiting(store: dict, used: set, blocked=()) -> List[dict]:
-    """People who commented and haven't been in a video yet, oldest first."""
+    """People who commented and haven't been in a video yet: the ones who
+    asked for a fight first (Dean, 6 Nov), then oldest first."""
     ps = [p for p in (store.get("people") or {}).values() if _usable(p, blocked) and p["channel"] not in used]
-    return sorted(ps, key=lambda p: p.get("first_at", ""))
+    return sorted(ps, key=lambda p: (not wants(p), p.get("first_at", "")))
 
 
 def returning(store: dict, used: set, blocked=()) -> List[dict]:
-    """People who were in a video before, most recent comment first."""
+    """People who were in a video before: the ones asking for another fight
+    first, then most recent comment first."""
     ps = [p for p in (store.get("people") or {}).values() if _usable(p, blocked) and p["channel"] in used]
-    return sorted(ps, key=lambda p: p.get("last_at", ""), reverse=True)
+    ps = sorted(ps, key=lambda p: p.get("last_at", ""), reverse=True)
+    return sorted(ps, key=lambda p: not wants(p))
 
 
 def _member(p: dict, quote: bool = False) -> dict:
@@ -301,7 +319,7 @@ def _bot(k: int) -> dict:
     return {"name": f"Bot {k}", "channel": None, "char": BOT, "col": list(BOT_COL), "quote": None, "bot": True}
 
 
-def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None) -> dict:
+def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None, royale: bool = True) -> dict:
     """The next comment fight: {look, cast, champ (index or None), fresh}."""
     fresh = waiting(store, used, blocked)
     back = returning(store, used, blocked)
@@ -313,7 +331,7 @@ def cast(store: dict, used: set, blocked=(), champ: Optional[dict] = None) -> di
     if champ:
         back = [p for p in back if p["channel"] != champ.get("channel")]
         fresh = [p for p in fresh if p["channel"] != champ.get("channel")]
-    look = "royale" if len(fresh) >= ROYALE_MIN else "duel"
+    look = "royale" if royale and len(fresh) >= ROYALE_MIN else "duel"
     n = ROYALE_N if look == "royale" else 2
     duel = look == "duel"
     members: List[dict] = []

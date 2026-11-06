@@ -1410,6 +1410,27 @@ merge it yourself; merging stays Dean's call per the rule above.
   Fights without `cut` / with emoji characters draw byte for byte as before
   (hash-checked: two duels with audio + a royale). A 38 s video makes in
   ~3 min in the sandbox.
+- **Three comment fights a day (6 Nov):** "it's getting a lot of traction of
+  people wanting battles": Dean asked for the morning, afternoon and evening
+  videos to all be 1v1s against people who want one. `crowd_slots`
+  (default 08:00 / 15:00 / 20:00; replaces the single `crowd_slot`, which
+  only still sets the old evening call-out check) are posting times too
+  (`_balls_slot_times` adds them). Each is made **just in time**: the tick's
+  step 1a plans a crowd slot from `BALLS_CROWD_SOON_MIN` 25 min before to
+  `BALLS_CROWD_LATE_H` 2 h after it, so the waker (08:05 / 15:05 / 20:05)
+  makes it with the comments up to then and the post step puts it up a few
+  minutes later. `_balls_taken_slots` now keeps a posted video's own slot
+  (an at-once post's `publish_at_ts` is its upload minute), else step 1a
+  would make a second fight for it. Casting (`_balls_crowd_cast`): the
+  oldest call-out waiting, else champion VS the next person; `wants`
+  (Claude's new `wants_fight`, or the `_WANTS` word list: "put me in",
+  "1v1 me", "me vs"...) puts those who asked first, in `waiting` and
+  `returning`. The 16-ball royale only with `crowd_royale` (default off;
+  it kept 21% vs ~50% for 1v1s). The separate 20:00 call-out check stands
+  down when its time is a fight (`_balls_callout_time`). Page: three
+  24-hour time menus (type=time showed "03:00" for 15:00 on a phone) and
+  the royale toggle. 3 uploads a YouTube day (15:00, 20:00, next 08:00),
+  under `BALLS_UPLOADS_PER_DAY` 4.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
