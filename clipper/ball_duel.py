@@ -1724,6 +1724,9 @@ class DuelPainter:
             if b.get("pic"):
                 if b["pic"].startswith("brand:"):
                     im.alpha_composite(_pic(b["pic"], int(size)), (int(x), int(y)))
+                elif b["pic"].startswith("fighter:"):
+                    g = _pic(b["pic"], int(size * 0.92))
+                    im.alpha_composite(g, (int(x + size * 0.04), int(y + size * 0.04)))
                 else:
                     g = _emoji(b["pic"], int(size * 0.8))
                     im.alpha_composite(g, (int(x + size * 0.1), int(y + size * 0.1)))
@@ -2090,6 +2093,10 @@ def _pic(code: str, size: int) -> Image.Image:
     if code.startswith("brand:"):
         from clipper import ball_league
         return ball_league.disc(code[6:], size)
+    if code.startswith("fighter:"):
+        # a commenter's own anime fighter (ball_anime)
+        from clipper import ball_anime
+        return ball_anime.face(code[8:], size)
     return _emoji(code, size)
 
 

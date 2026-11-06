@@ -1619,6 +1619,10 @@ def _duel_text_base(recipe: dict) -> dict:
 def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) -> dict:
     """Draw and encode the video. ``progress(fraction)`` is called as it
     goes (estimated from ``expected_end`` when pick_seed set it)."""
+    if recipe.get("cut") == "anime":
+        # a comment fight with the anime cut (ball_anime): VS intro, kill-cam, K.O.
+        from clipper import ball_anime
+        return ball_anime.render(recipe, out_path, log=log, progress=progress)
     out_path = Path(out_path)
     video = out_path.with_suffix(".video.mp4")
     wav = out_path.with_suffix(".wav")

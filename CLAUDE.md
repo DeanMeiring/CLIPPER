@@ -1381,6 +1381,35 @@ merge it yourself; merging stays Dean's call per the rule above.
   Railway waker now also runs at 18:05 UTC: cron `5 6,7,8,13,18 * * *`.
   Fixed on the way: the duel's black-hole weapon crashed the render on the
   frame its life ran out (negative radius); `grow` is clamped at 0.
+- **Anime cut + anime fighters (6 Nov):** the comment fights were Dropvolve's
+  growth (subscribers up, Dean: "doing a lot better than" Caught On Stream),
+  but the watch-through fell (1v1s 57% -> 48% stayed, the royale 21%). Dean
+  wanted them cinematic, "anime style ... the final kill shot zooms in, a
+  small cutscene". Researched (animation blogs, Sakurai's hit-stop column,
+  fighting-game cut-ins: impact frames, hit-stop, speed lines, cut-ins, a
+  held still on the finish, restraint), made a sandbox sample; he loved the
+  VS intro, slow-mo and kill-cam. `clipper/ball_anime.py`: `render` (via
+  `be.render` when `recipe["cut"] == "anime"`) runs the fight once to know
+  the K.O. time and the first "last heart", then directs it: 0.9 s VS intro
+  (diagonal panels in their colours, their fighters + comment lines, VS
+  slam), hit-stop (4 frames + shake on 2+ heart hits), a red heartbeat
+  vignette + "LAST HEART!", a kill-cam from `SLOW_LEAD` 0.75 s before the
+  K.O. (frames held x3 "on threes", zoom to 1.85x on the two, speed lines,
+  the winner's cut-in band), impact frames (`_impact`: inverted black/white
+  silhouettes; the duel's own white K.O. flash is taken back out by
+  `_unflash`), a 0.55 s freeze with a "K.O." stamp, the shatter at half
+  speed while it zooms out; ~3.6 s longer. Sound (`mix`): the fight's sfx
+  moved to their new times (pitched down in the slow-mo) + our numpy taiko
+  beat (busier on the last heart), a heartbeat, a riser into 0.12 s of
+  silence, a boom + "shing" on the K.O., three drum hits on the win -- no
+  anime audio. Dean picked option A of three for the pictures: `face` draws
+  an original anime fighter per channel id (hair / eyes / mouth / headband /
+  marks; "fighter:<id>" in `ball_duel._pic`); `_balls_make` sets members'
+  `avatar` and `cut` for crowd 1v1s when `crowd_anime` (default on; page
+  toggle). The page shows the fighters (`GET /api/balls/crowd/avatar/{id}.png`).
+  Fights without `cut` / with emoji characters draw byte for byte as before
+  (hash-checked: two duels with audio + a royale). A 38 s video makes in
+  ~3 min in the sandbox.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
