@@ -1433,6 +1433,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   24-hour time menus (type=time showed "03:00" for 15:00 on a phone) and
   the royale toggle. 3 uploads a YouTube day (15:00, 20:00, next 08:00),
   under `BALLS_UPLOADS_PER_DAY` 4.
+- **Only posted / scheduled fights hold people (6 Nov):** right after the
+  three-fights deploy Dean pressed Remake upcoming, which also re-made his
+  hand-made comment fights from 31 Oct / 1 Nov (no slot, never posted); the
+  first became a royale of 13 new commenters, who then counted as "been in
+  a fight" and would have been skipped at 20:00. `_balls_crowd_videos` (used
+  for who's been in, the crown, done call-outs) now only counts fights on
+  YouTube or with a slot that can still post (`_balls_slot_live`: ahead,
+  or under 3 h late) -- that royale had a slot from days before, which
+  another video had posted in.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
