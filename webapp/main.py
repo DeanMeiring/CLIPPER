@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hashlib
+import io
 import json
 import os
 import queue
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -6056,7 +6057,16 @@ def _balls_make(vid: str) -> None:
     looks = ((learned or {}).get("looks") or {}).get(fmt)
     if crowd:
         getattr(ball_duel, f"{base}_recipe")(recipe, force="colours")
+        anime = crowd["look"] == "duel" and settings.get("crowd_anime", True)
+        if anime:
+            # Dean (6 Nov): each commenter as their own anime fighter, and the
+            # anime cut (VS intro, kill-cam, K.O.: ball_anime)
+            for m in crowd["cast"]:
+                if m.get("channel"):
+                    m["avatar"] = "fighter:" + m["channel"]
         ball_crowd.apply(recipe, crowd)
+        if anime:
+            recipe["cut"] = "anime"
     elif looks and fmt in ball_learn.LOOKS:
         # the fights' look (colours / flags / 2 VS 2) by the learned mix too
         getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
@@ -6650,10 +6660,12 @@ def _balls_crowd_view(s: dict) -> dict:
             "blocked": [row(p) for p in people if p["channel"] in blocked],
             "claude": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "callouts_on": bool(s.get("crowd_callouts", True)),
+            "anime": bool(s.get("crowd_anime", True)),
             "callout_at": co_at.strftime("%H:%M") if co_at else None,
             "callout_check": st.get("callout_check"),
             "callouts": [{"by": (pp.get(c["by"]) or {}).get("name"), "vs": (pp.get(c["vs"]) or {}).get("name"),
                           "by_char": ball_crowd.character_for(c["by"]), "vs_char": ball_crowd.character_for(c["vs"]),
+                          "by_ch": c["by"], "vs_ch": c["vs"],
                           "text": ((pp.get(c["by"]) or {}).get("text") or "")[:120]}
                          for c in _balls_callouts_waiting(st, s)][:10]}
 
@@ -7397,6 +7409,17 @@ def balls_crowd_refresh() -> dict:
     return balls_state()
 
 
+@protected.get("/api/balls/crowd/avatar/{channel}.png")
+def balls_crowd_avatar(channel: str) -> Response:
+    """A commenter's anime fighter (ball_anime), for the page."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", channel):
+        raise HTTPException(404, "not found")
+    from clipper import ball_anime
+    buf = io.BytesIO()
+    ball_anime.face(channel, 96).save(buf, "PNG")
+    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+
 @protected.post("/api/balls/crowd/block")
 def balls_crowd_block(req: BallsCrowdBlockRequest) -> dict:
     """Keep someone out of the comment fights (or let them back in)."""
@@ -7712,6 +7735,7 @@ class BallsSettings(BaseModel):
     learn: Optional[bool] = None
     crowd: Optional[bool] = None
     crowd_callouts: Optional[bool] = None
+    crowd_anime: Optional[bool] = None
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
@@ -7747,6 +7771,8 @@ def balls_settings(req: BallsSettings) -> dict:
         data["crowd"] = bool(req.crowd)
     if req.crowd_callouts is not None:
         data["crowd_callouts"] = bool(req.crowd_callouts)
+    if req.crowd_anime is not None:
+        data["crowd_anime"] = bool(req.crowd_anime)
     if req.league is not None:
         data["league"] = bool(req.league)
     if req.league_slot is not None:
@@ -12708,6 +12734,7 @@ __CSS__
   .cr-list li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--border); }
   .cr-list .ch { font-size: 1.6rem; line-height: 1; }
   .cr-list .who { flex: 1; min-width: 0; }
+  .cr-list img.av { width: 40px; height: 40px; border-radius: 50%; background: var(--border); flex: none; }
   .cr-list .nm { font-weight: 700; }
   .cr-list .tx { color: var(--muted); font-size: 0.82rem; overflow-wrap: anywhere; }
   .cr-list button { padding: 4px 10px; font-size: 0.8rem; }
@@ -12837,6 +12864,7 @@ __NAV_LINKS__
     <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own character. 3 or more new people: a 16-ball battle royale; fewer: a 1v1 with their comments as trash talk. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: the app reads the comments a few hours before 15:00, Claude checks every name and comment, and “remove me” takes someone out. You only need this box to take someone out by hand.</div>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
+    <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
     <label class="toggle"><input id="cr-co" type="checkbox"> ⚔️ Call-outs: a comment like “me vs levi” gets that 1v1 the same evening</label>
     <div class="hint" id="cr-co-h"></div>
     <ul class="cr-list" id="cr-co-list"></ul>
@@ -13023,6 +13051,10 @@ function renderCrowd() {
   if (!C) return;
   $('cr-on').checked = C.on;
   const ch = (code) => String.fromCodePoint(parseInt(code, 16));
+  const pic = (char, channel) => {
+    if (!C.anime || !channel) return el('span', 'ch', ch(char));
+    const img = el('img', 'av'); img.src = `/api/balls/crowd/avatar/${channel}.png`; img.alt = ''; return img;
+  };
   const st = $('cr-status');
   st.style.display = '';
   if (C.running) { st.className = 'status'; st.textContent = '💬 Reading the comments…'; }
@@ -13033,6 +13065,7 @@ function renderCrowd() {
   } else st.style.display = 'none';
   $('cr-champ').textContent = C.champ ? `👑 Holding the crown: ${ch(C.champ.char)} ${C.champ.name}` : '👑 Nobody holds the crown yet.';
   $('cr-co').checked = C.callouts_on;
+  $('cr-an').checked = C.anime;
   const cc = C.callout_check;
   const last = cc ? ` Last check ${sa(cc.at * 1000, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ` + (cc.video ? 'made a call-out fight.' : 'no call-outs, so nothing extra posted.') : '';
   $('cr-co-h').textContent = !C.callouts_on ? 'Off: “me vs” comments are just comments.' :
@@ -13041,7 +13074,7 @@ function renderCrowd() {
   const cl = $('cr-co-list'); cl.innerHTML = '';
   for (const c of C.callouts) {
     const li = el('li');
-    li.appendChild(el('span', 'ch', ch(c.by_char) + ' ⚔️ ' + ch(c.vs_char)));
+    li.appendChild(pic(c.by_char, c.by_ch)); li.appendChild(el('span', 'ch', '⚔️')); li.appendChild(pic(c.vs_char, c.vs_ch));
     const who = el('div', 'who');
     who.appendChild(el('div', 'nm', `${c.by} VS ${c.vs}`));
     who.appendChild(el('div', 'tx', `“${c.text}”`));
@@ -13051,7 +13084,7 @@ function renderCrowd() {
   $('cr-wait-h').textContent = C.waiting_n ? `Waiting for their first fight (${C.waiting_n}), oldest first:` : 'Nobody new is waiting: the next fight fills up with people who were in before, then bots.';
   const row = (p, label, blocked) => {
     const li = el('li');
-    li.appendChild(el('span', 'ch', ch(p.char)));
+    li.appendChild(pic(p.char, p.channel));
     const who = el('div', 'who');
     who.appendChild(el('div', 'nm', p.name));
     who.appendChild(el('div', 'tx', p.quote ? `Trash talk: “${p.quote}”` : (p.text || '')));
@@ -13075,6 +13108,7 @@ function renderCrowd() {
 }
 $('cr-on').addEventListener('change', () => saveSettings({ crowd: $('cr-on').checked }));
 $('cr-co').addEventListener('change', () => saveSettings({ crowd_callouts: $('cr-co').checked }));
+$('cr-an').addEventListener('change', () => saveSettings({ crowd_anime: $('cr-an').checked }));
 $('cr-now').onclick = async () => {
   const b = $('cr-now'); b.disabled = true;
   try { S = await api('/api/balls/crowd/refresh', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 4000); }

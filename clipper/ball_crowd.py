@@ -413,7 +413,8 @@ def apply(recipe: dict, block: dict) -> dict:
     royale_recipe) this comment fight."""
     rng = random.Random(f"crowd-{recipe['seed']}")
     members = block["cast"]
-    recipe["players"] = [[m["name"], "", list(m["col"]), None, m["char"]] for m in members]
+    # the picture: their anime fighter (ball_anime, "avatar") or their emoji character
+    recipe["players"] = [[m["name"], "", list(m["col"]), None, m.get("avatar") or m["char"]] for m in members]
     recipe.pop("look", None)
     recipe.pop("team_names", None)
     champ = members[0]["name"] if block.get("champ") is not None else None
@@ -648,7 +649,7 @@ class CrowdRoyalePainter(bd.RoyalePainter):
 
     @staticmethod
     def _pic(code, size, alive):
-        g = bd._emoji(code, size)
+        g = bd._pic(code, size)
         if not alive:
             a = g.getchannel("A").point(lambda v: v * 35 // 100)
             g.putalpha(a)
@@ -716,7 +717,7 @@ class CrowdDuelPainter(bd.DuelPainter):
         cd.polygon([(tx[0], 23), (tx[1], 23), ((tx[0] + tx[1]) / 2 + (-14 if k == 0 else 14), 0)],
                    fill=(255, 255, 255, 245))
         cd.ellipse((14, 36, 82, 104), fill=tuple(b["col"]) + (255,))
-        card.alpha_composite(bd._emoji(b["pic"], 54), (21, 43))
+        card.alpha_composite(bd._pic(b["pic"], 54), (21, 43))
         cd.text((96, 50), b["name"], font=self.f_qn, fill=(100, 104, 130, 255), anchor="lm")
         for j, line in enumerate(lines):
             cd.text((96, 80 + j * 32), line, font=f, fill=(20, 22, 40, 255), anchor="lm")
