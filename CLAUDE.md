@@ -1410,6 +1410,22 @@ merge it yourself; merging stays Dean's call per the rule above.
   Fights without `cut` / with emoji characters draw byte for byte as before
   (hash-checked: two duels with audio + a royale). A 38 s video makes in
   ~3 min in the sandbox.
+- **Anime arenas (6 Nov):** Dean saw six mockups behind a real fight ("I
+  like all the anime arenas"); `clipper/ball_anime_arenas.py`: rooftop at
+  dusk, dojo, cherry blossom night, bamboo forest, volcano, manga panel.
+  `_balls_make` gives every anime-cut 1v1 `recipe["anime_arena"]`
+  (`pick`: never the last made fight's, `_balls_last_anime_arena`) and
+  forces `arena` "neon" (the ring's physics; ice/boxing would be boxes).
+  `ball_anime.frames` swaps the painter's `bg` for `background(name)` (the
+  arena + the clean duel's floor and ring, drawn once) and each frame for
+  `animate` (petals falling, embers rising, light motes in bamboo / dust in
+  the dojo; deterministic by seed + time). The white names sit on a deep
+  shade at the top of every arena (dojo / manga panel needed more than the
+  mockups). Impact frames on an arena find the shapes by difference from
+  the background as the painter left it (`_painted_bg`: its K.O. flash and
+  screen shake applied to the arena too; without that, skyline windows and
+  manga dots showed up in the silhouettes). Card chip "⛩️ <arena>", and the
+  report's `art` field carries the arena so the numbers can compare them.
 - **Three comment fights a day (6 Nov):** "it's getting a lot of traction of
   people wanting battles": Dean asked for the morning, afternoon and evening
   videos to all be 1v1s against people who want one. `crowd_slots`
