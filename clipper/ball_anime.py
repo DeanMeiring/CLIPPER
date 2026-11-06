@@ -403,6 +403,23 @@ class Cut:
         return self.band
 
 
+def _painted_bg(bg, sim):
+    """The arena as the duel's painter left it on this frame: its white K.O.
+    flash put on and taken back out (``_unflash``), and its screen shake --
+    so the impact frame's shapes are only what's really drawn on it."""
+    arr = np.asarray(bg.convert("RGB"), dtype=np.float32)
+    if sim.done_at is not None and sim.t - sim.done_at < 0.25:
+        fa = int(110 * (1 - (sim.t - sim.done_at) / 0.25)) / 255
+        arr = np.round(arr * (1 - fa) + 255 * fa)
+        ua = 110 * (1 - (sim.t - sim.done_at) / 0.25) / 255
+        arr = np.clip((arr - 255 * ua) / (1 - ua), 0, 255)
+    if sim.shake > 0:
+        amp = int(14 * min(1.0, sim.shake))
+        rng = random.Random(int(sim.t * 1000))
+        arr = np.roll(arr, (rng.randint(-amp, amp), rng.randint(-amp, amp)), (0, 1))
+    return Image.fromarray(arr.astype(np.uint8))
+
+
 def _unflash(base, sim):
     """Take the duel's own white K.O. flash back out: the impact frames do that job."""
     if sim.done_at is not None and sim.t - sim.done_at < 0.25:
@@ -472,7 +489,7 @@ def frames(recipe, sim_cls, painter_cls):
             ko_done = True
             state["marks"]["ko"] = now()
             zf, fpos = _zoomed(base, ZOOM, *focus)
-            zbg = _zoomed(painter.bg, ZOOM, *focus)[0] if arena else None
+            zbg = _zoomed(_painted_bg(painter.bg, sim), ZOOM, *focus)[0] if arena else None
             for kind in ("inv", "inv", "white", "inv", "pos"):
                 if kind == "white":
                     yield out(Image.new("RGB", (W, H), (255, 255, 255)), ts)
