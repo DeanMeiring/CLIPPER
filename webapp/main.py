@@ -52,6 +52,7 @@ from clipper import rocket_league
 from clipper import ball_channel
 from clipper import ball_learn
 from clipper import ball_crowd
+from clipper import ball_anime_arenas
 from clipper import ball_looks
 from clipper import ball_league
 from clipper import ball_duel
@@ -6022,6 +6023,13 @@ def _balls_work() -> None:
         stop_keepalive.set()
 
 
+def _balls_last_anime_arena(exclude: str) -> Optional[str]:
+    """The anime arena of the last comment fight made (ball_anime_arenas)."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("anime_arena")]
+    made.sort(key=lambda v: v.get("made_at") or v.get("started_at") or 0)
+    return made[-1]["recipe"]["anime_arena"] if made else None
+
+
 def _balls_make(vid: str) -> None:
     video = _balls.load(vid)
     opts = video.get("options") or {}
@@ -6067,6 +6075,10 @@ def _balls_make(vid: str) -> None:
         ball_crowd.apply(recipe, crowd)
         if anime:
             recipe["cut"] = "anime"
+            # one of the anime arenas (Dean liked all six), never the last
+            # fight's; the ring underneath is the neon one's
+            recipe["arena"] = "neon"
+            recipe["anime_arena"] = ball_anime_arenas.pick(_balls_last_anime_arena(vid), recipe["seed"])
     elif looks and fmt in ball_learn.LOOKS:
         # the fights' look (colours / flags / 2 VS 2) by the learned mix too
         getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
@@ -6354,6 +6366,8 @@ def _balls_view(v: dict) -> dict:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
     if r.get("art"):
         c["chips"].append(f"🎨 {ball_looks.LABELS.get(r['art'], r['art'])}")
+    if r.get("anime_arena"):
+        c["chips"].append(f"⛩️ {ball_anime_arenas.LABELS.get(r['anime_arena'], r['anime_arena'])}")
     return c
 
 

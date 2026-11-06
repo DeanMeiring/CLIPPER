@@ -265,11 +265,17 @@ def _dim_edges(im, k, tint=(0, 0, 0)):
     return Image.fromarray((a * (1 - m) + np.array(tint, np.float32) * m).astype(np.uint8))
 
 
-def _impact(im, invert=True):
-    """The anime impact frame: the shapes in stark black and white."""
-    g = np.asarray(im.convert("L"), dtype=np.float32)
-    thr = max(70.0, float(np.percentile(g, 62)) + 30)
-    bw = np.where(g > thr, 0 if invert else 255, 255 if invert else 0).astype(np.uint8)
+def _impact(im, invert=True, bg=None):
+    """The anime impact frame: the shapes in stark black and white. With
+    ``bg`` (an anime arena, some of them bright) the shapes are what differs
+    from the backdrop; on the dark neon arena, what's brighter than most."""
+    if bg is not None:
+        diff = np.abs(np.asarray(im.convert("RGB"), dtype=np.int16) - np.asarray(bg.convert("RGB"), dtype=np.int16))
+        fg = diff.max(axis=2) > 60
+    else:
+        g = np.asarray(im.convert("L"), dtype=np.float32)
+        fg = g > max(70.0, float(np.percentile(g, 62)) + 30)
+    bw = np.where(fg, 0 if invert else 255, 255 if invert else 0).astype(np.uint8)
     return Image.fromarray(bw).convert("RGB")
 
 
@@ -418,6 +424,14 @@ def frames(recipe, sim_cls, painter_cls):
             last_heart = probe.t
     t_ko, win = probe.done_at, probe.winner["i"] if probe.winner else 0
     sim, painter = sim_cls(recipe), painter_cls(recipe)
+    arena = recipe.get("anime_arena")
+    arena_bg = None
+    if arena:
+        # one of the anime arenas (ball_anime_arenas) instead of the neon ring
+        from clipper import ball_anime_arenas
+        arena_bg = ball_anime_arenas.background(arena)
+        painter.bg = arena_bg
+    seed = int(recipe.get("seed") or 0)
     cut = Cut(recipe, win)
     state = {"sim": sim, "marks": {"vs": 0.35}, "t_ko": t_ko, "last_heart": last_heart}
     n = [0]
@@ -441,6 +455,8 @@ def frames(recipe, sim_cls, painter_cls):
     slow_start = None
     while not sim.finished:
         sim.step()
+        if arena:
+            painter.bg = ball_anime_arenas.animate(arena, arena_bg, sim.t, seed)
         base = _unflash(painter.frame(sim), sim)
         new = sim.sfx[seen:]
         seen = len(sim.sfx)
@@ -456,11 +472,12 @@ def frames(recipe, sim_cls, painter_cls):
             ko_done = True
             state["marks"]["ko"] = now()
             zf, fpos = _zoomed(base, ZOOM, *focus)
+            zbg = _zoomed(painter.bg, ZOOM, *focus)[0] if arena else None
             for kind in ("inv", "inv", "white", "inv", "pos"):
                 if kind == "white":
                     yield out(Image.new("RGB", (W, H), (255, 255, 255)), ts)
                 else:
-                    yield out(_impact(zf, kind == "inv"), ts)
+                    yield out(_impact(zf, kind == "inv", zbg), ts)
             hold = int(KO_HOLD * FPS)
             for k in range(hold):
                 fr = zf.convert("RGBA")
