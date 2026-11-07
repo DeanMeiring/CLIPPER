@@ -6512,8 +6512,11 @@ def _balls_crowd_videos(exclude: Optional[str] = None) -> List[dict]:
 
 
 def _balls_crowd_used(exclude: Optional[str] = None) -> set:
-    return {m["channel"] for v in _balls_crowd_videos(exclude) for m in v["recipe"]["crowd"]["cast"]
-            if m.get("channel")}
+    """Who has had their comment fight. A 16-ball royale doesn't count (Dean,
+    7 Nov: restore the people from the royales, which are out of the comment
+    fights now): they're waiting for a proper 1v1 again."""
+    return {m["channel"] for v in _balls_crowd_videos(exclude) if v["recipe"]["crowd"].get("look") != "royale"
+            for m in v["recipe"]["crowd"]["cast"] if m.get("channel")}
 
 
 def _balls_crowd_champ(video: Optional[dict] = None) -> Optional[dict]:
