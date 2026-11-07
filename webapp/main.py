@@ -12880,6 +12880,16 @@ __CSS__
   .music-links { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
   .music-links a { display: block; font-weight: 700; margin-top: 8px; text-decoration: none; }
   .music-links .hint { margin-top: 2px; }
+  .ptabs { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px;
+    margin: 16px -4px 0; padding: 8px 4px; background: var(--card); }
+  .ptabs button { margin: 0; padding: 6px 2px; border-radius: 12px; font-size: 0.78rem; line-height: 1.2; min-width: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .ptabs button span { font-size: 1.15rem; }
+  .ptabs button.on { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .section[data-tab].off { display: none; }
+  details.more { margin-top: 8px; }
+  details.more > summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
   @media (max-width: 560px) { .card { padding: 20px 14px 24px; } .vcard { flex-direction: column; } .vcard .vid { width: 100%; }
     .vcard video { max-height: 460px; } .vcard .ph { max-height: 260px; aspect-ratio: auto; height: 160px; } }
 </style>
@@ -12889,11 +12899,18 @@ __CSS__
 __NAV_LINKS__
 <div class="card">
   <div class="brand"><span class="logo">🫧</span><h1>Ball Evolution</h1></div>
-  <p class="subtitle">Satisfying physics Shorts for their own channel, in five kinds that take turns: 🌀 Merge to final form (pictures drop into a ring, two of the same merge into the next, and every bounce plays the next note of a song), 🧬 Evolve (balls drop, pegs multiply them, matching ones merge into something bigger), ⭕ Escape the ring (every ball that gets out makes two more), ✨ Touch &amp; multiply (two balls touch, a new one pops out) and 🧱 Break in (one ball finds its way into a room of bricks, and every brick it breaks makes another ball). Every video gets a different theme, ball style, background and ball sound, and the page never repeats a combination.</p>
+  <p class="subtitle">Satisfying physics Shorts for their own channel: made, posted and learned from on autopilot.</p>
   <div id="conn" class="status"></div>
   <div id="igconn" class="status" style="margin-top:8px"></div>
+  <nav class="ptabs" id="ptabs">
+    <button type="button" data-t="videos"><span>🎞</span>Videos</button>
+    <button type="button" data-t="fights"><span>💬</span>Fights</button>
+    <button type="button" data-t="posting"><span>📅</span>Posting</button>
+    <button type="button" data-t="packs"><span>🖼</span>Packs</button>
+    <button type="button" data-t="numbers"><span>🧠</span>Stats</button>
+  </nav>
 
-  <div class="section">
+  <div class="section" data-tab="videos">
     <h3>🎬 Make videos</h3>
     <div class="row2">
       <div><label for="m-format">Kind</label><select id="m-format"></select></div>
@@ -12906,12 +12923,18 @@ __NAV_LINKS__
       <div><label for="s-bed">Background sound</label><select id="s-bed"><option value="auto">🔀 Auto (rain, air or hush)</option><option value="rain">🌧 Rain</option><option value="air">🌬 Air</option><option value="hush">🤫 Hush</option><option value="off">🔇 Off: only the balls</option></select></div>
     </div>
     <button id="make" type="button">🎬 Make</button>
-    <div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it. Song: pick one of yours to test it.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">Leave them on Auto for something you haven't posted lately. Each video takes about 3–5 minutes; you can leave this page while they're made. The background sound is remembered and used for every video made after you change it. Song: pick one of yours to test it.</div></details>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="videos">
+    <h3>🎞 Your videos</h3>
+    <div class="tabs" id="tabs"></div>
+    <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
+    <div id="videos"></div>
+  </div>
+  <div class="section" data-tab="packs">
     <h3>🖼 Picture packs</h3>
-    <div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself: it finds a free photo (public domain, from Openverse), Claude picks one with an animal looking at the camera, and the app edits it (Cool → Buff → Sigma or Chad → Cursed → Deep Fried → God). Without a photo it does the same with the bundled emoji, so there's always a fresh pack. Nothing is taken from Google or meme pages.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">The pictures for every video, in order from normal to the most cursed: the last one is the final form. Each video takes a pack nobody has used yet: your own first, then the GIPHY and starter packs. When they're all used, the app makes a new cursed pack itself: it finds a free photo (public domain, from Openverse), Claude picks one with an animal looking at the camera, and the app edits it (Cool → Buff → Sigma or Chad → Cursed → Deep Fried → God). Without a photo it does the same with the bundled emoji, so there's always a fresh pack. Nothing is taken from Google or meme pages.</div></details>
     <div class="actions"><button id="pk-auto" type="button" class="secondary">📷 Make a photo pack now</button><button id="pk-new" type="button" class="secondary">📤 Upload your own</button></div>
     <div id="pk-form" style="display:none">
       <label for="pk-title">Pack name</label><input id="pk-title" maxlength="60" placeholder="e.g. Cursed cats">
@@ -12923,9 +12946,9 @@ __NAV_LINKS__
     <div id="pk-packs"></div>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="packs">
     <h3>🎵 Songs for the bounces</h3>
-    <div class="hint">Your songs play on the 🔴 Ball grows every bounce videos only. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The other kinds play no music, just their ball sounds and cursed sounds: the cursed meow on the bounces, cursed noises on Merge's merges, hits and shots in the duel. To test a song on another kind, pick it in Make.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">Your songs play on the 🔴 Ball grows every bounce videos only. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The other kinds play no music, just their ball sounds and cursed sounds: the cursed meow on the bounces, cursed noises on Merge's merges, hits and shots in the duel. To test a song on another kind, pick it in Make.</div>
     <div class="music-links">
       <b>Where to get free songs</b>
       <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
@@ -12935,6 +12958,7 @@ __NAV_LINKS__
       <a href="https://pixabay.com/music/" target="_blank" rel="noopener">🎧 Pixabay Music →</a>
       <div class="hint">Free, no credit needed. Download the license certificate with the song: if one ever gets claimed, it's your proof.</div>
     </div>
+    </details>
     <div id="tracks"></div>
     <div class="actions"><button id="add-music" type="button" class="secondary">⬆ Add songs</button><button id="rl-music" type="button" class="secondary" style="display:none"></button></div>
     <input type="file" id="music-files" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac" multiple style="display:none">
@@ -12942,7 +12966,7 @@ __NAV_LINKS__
     <audio id="player" preload="none"></audio>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="posting">
     <h3>📅 Posting</h3>
     <label class="toggle"><input id="ap-on" type="checkbox"> 🤖 Autopilot: make and post them on its own</label>
     <div class="hint" id="ap-hint"></div>
@@ -12962,7 +12986,7 @@ __NAV_LINKS__
     <div class="hint" id="quota"></div>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="numbers">
     <h3>🧠 Learning from your numbers</h3>
     <label class="toggle"><input id="ln-on" type="checkbox"> Pick the kinds by what does well on the channel</label>
     <div class="hint" id="ln-hint"></div>
@@ -12973,7 +12997,7 @@ __NAV_LINKS__
     <div class="hint" id="ln-report" style="display:none">Every run also writes a full report (each video: kind, pictures, sound, length, views, kept watching, likes, and where viewers drop off on the best and worst ones) to the app’s logs, where Claude Code can read it to improve the videos themselves. <a href="/api/balls/report">⬇ Download it</a></div>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="fights">
     <h3>💬 Comment fights</h3>
     <label class="toggle"><input id="cr-on" type="checkbox"> Post 1v1 comment fights every day at these times</label>
     <div class="row3">
@@ -12981,7 +13005,7 @@ __NAV_LINKS__
       <div><label for="cr-t2">Afternoon</label><select id="cr-t2"></select></div>
       <div><label for="cr-t3">Evening</label><select id="cr-t3"></select></div>
     </div>
-    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div></details>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
     <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
@@ -12994,22 +13018,15 @@ __NAV_LINKS__
     <button id="cr-now" type="button" class="secondary">💬 Read the comments now</button>
   </div>
 
-  <div class="section">
+  <div class="section" data-tab="fights">
     <h3>🏆 Ball League</h3>
     <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a brand fight</label>
-    <div class="hint">The 1v1 duels are one running series of brand fights: Apple VS Samsung, BMW VS Audi, TikTok VS Instagram, PlayStation VS Steam, Nike VS Adidas, with the brands’ logos as the balls. The category changes every fight, each has its own champion, both records are on screen, a close loss gets a rematch and new brands step up. Pick a brand people ask for in the comments and it gets the next fight in its category.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">The 1v1 duels are one running series of brand fights: Apple VS Samsung, BMW VS Audi, TikTok VS Instagram, PlayStation VS Steam, Nike VS Adidas, with the brands’ logos as the balls. The category changes every fight, each has its own champion, both records are on screen, a close loss gets a rematch and new brands step up. Pick a brand people ask for in the comments and it gets the next fight in its category.</div></details>
     <div class="lg-next" id="lg-next"></div>
     <div class="lg-row"><label for="lg-pick">Next challenger (from the comments):</label>
       <select id="lg-pick"></select></div>
     <div class="ln-wrap"><table class="ln" id="lg-table"></table></div>
     <ul class="ln-notes" id="lg-last"></ul>
-  </div>
-
-  <div class="section">
-    <h3>🎞 Your videos</h3>
-    <div class="tabs" id="tabs"></div>
-    <div class="actions"><button id="sched-all" type="button" class="secondary" style="display:none"></button></div>
-    <div id="videos"></div>
   </div>
 </div>
 </div>
@@ -13032,6 +13049,23 @@ const fmtLabel = (k) => ((S.options.formats || []).find(f => f.key === k) || { l
 const slotText = (iso) => sa(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 // a posting time more than 3 h ago: the autopilot never posts it any more (_balls_slot_live)
 const slotGone = (slot) => Date.now() - new Date(slot + ':00+02:00').getTime() > 3 * 3600 * 1000;
+// the page's tabs (Dean, 7 Nov: too much scrolling): one group of sections at a time,
+// remembered in the address (#fights) and on this phone
+const PTABS = ['videos', 'fights', 'posting', 'packs', 'numbers'];
+function showTab(t) {
+  if (!PTABS.includes(t)) t = 'videos';
+  document.querySelectorAll('.section[data-tab]').forEach(s => s.classList.toggle('off', s.dataset.tab !== t));
+  document.querySelectorAll('#ptabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  try { localStorage.setItem('balls-tab', t); } catch (e) {}
+  if (location.hash.slice(1) !== t) history.replaceState(null, '', '#' + t);
+}
+document.querySelectorAll('#ptabs button').forEach(b => b.onclick = () => {
+  showTab(b.dataset.t);
+  const top = $('igconn').getBoundingClientRect().bottom + window.scrollY;
+  if (window.scrollY > top) window.scrollTo({ top });
+});
+window.addEventListener('hashchange', () => showTab(location.hash.slice(1)));
+(() => { let t = location.hash.slice(1); if (!t) { try { t = localStorage.getItem('balls-tab'); } catch (e) {} } showTab(t || 'videos'); })();
 
 async function load() {
   S = await api('/api/balls');
