@@ -1426,6 +1426,28 @@ merge it yourself; merging stays Dean's call per the rule above.
   screen shake applied to the arena too; without that, skyline windows and
   manga dots showed up in the silhouettes). Card chip "⛩️ <arena>", and the
   report's `art` field carries the arena so the numbers can compare them.
+- **Anime weapons + special move (7 Nov):** Dean picked eight from an idea
+  board ("add the weapons"; he passed on redrawing the arenas as sketches).
+  `ball_duel.ANIME_WEAPONS`: shuriken (3 stars in a fan, max 2 hearts),
+  slashwave (energy slash, flies through, 2), clones (2 shadow copies of the
+  ball chase the enemy, 1 each on touch, gone after 4 s), meteor (a target
+  follows the enemy a step behind, lands at `METEOR_FALL` 1.1 s: 3 close / 1
+  near), kunai (chain: hooks for 1, yanks them in, a kick for 1 more, "YOINK!"),
+  dragon (homing fire dragon, 2), spikes (a line of earth spikes along the
+  aim, 2 + thrown). Special move (`recipe["special"]`): the first ball down
+  to one heart stops, powers up `SPECIAL_CHARGE` 0.7 s (aura) and fires a
+  beam (`SPECIAL_DMG` 3); once a fight. `anime_arsenal(recipe)` (own rng
+  `anime-weapons-<seed>`): `arsenal` 3, 3 classics + 4 newer + 4 anime
+  weapons, special on; `_balls_make` calls it for every anime-cut comment
+  fight. `ball_anime` shows a "SPECIAL MOVE!" cut-in band while it powers up
+  (frames held x2, its sound slowed to match), and uses that band instead of
+  the plain winner band when the special is the finisher. Numbers on 120
+  seeds: good seeds 26 (was ~4 in 80 without), special in ~3 of 4 fights and
+  the finisher in ~1 of 4, median fight 28.7 s. Older recipes (arsenal 2 or
+  none) simulate and draw byte for byte as before (hash-checked: 4 duels with
+  audio, 2 comment fights, a tournament). The meteor zone draws on its own
+  layer: `ImageDraw` on the painter's RGBA frame replaces pixels instead of
+  blending, so a see-through fill there comes out solid.
 - **Three comment fights a day (6 Nov):** "it's getting a lot of traction of
   people wanting battles": Dean asked for the morning, afternoon and evening
   videos to all be 1v1s against people who want one. `crowd_slots`
