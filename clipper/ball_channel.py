@@ -29,7 +29,10 @@ DEFAULT_SETTINGS = {
     "bed": "auto",          # background sound: auto / rain / air / hush / off
     # autopilot: make videos ahead and post one at each slot (SA time)
     "autopilot": False,
-    "slots": ["08:00", "15:00"],
+    "slots": ["08:00", "20:00"],
+    # Dean (7 Nov): the non-fight slots are "drop" videos (box / escape /
+    # zen) in the sticker look, after "Every escape adds 3 balls" kept 77%
+    "drop": True,
     "auto_instagram": True,
     "ahead_days": 2,
     "learn": True,          # the autopilot's mix of kinds follows the channel's numbers (ball_learn)
@@ -39,7 +42,7 @@ DEFAULT_SETTINGS = {
     "crowd_slot": "15:00",
     # Dean (6 Nov): morning, afternoon and evening are all 1v1 comment fights
     # (crowd_slots replaces crowd_slot); always 1v1s (7 Nov: the royale is out)
-    "crowd_slots": ["08:00", "15:00", "20:00"],
+    "crowd_slots": ["15:00"],         # one a day since 7 Nov (was 08:00 / 15:00 / 20:00)
     "crowd_blocked": [],
     # call-outs ("me vs levi"): checked every evening 5 h after crowd_slot
     "crowd_callouts": True,

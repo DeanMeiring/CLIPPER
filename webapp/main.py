@@ -6044,7 +6044,8 @@ def _balls_make(vid: str) -> None:
         try:
             at = datetime.datetime.strptime(opts["slot"], "%Y-%m-%dT%H:%M").replace(tzinfo=_balls_tz())
             fmt = _balls_format_for(at, settings)
-            if not (_balls_crowd_slot(at, settings) or _balls_league_slot(at, settings)):   # those slots keep their kind
+            if not (_balls_crowd_slot(at, settings) or _balls_league_slot(at, settings)
+                    or settings.get("drop", True)):   # those slots keep their kind
                 fmt = _balls_debut_kind(_balls.videos()) or fmt
         except ValueError:
             fmt = _balls_debut_kind(_balls.videos()) or fmt
@@ -6096,6 +6097,9 @@ def _balls_make(vid: str) -> None:
         if match["tag"] != "YOUR PICK":
             league_pick = None
     art = ball_looks.pick(recipe, _balls_last_art(vid), recipe["seed"])
+    if opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_DROP_CYCLE \
+            and not crowd:
+        art = BALLS_DROP_ART            # the drop videos keep the look that did well
     if art:
         # the art look (ball_looks), never the one the last video had; the
         # paper / stripes looks swap the backdrop out and pixels turn a
@@ -6416,6 +6420,14 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # has this many videos made since BALLS_DEBUT_SINCE, the autopilot's next
 # video is the one furthest from its count. Merge is here for its new
 # pictures (logos, flags) and cursed noises.
+# The drop videos (Dean, 7 Nov: "Every escape adds 3 balls" in the sticker
+# look kept 77% watching, box in other looks 64-69%, the channel's middle
+# 69%): every autopilot slot that isn't a comment fight takes the next kind
+# in this cycle, in the sticker look. Box 3 in 7 (an odd length, so with two
+# drop slots a day it isn't always the morning one); jaws was tried and its
+# trails turn into a tangle in that look.
+BALLS_DROP_CYCLE = ("box", "escape", "box", "zen", "box", "escape", "zen")
+BALLS_DROP_ART = "sticker"
 BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "survivor": 2}   # ties go to the first
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
@@ -6625,7 +6637,9 @@ def _balls_callout_time(day: datetime.date, s: dict) -> Optional[datetime.dateti
     hh, mm = (int(x) for x in t.split(":"))
     at = (datetime.datetime.combine(day, datetime.time(hh, mm), tzinfo=_balls_tz())
           + datetime.timedelta(hours=BALLS_CALLOUT_AFTER_H))
-    return None if _balls_crowd_slot(at, s) else at
+    # stands down when that time is a posting slot of its own (since 7 Nov
+    # 20:00 is a drop video): the next comment fight takes the call-out first
+    return None if _balls_crowd_slot(at, s) or at.strftime("%H:%M") in _balls_slot_times(s) else at
 
 
 def _balls_callout_due(s: dict, now: datetime.datetime) -> Optional[datetime.datetime]:
@@ -6793,6 +6807,8 @@ def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
         return "crowd"
     if _balls_league_slot(dt, s):
         return "duel"
+    if s.get("drop", True):
+        return _balls_drop_kind(dt, s)
     times = _balls_slot_times(s)
     learned = _balls_learned() if s.get("learn") else None
     if learned and learned.get("weights"):
@@ -6802,6 +6818,29 @@ def _balls_format_for(dt: datetime.datetime, s: Optional[dict] = None) -> str:
     pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
     i = local.date().toordinal() * len(times) + pos
     return BALLS_FORMAT_CYCLE[i % len(BALLS_FORMAT_CYCLE)]
+
+
+def _balls_drop_kind(dt: datetime.datetime, s: dict) -> str:
+    """The drop video's kind for the slot at dt: the next in BALLS_DROP_CYCLE,
+    counted over the slots that aren't comment fights."""
+    local = dt.astimezone(_balls_tz())
+    hm = local.strftime("%H:%M")
+    crowd = set(_balls_crowd_times(s)) if s.get("crowd") else set()
+    times = [t for t in _balls_slot_times(s) if t not in crowd] or [hm]
+    pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
+    return BALLS_DROP_CYCLE[(local.date().toordinal() * len(times) + pos) % len(BALLS_DROP_CYCLE)]
+
+
+def _balls_drop_plan_once() -> None:
+    """Dean's 7 Nov plan, put in once on the live settings (the defaults only
+    reach a fresh install): one comment fight a day at 15:00, drop videos at
+    08:00 and 20:00. Changing the times on the page afterwards sticks."""
+    s = _balls.settings()
+    if s.get("drop_plan_7nov"):
+        return
+    _balls.save_settings({"crowd_slots": ["15:00"], "slots": ["08:00", "20:00"], "drop": True,
+                          "drop_plan_7nov": True})
+    print("[autopilot] drop plan: comment fight at 15:00, drop videos at 08:00 and 20:00", flush=True)
 
 
 def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, s: Optional[dict] = None) -> str:
@@ -6928,6 +6967,7 @@ def _balls_uploads_today(videos: List[dict]) -> int:
 
 @protected.get("/api/balls")
 def balls_state() -> dict:
+    _balls_drop_plan_once()
     for v in _balls.videos():
         yt = v.get("youtube") or {}
         if yt.get("publish_at_ts") and yt["publish_at_ts"] < time.time() - BALLS_KEEP_DAYS * 86400:
@@ -7545,6 +7585,7 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
     if not _balls_tick_lock.acquire(blocking=False):
         return {"busy": True}
     try:
+        _balls_drop_plan_once()
         s = _balls.settings()
         if not s.get("autopilot"):
             return {"autopilot": False}
@@ -13178,7 +13219,9 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t1')) $('ap-t1').value = t1 || '';
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
-  const mix = S.learn.on ? 'The kinds follow what does well on the channel (🧠 below).' : 'The kinds take turns in a fixed order.';
+  const mix = st.drop !== false
+    ? 'Every time that isn’t a comment fight is a drop video in the yellow sticker look: box (“every escape adds 3”), escape and zen take turns, box most often.'
+    : S.learn.on ? 'The kinds follow what does well on the channel (🧠 below).' : 'The kinds take turns in a fixed order.';
   $('ap-hint').textContent = ap.on
     ? `It makes the next ${st.ahead_days || 2} days' videos ahead and posts each one to YouTube (public) and Instagram a few minutes after its time. Nothing goes to YouTube before then, so Remake and changes don't use up the day's uploads. ${mix} You can still change titles, delete one (another is made for that time) or post your own.`
     : `Off: you make and post videos yourself. Turned on, it posts one at each time below, every day. ${mix}`;
@@ -13329,6 +13372,7 @@ function renderLearn() {
   $('ln-hint').textContent = L.on
     ? 'Once a day it reads the channel’s YouTube numbers (views, how many keep watching instead of swiping away, likes) for every video at least 2 days old, adds them up per kind, and ' + (L.claude ? 'Claude' : 'a formula') + ' sets the mix for the next videos: more of what does well. Every kind keeps at least 2% so it still gets tried, none goes over 34%, and new kinds still go first.'
     : 'Off: the autopilot’s kinds take turns in a fixed order.';
+  if (S.settings.drop !== false) $('ln-hint').textContent += ' Right now the autopilot posts drop videos (box, escape, zen) and one comment fight a day, so the mix is only shown here.';
   const st = $('ln-status');
   st.style.display = '';
   if (L.running) { st.className = 'status'; st.textContent = '🧠 Reading the channel’s numbers…'; }
