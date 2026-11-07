@@ -1481,6 +1481,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   YouTube or with a slot that can still post (`_balls_slot_live`: ahead,
   or under 3 h late) -- that royale had a slot from days before, which
   another video had posted in.
+- **Names in other scripts + passed slots (7 Nov):** after a Remake, a
+  comment fight showed "@КемеровскийМаппер" as boxes: the bundled fonts are
+  Latin-only subsets (~230 glyphs). `ball_crowd.screen_name` spells
+  Cyrillic / Greek in Latin letters on screen ("@KemerovskiyMapper"), drops
+  what the fonts can't draw (CJK, emoji), and falls back to
+  "@player-<last 4 of channel id>" when too little is left; `drawable`
+  compares a glyph's mask with the missing-glyph box in every bundled font.
+  `apply` puts the screen names in `players` and the hook, and keeps the
+  names as written in `recipe["title_hook"]` (only set when they differ), which
+  `publish_text` uses for the YouTube title. `shown_quote` leaves a comment
+  line off the screen when its words are in such a script, and strips emoji.
+  Latin-name fights are unchanged (hash-checked). The same Remake left old
+  hand-made fights with slots from October: their cards said "the autopilot
+  uploads it for Wed 21 Oct"; now they say the posting time has passed
+  (`slotGone`, same 3 h window as `_balls_slot_live`).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

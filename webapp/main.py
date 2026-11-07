@@ -13016,6 +13016,8 @@ const GROUPS = { todo: ['queued', 'picking', 'rendering', 'ready', 'uploading', 
 let S = null, tab = 'todo', poll = null, filled = false;
 const fmtLabel = (k) => ((S.options.formats || []).find(f => f.key === k) || { label: k }).label;
 const slotText = (iso) => sa(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+// a posting time more than 3 h ago: the autopilot never posts it any more (_balls_slot_live)
+const slotGone = (slot) => Date.now() - new Date(slot + ':00+02:00').getTime() > 3 * 3600 * 1000;
 
 async function load() {
   S = await api('/api/balls');
@@ -13455,6 +13457,7 @@ function card(v) {
   else if (v.status === 'rendering' && v.checking) msg = ['wait', '👀 Claude is checking the ending…'];
   else if (v.status === 'rendering') msg = ['wait', `🎬 Making the video… ${Math.round((v.progress || 0) * 100)}%`];
   else if (v.status === 'uploading') msg = ['wait', '⏳ Uploading…'];
+  else if (v.status === 'ready' && (v.options || {}).slot && S.autopilot.on && slotGone((v.options || {}).slot)) msg = ['ok', `✅ Ready. Its posting time (${slotText((v.options || {}).slot + ':00+02:00')}) has passed, so the autopilot won't post it. Post it now, schedule it, or delete it.`];
   else if (v.status === 'ready' && (v.options || {}).slot && S.autopilot.on) msg = ['ok', `✅ Ready. 🤖 The autopilot uploads it for ${slotText((v.options || {}).slot + ':00+02:00')}.`];
   else if (v.status === 'ready') msg = ['ok', `✅ Ready. Schedule it for ${S.next_slot ? slotText(S.next_slot) : 'the next free time'}.`];
   else if (v.status === 'scheduled') msg = ['ok', `📅 Goes public ${sa(yt.publish_at, { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}.`];
