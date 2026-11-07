@@ -1527,6 +1527,23 @@ merge it yourself; merging stays Dean's call per the rule above.
   explanations sit in "ℹ️ How it works" `details.more`, and the subtitle is
   one line. Only layout and the tab script changed; every id the page's
   script uses is the same.
+- **Drop videos + one comment fight a day (7 Nov):** Dean: the comment
+  fights do well but shouldn't be everything; "Every escape adds 3 balls"
+  (box, sticker look) "really did well", ~80% retention. The 7 Nov report
+  agreed: that video 76.8% average watched, box in arcade 68.7%, box plain
+  63.5%, channel middle 69.3% (zen "Only one makes it out" 80.2%, 14.8k
+  views). Now: `crowd_slots` ["15:00"] (one comment fight a day) and
+  `slots` ["08:00", "20:00"] are drop videos: `settings["drop"]` (default
+  on) makes every non-fight autopilot slot take `_balls_drop_kind`, the next
+  of `BALLS_DROP_CYCLE` (box, escape, box, zen, box, escape, zen: box 3 in 7,
+  an odd length so the morning isn't always box), skipping the learned mix
+  and BALLS_DEBUT, in `BALLS_DROP_ART` "sticker" (`_balls_make`). Jaws was
+  tried in the sticker look and its trails became a tangle, so it's out.
+  `_balls_drop_plan_once` put the new times on the live settings once
+  (`drop_plan_7nov`); later changes on the page stick. The evening call-out
+  check stands down when its time is a posting slot (20:00 is a drop video):
+  the 15:00 fight takes the oldest call-out first. Learning still runs and
+  writes the report; the Stats tab says the mix is only shown for now.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
