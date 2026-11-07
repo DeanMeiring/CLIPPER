@@ -1552,6 +1552,16 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_balls_last_art` didn't have). Center skips it like sticker; Claude's
   last look is told it's on purpose. The sticker look draws exactly as
   before (checked).
+- **Four a day (7 Nov):** Dean asked for 4 videos a day, 2 fights + 2
+  drops: comment fights at 12:00 and 20:00 (`crowd_slots`), drop videos at
+  08:00 and 15:00 (`slots`), put on the live settings once by
+  `_balls_drop_plan_once` (flag `four_a_day_7nov`; page changes stick). The
+  Railway waker runs at 08:05, 09:05, 10:05, 12:05, 15:05 and 20:05 SA
+  (cron `5 6,7,8,10,13,18 * * *` UTC). 12:00, 15:00, 20:00 and the next
+  08:00 fall in one YouTube quota day (it resets 10:00 SA in PST), so the
+  four uploads use exactly `BALLS_UPLOADS_PER_DAY` 4: a manual "Post now"
+  on top would push a slot to the next quota day. The call-out check stands
+  down (20:00 is a fight, which takes the oldest call-out first).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

@@ -6837,15 +6837,18 @@ def _balls_drop_kind(dt: datetime.datetime, s: dict) -> str:
 
 
 def _balls_drop_plan_once() -> None:
-    """Dean's 7 Nov plan, put in once on the live settings (the defaults only
-    reach a fresh install): one comment fight a day at 15:00, drop videos at
-    08:00 and 20:00. Changing the times on the page afterwards sticks."""
+    """Dean's plans, each put in once on the live settings (the defaults only
+    reach a fresh install); changing the times on the page afterwards sticks.
+    7 Nov: one comment fight a day at 15:00, drop videos at 08:00 and 20:00.
+    7 Nov (later): four a day -- comment fights at 12:00 and 20:00, drop
+    videos at 08:00 and 15:00."""
     s = _balls.settings()
-    if s.get("drop_plan_7nov"):
+    if s.get("four_a_day_7nov"):
         return
-    _balls.save_settings({"crowd_slots": ["15:00"], "slots": ["08:00", "20:00"], "drop": True,
-                          "drop_plan_7nov": True})
-    print("[autopilot] drop plan: comment fight at 15:00, drop videos at 08:00 and 20:00", flush=True)
+    _balls.save_settings({"crowd_slots": ["12:00", "20:00"], "slots": ["08:00", "15:00"], "drop": True,
+                          "drop_plan_7nov": True, "four_a_day_7nov": True})
+    print("[autopilot] four a day: comment fights at 12:00 and 20:00, drop videos at 08:00 and 15:00",
+          flush=True)
 
 
 def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, s: Optional[dict] = None) -> str:
@@ -13377,7 +13380,7 @@ function renderLearn() {
   $('ln-hint').textContent = L.on
     ? 'Once a day it reads the channel’s YouTube numbers (views, how many keep watching instead of swiping away, likes) for every video at least 2 days old, adds them up per kind, and ' + (L.claude ? 'Claude' : 'a formula') + ' sets the mix for the next videos: more of what does well. Every kind keeps at least 2% so it still gets tried, none goes over 34%, and new kinds still go first.'
     : 'Off: the autopilot’s kinds take turns in a fixed order.';
-  if (S.settings.drop !== false) $('ln-hint').textContent += ' Right now the autopilot posts drop videos (box, escape, zen) and one comment fight a day, so the mix is only shown here.';
+  if (S.settings.drop !== false) $('ln-hint').textContent += ' Right now the autopilot posts drop videos (box, escape, zen) and comment fights, so the mix is only shown here.';
   const st = $('ln-status');
   st.style.display = '';
   if (L.running) { st.className = 'status'; st.textContent = '🧠 Reading the channel’s numbers…'; }
