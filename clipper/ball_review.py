@@ -100,6 +100,7 @@ _ART_NOTES = {
     "arcade": "The whole video is drawn as a green retro arcade screen on purpose: green-only colours, glow and scanlines.",
     "sticker": "The video uses a deliberate sticker-pop look: yellow striped background and thick black outlines.",
     "notebook": "The video uses a deliberate notebook-doodle look: lined paper background and ink outlines.",
+    "comic": "The video uses a deliberate comic-pop look: sky-blue dotted background and thick black outlines.",
 }
 
 

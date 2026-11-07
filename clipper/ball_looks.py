@@ -16,6 +16,10 @@ frame as drawn.
   hard pixels (on the plain black backdrop: a space nebula turned to blobs).
 * arcade: green phosphor screen: brightness to green, a soft glow,
   scanlines, darker corners.
+* comic (7 Nov, Dean: "a second look that is similar" to sticker, which
+  kept 77% watching on the drop videos): the sticker treatment on a sky-blue
+  background of lighter halftone dots, so the drop videos can take turns
+  between two looks instead of one template.
 * sticker / notebook: the painter's background (its ``bg``: the backdrop it
   draws everything on) is swapped for yellow stripes / lined paper, and
   everything drawn on it gets a thick black (sticker) or thin ink
@@ -34,16 +38,18 @@ from typing import Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
-ARTS = ("neon", "pixel", "sticker", "notebook", "arcade")
+ARTS = ("neon", "pixel", "sticker", "notebook", "arcade", "comic")
 LABELS = {"neon": "Neon", "pixel": "Pixel 8-bit", "sticker": "Sticker pop", "notebook": "Notebook doodle",
-          "arcade": "Arcade screen"}
+          "arcade": "Arcade screen", "comic": "Comic dots"}
+# the looks that swap the backdrop and outline what's drawn
+OUTLINED = ("sticker", "notebook", "comic")
 # the kinds that get a look: everything but the fights (their own arenas)
 # and Evolve (a light gumball machine, not on a dark backdrop)
 KINDS = ("escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws", "spiral", "rays", "box",
          "zen", "trail", "survivor")
 # the black hole of Hold the center is drawn in the backdrop's own black, so
 # on paper / stripes it would vanish: those two looks skip it
-SKIP = {"center": ("sticker", "notebook")}
+SKIP = {"center": ("sticker", "notebook", "comic")}
 FG_DIFF = 40
 INK = (34, 34, 46)
 
@@ -74,14 +80,23 @@ class Look:
             vig = np.clip(1.08 - 0.32 * d, 0.55, 1.0)
             scan = np.where((np.arange(self.h) % 3) == 2, 0.62, 1.0)[:, None]
             self.shade = (vig * scan).astype(np.float32)[..., None]
-        if art in ("sticker", "notebook"):
+        if art in OUTLINED:
             self.paper = np.asarray(self._backdrop(), dtype=np.uint8)
             import cv2
             self.cv2 = cv2
-            r = 5 if art == "sticker" else 2           # outline width at half size
+            r = 2 if art == "notebook" else 5          # outline width at half size
             self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
 
     def _backdrop(self) -> Image.Image:
+        if self.art == "comic":
+            im = Image.new("RGB", (self.w, self.h), (90, 190, 255))
+            d = ImageDraw.Draw(im)
+            step, r = 46, 9
+            for j, y in enumerate(range(0, self.h + step, step)):
+                for x in range(-step, self.w + step, step):
+                    xx = x + (step // 2 if j % 2 else 0)
+                    d.ellipse((xx - r, y - r, xx + r, y + r), fill=(130, 210, 255))
+            return im
         im = Image.new("RGB", (self.w, self.h), (255, 214, 60) if self.art == "sticker" else (250, 247, 236))
         d = ImageDraw.Draw(im)
         if self.art == "sticker":
@@ -126,5 +141,5 @@ class Look:
         ring_full = cv2.resize(ring, (self.w, self.h), interpolation=cv2.INTER_NEAREST).astype(bool)
         out = self.paper.copy()
         out[fg_full] = a[fg_full]
-        out[ring_full] = (20, 20, 30) if self.art == "sticker" else INK
+        out[ring_full] = INK if self.art == "notebook" else (20, 20, 30)
         return Image.fromarray(out)
