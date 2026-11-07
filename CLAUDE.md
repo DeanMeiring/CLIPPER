@@ -1425,10 +1425,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   oldest call-out waiting, else champion VS the next person; `wants`
   (Claude's new `wants_fight`, or the `_WANTS` word list: "put me in",
   "1v1 me", "me vs"...) puts those who asked first, in `waiting` and
-  `returning`. The 16-ball royale only when more than 10 new people are
-  waiting (`BALLS_ROYALE_MIN` 11, `cast(royale_min=)`; Dean: "only if more
-  than 10 people comment, because we're posting 2-3 times a day"; it kept
-  21% vs ~50% for 1v1s); `crowd_royale` (default on) off = never. The separate 20:00 call-out check stands
+  `returning`. Always 1v1s: the 16-ball royale was first limited to more
+  than 10 people waiting, then (7 Nov) taken out of the comment fights
+  ("just too confusing"; it kept 21% vs ~50% for 1v1s) -- `_balls_crowd_cast`
+  calls `cast(royale=False)`; the `crowd_royale` setting and page toggle
+  are gone. `ball_crowd`'s royale code stays (old videos, manual Makes). The separate 20:00 call-out check stands
   down when its time is a fight (`_balls_callout_time`). Page: three
   24-hour time menus (type=time showed "03:00" for 15:00 on a phone) and
   the royale toggle. 3 uploads a YouTube day (15:00, 20:00, next 08:00),
