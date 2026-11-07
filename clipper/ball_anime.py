@@ -557,7 +557,9 @@ def frames(recipe, sim_cls, painter_cls):
                     if age < 0.7:
                         slide = (1 - _ease(age / 0.14)) * W if age < 0.5 else -_ease((age - 0.5) / 0.2) * W
                         fr = fr.convert("RGBA")
-                        fr.alpha_composite(cut.cut_band(), (int(slide), int(H * 0.16)))
+                        # the winner's band, or theirs as SPECIAL MOVE when that's the finisher
+                        band = cut.special_band(win) if special is not None and special[1] == win else cut.cut_band()
+                        fr.alpha_composite(band, (int(slide), int(H * 0.16)))
                 else:
                     fr = _dim_edges(fr, 0.65 * (1 - (ts - sim.done_at) / AFTER_SLOW)).convert("RGBA")
                     _paste(fr, cut.ko, W / 2, H * 0.30, rot=-7, alpha=1 - _ease((ts - sim.done_at) / AFTER_SLOW))
