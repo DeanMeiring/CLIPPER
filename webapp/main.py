@@ -6512,8 +6512,11 @@ def _balls_crowd_videos(exclude: Optional[str] = None) -> List[dict]:
 
 
 def _balls_crowd_used(exclude: Optional[str] = None) -> set:
-    return {m["channel"] for v in _balls_crowd_videos(exclude) for m in v["recipe"]["crowd"]["cast"]
-            if m.get("channel")}
+    """Who has had their comment fight. A 16-ball royale doesn't count (Dean,
+    7 Nov: restore the people from the royales, which are out of the comment
+    fights now): they're waiting for a proper 1v1 again."""
+    return {m["channel"] for v in _balls_crowd_videos(exclude) if v["recipe"]["crowd"].get("look") != "royale"
+            for m in v["recipe"]["crowd"]["cast"] if m.get("channel")}
 
 
 def _balls_crowd_champ(video: Optional[dict] = None) -> Optional[dict]:
@@ -6644,8 +6647,11 @@ def _balls_callouts_done() -> tuple:
             key = frozenset((co["by"], co["vs"]))
             when = datetime.datetime.fromtimestamp(_balls_when(v), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             fought[key] = max(fought.get(key, ""), when)
-    for v in _balls.videos():          # planned, not made yet
+    for v in _balls.videos():          # planned or made, not posted yet
         co = (v.get("options") or {}).get("callout")
+        slot = (v.get("options") or {}).get("slot")
+        if slot and not v.get("youtube") and not _balls_slot_live(slot):
+            continue        # it missed its time and never posts: that call-out is still owed a fight
         if co and v.get("status") != "error" and not v.get("hidden"):
             done.add(co.get("comment"))
     return done, fought
