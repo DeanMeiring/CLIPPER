@@ -7761,12 +7761,20 @@ def balls_remake_upcoming() -> dict:
     its YouTube Studio link; once Dean has deleted it there, pressing again
     frees its time and a new one is made for it."""
     now = time.time()
-    out = {"remade": 0, "replaced": 0, "on_youtube": [], "unchecked": False}
+    out = {"remade": 0, "replaced": 0, "on_youtube": [], "unchecked": False, "past": 0}
     videos = [v for v in _balls.videos() if not v.get("hidden")]
     for v in videos:
         made = v.get("recipe") or v.get("status") in ("picking", "rendering", "ready", "error")
         if v.get("youtube") or v["id"] in _balls_uploading or not made:
             continue        # on YouTube, uploading right now, or not made yet (it'll get the new look)
+        slot = (v.get("options") or {}).get("slot")
+        if slot and not _balls_slot_live(slot):
+            # its posting time went by without it (7 Nov: a Remake re-made
+            # leftovers from October, and their cards still said "uploads it
+            # for Wed 21 Oct"); the autopilot never posts these, so don't
+            # spend a make on them
+            out["past"] += 1
+            continue
         _balls_remake(v["id"])
         out["remade"] += 1
     # also the ones removed from the list with 🗑 (hidden): they're still
@@ -13356,6 +13364,7 @@ function showRemake(r) {
   if (r.remade) line(`♻️ ${r.remade} being made again with the newest look.`);
   if (r.replaced) line(`🗑 ${r.replaced} you deleted on YouTube: new ones are being made for their times.`);
   if (r.unchecked) line('⚠️ Couldn’t check YouTube just now. Try again in a minute.');
+  if (r.past) line(`🕰 ${r.past} left as they are: their posting time has already passed, so the autopilot won’t post them. Post, schedule or delete those yourself.`);
   if (r.on_youtube.length) {
     line(`📅 ${r.on_youtube.length} already scheduled on YouTube. This app can upload but not delete there, so open each one, delete it (⋮ menu → Delete forever), then press the button again: a new one is made for the same time.`);
     for (const v of r.on_youtube) {
