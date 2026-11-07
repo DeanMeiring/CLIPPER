@@ -467,6 +467,15 @@ ANIME = tuple(ANIME_WEAPONS)
 ANIME_KINDS = tuple(v[0] for v in ANIME_WEAPONS.values())
 ANIME_THINGS = ("star", "crescent", "kunai", "clone", "meteor", "dragon", "spikeline")
 METEOR_FALL, SPECIAL_CHARGE, SPECIAL_DMG = 1.1, 0.7, 3
+# The special bar (7 Nov, Dean: "a bar at the top that shows how far the
+# player is from being able to use the special move, like an ult bar"):
+# recipes with ``special: "meter"`` fill each fighter's bar by a point per
+# heart they lose (taking hits charges it, so it's a comeback move); full
+# (SPECIAL_FULL) fires the special, once per fighter, for SPECIAL_METER_DMG
+# (two specials a fight at 3 hearts made fights short and one-sided).
+# ``special: True`` (the first anime-weapon videos) keeps the
+# first-to-the-last-heart rule and 3 hearts.
+SPECIAL_FULL, SPECIAL_DEALT, SPECIAL_METER_DMG = 6.0, 0.0, 2
 
 
 def anime_arsenal(recipe: dict) -> dict:
@@ -475,7 +484,7 @@ def anime_arsenal(recipe: dict) -> dict:
     mix = random.Random(f"anime-weapons-{recipe['seed']}")
     recipe["arsenal"] = 3
     recipe["weapons"] = mix.sample(CLASSICS, 3) + mix.sample(NEWER, 4) + mix.sample(ANIME, 4)
-    recipe["special"] = True
+    recipe["special"] = "meter"
     return recipe
 
 
@@ -523,6 +532,7 @@ class DuelSim:
         # the special move (anime fights): once, for the first ball down to one heart
         self.special = bool(recipe.get("special")) and not players
         self.special_used = False
+        self.meter_on = self.special and recipe.get("special") == "meter"
         self.bombs: list = []
         self.things: list = []       # thrown / summoned things (the newer weapons)
         # the arena's walls: None = the ring (every older fight); else a rounded
@@ -583,6 +593,11 @@ class DuelSim:
         if target.get("small", 0) > 0:
             dmg += 1                    # shrunk by the wand: every hit hurts more
         target["hp"] = max(0, target["hp"] - dmg)
+        if self.meter_on:
+            # the special bar: a point per heart lost, half a point per heart dealt
+            for b, gain in ((target, dmg), (by, dmg * SPECIAL_DEALT)):
+                if b is not None and gain and not b.get("sp_used"):
+                    b["meter"] = min(SPECIAL_FULL, b.get("meter", 0.0) + gain)
         target["hurt"] = 0.3
         target["squash"] = 1.0
         self.shake = max(self.shake, 0.25 + 0.15 * dmg)
@@ -1249,8 +1264,14 @@ class DuelSim:
             if not b["alive"]:
                 b["powering"] = 0.0
                 continue
-            if not self.special_used and b["hp"] == 1:
+            if self.meter_on:
+                ready = b.get("meter", 0.0) >= SPECIAL_FULL and not b.get("sp_used") and \
+                    not any(o.get("powering", 0) > 0 for o in self.balls)
+            else:
+                ready = not self.special_used and b["hp"] == 1
+            if ready:
                 self.special_used = True
+                b["sp_used"] = True
                 b["powering"] = SPECIAL_CHARGE
                 b["frozen"] = 0.0
                 self.sfx.append((self.t, "special", b["i"]))
@@ -1282,7 +1303,8 @@ class DuelSim:
                 continue
             t = max(0.0, min(L, (o["x"] - x0) * dx + (o["y"] - y0) * dy))
             if math.hypot(o["x"] - (x0 + dx * t), o["y"] - (y0 + dy * t)) < D_BALL + 40:
-                if self.damage(o, SPECIAL_DMG, x0 + dx * t, y0 + dy * t, b) and o["alive"]:
+                if self.damage(o, SPECIAL_METER_DMG if self.meter_on else SPECIAL_DMG, x0 + dx * t, y0 + dy * t, b) \
+                        and o["alive"]:
                     self._fling(o, a)
 
     def _anime_thing(self, m, dt) -> bool:
@@ -2018,6 +2040,8 @@ class DuelPainter:
                 d.text((bx0 if k == 0 else bx1, by - 10), name, font=f, fill=self.ink + (255,),
                        anchor="ls" if k == 0 else "rs")
                 self.bar(d, b, sim, bx0, by, bx1, by + bh, mirror=k == 1)
+                if getattr(sim, "meter_on", False):
+                    self.ult(d, b, sim, bx0, by + bh + 11, bx1, by + bh + 37, mirror=k == 1)
         # VS badge
         cy = top + (60 if not teams else 90)
         d.ellipse((W / 2 - 52, cy - 52, W / 2 + 52, cy + 52), fill=(230, 40, 64, 255), outline=(255, 255, 255, 255),
@@ -2089,6 +2113,32 @@ class DuelPainter:
             cx, cy = x + size / 2, y + size / 2
             d.line([(cx - q, cy - q), (cx + q, cy + q)], fill=(255, 70, 80, 255), width=8)
             d.line([(cx - q, cy + q), (cx + q, cy - q)], fill=(255, 70, 80, 255), width=8)
+
+    def ult(self, d, b, sim, x0, y0, x1, y1, mirror):
+        """The special bar under the health bar: fills as they take hits,
+        flashes while the special powers up, reads USED after."""
+        shown = self.__dict__.setdefault("ult_shown", {})
+        v = shown.get(b["i"], 0.0)
+        v += (b.get("meter", 0.0) - v) * 0.25                 # glides up instead of jumping
+        shown[b["i"]] = v
+        f = self.__dict__.get("f_ult")
+        if f is None:
+            f = self.f_ult = _font(21)
+        d.rounded_rectangle((x0 - 3, y0 - 3, x1 + 3, y1 + 3), 9, fill=(14, 16, 36, 255),
+                            outline=(255, 214, 40, 90), width=2)
+        frac = 0.0 if b.get("sp_used") and b.get("powering", 0) <= 0 else min(1.0, v / SPECIAL_FULL)
+        if frac > 0.01:
+            w = (x1 - x0) * frac
+            fx0, fx1 = (x1 - w, x1) if mirror else (x0, x0 + w)
+            powering = b.get("powering", 0) > 0
+            col = (255, 255, 255, 255) if powering and int(sim.t * 12) % 2 else (255, 196, 30, 255)
+            d.rounded_rectangle((fx0, y0, fx1, y1), 7, fill=col)
+            d.rounded_rectangle((fx0, y0, fx1, y0 + (y1 - y0) * 0.45), 7, fill=(255, 236, 140, 160))
+        label = "SPECIAL USED" if b.get("sp_used") and b.get("powering", 0) <= 0 else \
+            "SPECIAL!" if b.get("powering", 0) > 0 else "SPECIAL"
+        d.text((x1 - 8 if mirror else x0 + 8, (y0 + y1) / 2), label, font=f,
+               fill=(255, 255, 255, 230) if not b.get("sp_used") or b.get("powering", 0) > 0 else (150, 150, 170, 200),
+               anchor="rm" if mirror else "lm", stroke_width=2, stroke_fill=(14, 16, 36, 255))
 
     def bar(self, d, b, sim, x0, y0, x1, y1, mirror):
         """A segmented health bar: a segment per heart, the ones just lost

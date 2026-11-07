@@ -1448,6 +1448,19 @@ merge it yourself; merging stays Dean's call per the rule above.
   audio, 2 comment fights, a tournament). The meteor zone draws on its own
   layer: `ImageDraw` on the painter's RGBA frame replaces pixels instead of
   blending, so a see-through fill there comes out solid.
+- **Special bar (7 Nov):** Dean asked for "a bar at the top that shows how
+  far the player is from being able to use the special move, like an ult
+  bar". New anime fights get `recipe["special"] = "meter"`: each fighter's
+  bar (`DuelPainter.ult`, under the health bar, gold, glides up, flashes
+  "SPECIAL!" while powering up, "SPECIAL USED" after) fills a point per
+  heart they lose (`SPECIAL_DEALT` 0: dealing damage doesn't charge it, so
+  it stays a comeback move); at `SPECIAL_FULL` 6 the special fires, once per
+  fighter, for `SPECIAL_METER_DMG` 2. Tuned on 120 seeds: with both fighters
+  getting a 3-heart special, fights fell to a ~20 s median and 12 good
+  seeds; this setting gives 21 good, ~27 s median, a special in nearly every
+  fight and the finisher in ~1 of 5. `special: True` (the videos made
+  earlier on 7 Nov) keeps the first-to-the-last-heart rule and 3 hearts
+  (hash-checked, as are older duels / comment fights / tournaments).
 - **Three comment fights a day (6 Nov):** "it's getting a lot of traction of
   people wanting battles": Dean asked for the morning, afternoon and evening
   videos to all be 1v1s against people who want one. `crowd_slots`
