@@ -1498,6 +1498,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   (`slotGone`, same 3 h window as `_balls_slot_live`), and Remake leaves
   such videos alone (`remake["past"]`, shown as "🕰 N left as they are"):
   remaking them only cost renders, since they never post by themselves.
+  The people in such a missed fight were already back in the queue (only
+  posted / live-slot fights hold people), but a missed call-out video still
+  marked its "me vs X" as done; `_balls_callouts_done` now skips videos whose
+  time passed without posting, so that call-out gets made again.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

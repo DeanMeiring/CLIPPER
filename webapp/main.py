@@ -6644,8 +6644,11 @@ def _balls_callouts_done() -> tuple:
             key = frozenset((co["by"], co["vs"]))
             when = datetime.datetime.fromtimestamp(_balls_when(v), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             fought[key] = max(fought.get(key, ""), when)
-    for v in _balls.videos():          # planned, not made yet
+    for v in _balls.videos():          # planned or made, not posted yet
         co = (v.get("options") or {}).get("callout")
+        slot = (v.get("options") or {}).get("slot")
+        if slot and not v.get("youtube") and not _balls_slot_live(slot):
+            continue        # it missed its time and never posts: that call-out is still owed a fight
         if co and v.get("status") != "error" and not v.get("hidden"):
             done.add(co.get("comment"))
     return done, fought
