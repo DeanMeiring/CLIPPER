@@ -1495,7 +1495,9 @@ merge it yourself; merging stays Dean's call per the rule above.
   Latin-name fights are unchanged (hash-checked). The same Remake left old
   hand-made fights with slots from October: their cards said "the autopilot
   uploads it for Wed 21 Oct"; now they say the posting time has passed
-  (`slotGone`, same 3 h window as `_balls_slot_live`).
+  (`slotGone`, same 3 h window as `_balls_slot_live`), and Remake leaves
+  such videos alone (`remake["past"]`, shown as "🕰 N left as they are"):
+  remaking them only cost renders, since they never post by themselves.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
