@@ -1505,6 +1505,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   asked to restore the people from the 16-ball royales: `_balls_crowd_used`
   no longer counts royale fights, so those commenters are waiting for a 1v1
   again (the crown still follows the last fight's winner).
+- **Page tabs (7 Nov):** Dean had to scroll too far on /ball-evolution. The
+  sections now sit under a sticky row of five tabs (`.ptabs`, `showTab`):
+  🎞 Videos (Make + Your videos, moved up next to Make), 💬 Fights (comment
+  fights + Ball League), 📅 Posting, 🖼 Packs (picture packs + songs), 🧠
+  Stats (learning). Each `.section` carries `data-tab`; the tab is kept in
+  the address (`#fights`, `hashchange`) and in localStorage. The long
+  explanations sit in "ℹ️ How it works" `details.more`, and the subtitle is
+  one line. Only layout and the tab script changed; every id the page's
+  script uses is the same.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
