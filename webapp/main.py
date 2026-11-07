@@ -6430,7 +6430,6 @@ BALLS_CROWD_AHEAD_H = 8
 # before its slot to 2 hours after it (the waker comes 5 minutes after each
 # slot) -- so the comments up to then, call-outs included, get in
 BALLS_CROWD_SOON_MIN = 25
-BALLS_ROYALE_MIN = 11              # new people waiting before a fight is a 16-ball royale ("more than 10")
 BALLS_CROWD_LATE_H = 2
 BALLS_CROWD_FRESH_S = 20 * 60          # comments read this recently aren't read again for a make
 _balls_crowd_lock = threading.Lock()
@@ -6558,10 +6557,8 @@ def _balls_crowd_refresh(force: bool = False) -> dict:
 def _balls_crowd_cast(video: dict) -> dict:
     """Who's in this comment fight: the oldest call-out ("me vs X") waiting
     first, else the champion against the next one (ball_crowd.cast; the
-    ones who asked for a fight first). A 16-ball royale only when more than
-    10 new people are waiting (BALLS_ROYALE_MIN; Dean, 6 Nov: with 2-3 fights
-    a day the queue rarely gets that long, and the 1v1s keep viewers better);
-    ``crowd_royale`` off: never."""
+    ones who asked for a fight first). Always a 1v1: Dean (7 Nov) found the
+    16-ball royale "just too confusing" and took it out."""
     st = _balls_crowd_refresh()
     s = _balls.settings()
     blocked = set(s.get("crowd_blocked") or [])
@@ -6580,8 +6577,7 @@ def _balls_crowd_cast(video: dict) -> dict:
                 print(f"[crowd] {video['id']}: call-out {block['cast'][0]['name']} VS {block['cast'][1]['name']}",
                       flush=True)
                 return block
-    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), blocked, champ,
-                            royale=bool(s.get("crowd_royale", True)), royale_min=BALLS_ROYALE_MIN)
+    block = ball_crowd.cast(st, _balls_crowd_used(video["id"]), blocked, champ, royale=False)
     print(f"[crowd] {video['id']}: {block['look']}, {block['fresh']} new, "
           f"{sum(1 for m in block['cast'] if not m.get('bot'))} people", flush=True)
     return block
@@ -6702,7 +6698,6 @@ def _balls_crowd_view(s: dict) -> dict:
     pp = st.get("people") or {}
     co_at = _balls_callout_time(datetime.date.today(), s)
     return {"on": bool(s.get("crowd")), "slot": s.get("crowd_slot") or "", "times": _balls_crowd_times(s),
-            "royale": bool(s.get("crowd_royale", True)), "royale_min": BALLS_ROYALE_MIN,
             "fetched_at": st.get("fetched_at"),
             "error": st.get("error"), "last": st.get("last"), "running": _balls_crowd_state["running"],
             "people": len(people), "waiting": [row(p) for p in wait[:40]], "waiting_n": len(wait),
@@ -7817,7 +7812,6 @@ class BallsSettings(BaseModel):
     crowd_callouts: Optional[bool] = None
     crowd_anime: Optional[bool] = None
     crowd_slots: Optional[List[str]] = None
-    crowd_royale: Optional[bool] = None
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
@@ -7860,8 +7854,6 @@ def balls_settings(req: BallsSettings) -> dict:
         if len(times) > 4 or not all(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t) for t in times):
             raise HTTPException(400, "Use up to 4 times like 08:00.")
         data["crowd_slots"] = sorted(set(times))
-    if req.crowd_royale is not None:
-        data["crowd_royale"] = bool(req.crowd_royale)
     if req.league is not None:
         data["league"] = bool(req.league)
     if req.league_slot is not None:
@@ -12958,8 +12950,7 @@ __NAV_LINKS__
       <div><label for="cr-t2">Afternoon</label><select id="cr-t2"></select></div>
       <div><label for="cr-t3">Evening</label><select id="cr-t3"></select></div>
     </div>
-    <label class="toggle"><input id="cr-roy" type="checkbox"> 👥 A 16-ball battle royale instead, when more than 10 new people are waiting</label>
-    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1 (unless more than 10 new people are waiting: then one 16-ball royale clears the queue): a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
+    <div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
     <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
@@ -13148,7 +13139,6 @@ function renderCrowd() {
   const C = S.crowd;
   if (!C) return;
   $('cr-on').checked = C.on;
-  $('cr-roy').checked = C.royale;
   ['cr-t1', 'cr-t2', 'cr-t3'].forEach((id, i) => {
     const sel = $(id), want = (C.times || [])[i] || '';
     if (!sel.options.length || ![...sel.options].some(o => o.value === want)) {
@@ -13219,7 +13209,6 @@ function renderCrowd() {
   for (const p of out) ol.appendChild(p.by === 'you' ? row(p, 'Let back in', false) : (() => { const li = el('li'); li.appendChild(el('span', 'ch', ch(p.char))); const who = el('div', 'who'); who.appendChild(el('div', 'nm', p.name)); who.appendChild(el('div', 'tx', p.text || '')); li.appendChild(who); return li; })());
 }
 $('cr-on').addEventListener('change', () => saveSettings({ crowd: $('cr-on').checked }));
-$('cr-roy').addEventListener('change', () => saveSettings({ crowd_royale: $('cr-roy').checked }));
 for (const id of ['cr-t1', 'cr-t2', 'cr-t3'])
   $(id).addEventListener('change', () => saveSettings({ crowd_slots: ['cr-t1', 'cr-t2', 'cr-t3'].map(x => $(x).value).filter(Boolean) }));
 $('cr-co').addEventListener('change', () => saveSettings({ crowd_callouts: $('cr-co').checked }));
