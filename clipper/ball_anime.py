@@ -265,11 +265,17 @@ def _dim_edges(im, k, tint=(0, 0, 0)):
     return Image.fromarray((a * (1 - m) + np.array(tint, np.float32) * m).astype(np.uint8))
 
 
-def _impact(im, invert=True):
-    """The anime impact frame: the shapes in stark black and white."""
-    g = np.asarray(im.convert("L"), dtype=np.float32)
-    thr = max(70.0, float(np.percentile(g, 62)) + 30)
-    bw = np.where(g > thr, 0 if invert else 255, 255 if invert else 0).astype(np.uint8)
+def _impact(im, invert=True, bg=None):
+    """The anime impact frame: the shapes in stark black and white. With
+    ``bg`` (an anime arena, some of them bright) the shapes are what differs
+    from the backdrop; on the dark neon arena, what's brighter than most."""
+    if bg is not None:
+        diff = np.abs(np.asarray(im.convert("RGB"), dtype=np.int16) - np.asarray(bg.convert("RGB"), dtype=np.int16))
+        fg = diff.max(axis=2) > 60
+    else:
+        g = np.asarray(im.convert("L"), dtype=np.float32)
+        fg = g > max(70.0, float(np.percentile(g, 62)) + 30)
+    bw = np.where(fg, 0 if invert else 255, 255 if invert else 0).astype(np.uint8)
     return Image.fromarray(bw).convert("RGB")
 
 
@@ -397,6 +403,23 @@ class Cut:
         return self.band
 
 
+def _painted_bg(bg, sim):
+    """The arena as the duel's painter left it on this frame: its white K.O.
+    flash put on and taken back out (``_unflash``), and its screen shake --
+    so the impact frame's shapes are only what's really drawn on it."""
+    arr = np.asarray(bg.convert("RGB"), dtype=np.float32)
+    if sim.done_at is not None and sim.t - sim.done_at < 0.25:
+        fa = int(110 * (1 - (sim.t - sim.done_at) / 0.25)) / 255
+        arr = np.round(arr * (1 - fa) + 255 * fa)
+        ua = 110 * (1 - (sim.t - sim.done_at) / 0.25) / 255
+        arr = np.clip((arr - 255 * ua) / (1 - ua), 0, 255)
+    if sim.shake > 0:
+        amp = int(14 * min(1.0, sim.shake))
+        rng = random.Random(int(sim.t * 1000))
+        arr = np.roll(arr, (rng.randint(-amp, amp), rng.randint(-amp, amp)), (0, 1))
+    return Image.fromarray(arr.astype(np.uint8))
+
+
 def _unflash(base, sim):
     """Take the duel's own white K.O. flash back out: the impact frames do that job."""
     if sim.done_at is not None and sim.t - sim.done_at < 0.25:
@@ -418,6 +441,14 @@ def frames(recipe, sim_cls, painter_cls):
             last_heart = probe.t
     t_ko, win = probe.done_at, probe.winner["i"] if probe.winner else 0
     sim, painter = sim_cls(recipe), painter_cls(recipe)
+    arena = recipe.get("anime_arena")
+    arena_bg = None
+    if arena:
+        # one of the anime arenas (ball_anime_arenas) instead of the neon ring
+        from clipper import ball_anime_arenas
+        arena_bg = ball_anime_arenas.background(arena)
+        painter.bg = arena_bg
+    seed = int(recipe.get("seed") or 0)
     cut = Cut(recipe, win)
     state = {"sim": sim, "marks": {"vs": 0.35}, "t_ko": t_ko, "last_heart": last_heart}
     n = [0]
@@ -441,6 +472,8 @@ def frames(recipe, sim_cls, painter_cls):
     slow_start = None
     while not sim.finished:
         sim.step()
+        if arena:
+            painter.bg = ball_anime_arenas.animate(arena, arena_bg, sim.t, seed)
         base = _unflash(painter.frame(sim), sim)
         new = sim.sfx[seen:]
         seen = len(sim.sfx)
@@ -456,11 +489,12 @@ def frames(recipe, sim_cls, painter_cls):
             ko_done = True
             state["marks"]["ko"] = now()
             zf, fpos = _zoomed(base, ZOOM, *focus)
+            zbg = _zoomed(_painted_bg(painter.bg, sim), ZOOM, *focus)[0] if arena else None
             for kind in ("inv", "inv", "white", "inv", "pos"):
                 if kind == "white":
                     yield out(Image.new("RGB", (W, H), (255, 255, 255)), ts)
                 else:
-                    yield out(_impact(zf, kind == "inv"), ts)
+                    yield out(_impact(zf, kind == "inv", zbg), ts)
             hold = int(KO_HOLD * FPS)
             for k in range(hold):
                 fr = zf.convert("RGBA")
