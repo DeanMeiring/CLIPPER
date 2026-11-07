@@ -6099,13 +6099,16 @@ def _balls_make(vid: str) -> None:
     art = ball_looks.pick(recipe, _balls_last_art(vid), recipe["seed"])
     if opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_DROP_CYCLE \
             and not crowd:
-        art = BALLS_DROP_ART            # the drop videos keep the look that did well
+        # the drop videos take turns between the two looks that did well
+        last = _balls_last_art(vid)
+        art = BALLS_DROP_ARTS[(BALLS_DROP_ARTS.index(last) + 1) % len(BALLS_DROP_ARTS)] \
+            if last in BALLS_DROP_ARTS else BALLS_DROP_ARTS[0]
     if art:
         # the art look (ball_looks), never the one the last video had; the
         # paper / stripes looks swap the backdrop out and pixels turn a
         # nebula into blobs, so those get the plain one
         recipe["art"] = art
-        if art in ("sticker", "notebook", "pixel"):
+        if art in ("sticker", "notebook", "pixel", "comic"):
             recipe["backdrop"] = "black"
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
@@ -6423,11 +6426,13 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # The drop videos (Dean, 7 Nov: "Every escape adds 3 balls" in the sticker
 # look kept 77% watching, box in other looks 64-69%, the channel's middle
 # 69%): every autopilot slot that isn't a comment fight takes the next kind
-# in this cycle, in the sticker look. Box 3 in 7 (an odd length, so with two
+# in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
 BALLS_DROP_CYCLE = ("box", "escape", "box", "zen", "box", "escape", "zen")
-BALLS_DROP_ART = "sticker"
+# the drop videos' two looks, taking turns (comic added 7 Nov: Dean asked for
+# a second look like sticker, so the drop videos aren't all one template)
+BALLS_DROP_ARTS = ("sticker", "comic")
 BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "survivor": 2}   # ties go to the first
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
@@ -13220,7 +13225,7 @@ function renderAutopilot() {
   if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
   $('ap-ig').checked = st.auto_instagram !== false;
   const mix = st.drop !== false
-    ? 'Every time that isn’t a comment fight is a drop video in the yellow sticker look: box (“every escape adds 3”), escape and zen take turns, box most often.'
+    ? 'Every time that isn’t a comment fight is a drop video: box (“every escape adds 3”), escape and zen take turns, box most often, in two looks that take turns too (yellow sticker stripes and blue comic dots).'
     : S.learn.on ? 'The kinds follow what does well on the channel (🧠 below).' : 'The kinds take turns in a fixed order.';
   $('ap-hint').textContent = ap.on
     ? `It makes the next ${st.ahead_days || 2} days' videos ahead and posts each one to YouTube (public) and Instagram a few minutes after its time. Nothing goes to YouTube before then, so Remake and changes don't use up the day's uploads. ${mix} You can still change titles, delete one (another is made for that time) or post your own.`

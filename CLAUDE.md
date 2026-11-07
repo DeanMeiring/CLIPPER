@@ -1544,6 +1544,14 @@ merge it yourself; merging stays Dean's call per the rule above.
   check stands down when its time is a posting slot (20:00 is a drop video):
   the 15:00 fight takes the oldest call-out first. Learning still runs and
   writes the report; the Stats tab says the mix is only shown for now.
+  Same evening Dean asked for "a second look that is similar":
+  `ball_looks` "comic" (Comic dots) is the sticker treatment (thick black
+  outlines, `OUTLINED`) on a sky-blue background of lighter halftone dots
+  (picked over pink stripes and mint checks from a 3-way mockup); the drop
+  videos take turns between `BALLS_DROP_ARTS` sticker and comic (the one
+  `_balls_last_art` didn't have). Center skips it like sticker; Claude's
+  last look is told it's on purpose. The sticker look draws exactly as
+  before (checked).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
