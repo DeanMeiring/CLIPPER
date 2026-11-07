@@ -42,9 +42,11 @@ import hashlib
 import json
 import random
 import re
+import unicodedata
+from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from clipper import ball_duel as bd
 
@@ -105,6 +107,88 @@ def colour_for(key: str) -> tuple:
 def clean_name(name: str) -> str:
     name = re.sub(r"\s+", " ", (name or "").strip())
     return name if len(name) <= NAME_MAX else name[:NAME_MAX - 1] + "…"
+
+
+# ---- on screen --------------------------------------------------------------
+# The bundled fonts only carry Latin letters, so a name in another script
+# came out as boxes (7 Nov: "@КемеровскийМаппер"). On screen a Cyrillic or
+# Greek name is spelled in Latin letters ("@KemerovskiyMapper"); the YouTube
+# title and description keep it as written. Anything else the fonts can't
+# draw is left out.
+_SCREEN_FONTS = ("Inter-Black.ttf", "Inter-Bold.ttf", "Anton.ttf", "PermanentMarker-Regular.woff",
+                 "GochiHand-Regular.woff")
+_CYR = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґў",
+                ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t",
+                 "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya", "i", "yi", "ye", "g", "u"]))
+_GRK = dict(zip("αβγδεζηθικλμνξοπρσςτυφχψω",
+                ["a", "v", "g", "d", "e", "z", "i", "th", "i", "k", "l", "m", "n", "x", "o", "p", "r", "s", "s", "t",
+                 "y", "f", "ch", "ps", "o"]))
+
+
+@lru_cache(maxsize=1)
+def _fonts():
+    out = []
+    for n in _SCREEN_FONTS:
+        try:
+            out.append(ImageFont.truetype(str(bd.be.ASSETS / "fonts" / n), 40))
+        except OSError:
+            pass
+    return out
+
+
+def _sig(f, ch):
+    m = f.getmask(ch)
+    return m.size, bytes(list(m))
+
+
+@lru_cache(maxsize=8192)
+def drawable(ch: str) -> bool:
+    """Every bundled font has a real glyph for it (not the empty box)."""
+    if ch.isspace():
+        return True
+    return all(_sig(f, ch) != _sig(f, "\U000F0001") for f in _fonts())
+
+
+def screen_text(text: str) -> str:
+    out = []
+    for ch in text or "":
+        if drawable(ch):
+            out.append(ch)
+            continue
+        low = ch.lower()
+        rep = _CYR.get(low)
+        if rep is None:
+            rep = _GRK.get(unicodedata.normalize("NFKD", low)[:1])
+        if rep is None:
+            base = "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c))
+            rep = base if base and base != ch and all(drawable(c) for c in base) else ""
+        elif ch != low:
+            rep = rep[:1].upper() + rep[1:]
+        out.append(rep)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
+def screen_name(name: str, channel: Optional[str] = None) -> str:
+    """A name as the video shows it: itself when the fonts can draw it."""
+    shown = screen_text(name)
+    if shown == name:
+        return name
+    if len(shown.lstrip("@").strip("-_. ")) < 2:
+        shown = "@player-" + (channel or "x")[-4:].lower()
+    return shown
+
+
+def shown_quote(quote: Optional[str]) -> Optional[str]:
+    """A comment line as the video shows it, or None when its words are in a
+    script the fonts can't draw (spelled out in Latin letters it would be
+    nonsense to most viewers)."""
+    if not quote:
+        return quote
+    for ch in quote:
+        if unicodedata.category(ch).startswith("L") and not drawable(ch):
+            return None
+    shown = screen_text(quote)
+    return shown if shown.strip("“”\"' ") else None
 
 
 # ---- comments ----------------------------------------------------------------
@@ -433,27 +517,33 @@ def apply(recipe: dict, block: dict) -> dict:
     rng = random.Random(f"crowd-{recipe['seed']}")
     members = block["cast"]
     # the picture: their anime fighter (ball_anime, "avatar") or their emoji character
-    recipe["players"] = [[m["name"], "", list(m["col"]), None, m.get("avatar") or m["char"]] for m in members]
+    # names on screen in letters the fonts have (screen_name); the title keeps them as written
+    shown = [screen_name(m["name"], m.get("channel")) for m in members]
+    recipe["players"] = [[shown[i], "", list(m["col"]), None, m.get("avatar") or m["char"]]
+                         for i, m in enumerate(members)]
     recipe.pop("look", None)
     recipe.pop("team_names", None)
-    champ = members[0]["name"] if block.get("champ") is not None else None
+    champ = 0 if block.get("champ") is not None else None
     co = block.get("callout")
     if co:
-        a, b = members[co["by_i"]]["name"], members[1 - co["by_i"]]["name"]
+        a, b = co["by_i"], 1 - co["by_i"]
         champ_called = block.get("champ") is not None and co["by_i"] == 1
-        hook = rng.choice(CALLOUT_CHAMP_HOOKS if champ_called else CALLOUT_HOOKS).format(a=a, b=b)
+        pat, keys = rng.choice(CALLOUT_CHAMP_HOOKS if champ_called else CALLOUT_HOOKS), {"a": a, "b": b}
     elif not any(not m.get("bot") for m in members):
-        hook = rng.choice(EMPTY_HOOKS)
+        pat, keys = rng.choice(EMPTY_HOOKS), {}
     elif block["look"] == "royale":
         # "16 commenters" / "15 of you" only when nobody is a bot
         bots = any(m.get("bot") for m in members)
-        pool = (ROYALE_CHAMP_HOOKS[:1] if bots else ROYALE_CHAMP_HOOKS) if champ else \
+        pool = (ROYALE_CHAMP_HOOKS[:1] if bots else ROYALE_CHAMP_HOOKS) if champ is not None else \
             (ROYALE_HOOKS[1:] if bots else ROYALE_HOOKS)
-        hook = rng.choice(pool).format(c=champ)
+        pat, keys = rng.choice(pool), ({"c": champ} if champ is not None else {})
     else:
-        a, b = members[0]["name"], members[1]["name"]
-        hook = (rng.choice(DUEL_CHAMP_HOOKS) if champ else rng.choice(DUEL_HOOKS)).format(a=a, b=b)
+        pat, keys = (rng.choice(DUEL_CHAMP_HOOKS) if champ is not None else rng.choice(DUEL_HOOKS)), {"a": 0, "b": 1}
+    hook = pat.format(**{k: shown[i] for k, i in keys.items()})
     recipe.update(format="crowd", crowd=block, hook=hook, ending="WINS!", bed="off")
+    as_written = pat.format(**{k: members[i]["name"] for k, i in keys.items()})
+    if as_written != hook:
+        recipe["title_hook"] = as_written
     return recipe
 
 
@@ -464,7 +554,7 @@ def base_format(block: dict) -> str:
 def publish_text(recipe: dict) -> dict:
     block = recipe["crowd"]
     royale = block["look"] == "royale"
-    title = f"{recipe['hook']} {'💬' if royale else '⚔️'}"
+    title = f"{recipe.get('title_hook') or recipe['hook']} {'💬' if royale else '⚔️'}"
     real = [m["name"] for m in block["cast"] if not m.get("bot")]
     co = block.get("callout")
     if co:
@@ -747,7 +837,7 @@ class CrowdDuelPainter(bd.DuelPainter):
         if self.cards is None:
             self.cards = []
             for k, b in enumerate(sim.balls[:2]):
-                q = self.recipe["crowd"]["cast"][k].get("quote")
+                q = shown_quote(self.recipe["crowd"]["cast"][k].get("quote"))
                 self.cards.append(self._card(k, b, q) if q and b.get("pic") else None)
         # their trash talk at the start, then out of the way of the fight
         a = 1.0 if sim.t < CARD_S else max(0.0, 1.0 - (sim.t - CARD_S) / 0.4)

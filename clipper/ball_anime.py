@@ -338,7 +338,8 @@ class Cut:
                       for i in range(2)]
         self.quotes = []
         for i in range(2):
-            q = self.cast[i].get("quote")
+            from clipper import ball_crowd
+            q = ball_crowd.shown_quote(self.cast[i].get("quote"))
             self.quotes.append(_fit(f"“{q}”", 50, 640, "PermanentMarker-Regular.woff", fill=(255, 236, 120, 255),
                                     stroke=(0, 0, 0, 255), sw=6) if q else None)
         self.band = None
