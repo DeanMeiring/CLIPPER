@@ -302,6 +302,69 @@ def _saw() -> Image.Image:
     return im.resize((2 * r + 8, 2 * r + 8), Image.LANCZOS)
 
 
+def _shuriken(size: int = 104) -> Image.Image:
+    """A four-pointed throwing star (drawn at 3x, reduced)."""
+    k = 3
+    S = size * k
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    c, R, r = S / 2, S * 0.48, S * 0.13
+    pts = []
+    for j in range(8):
+        a = j * math.pi / 4 - math.pi / 2
+        rr = R if j % 2 == 0 else r
+        pts.append((c + rr * math.cos(a), c + rr * math.sin(a)))
+    d.polygon(pts, fill=(96, 102, 116, 255), outline=(22, 22, 28, 255), width=3 * k)
+    for j in range(4):                                  # a bright edge on each blade
+        a = j * math.pi / 2 - math.pi / 2
+        d.line([(c + r * 0.8 * math.cos(a + 0.6), c + r * 0.8 * math.sin(a + 0.6)),
+                (c + R * 0.9 * math.cos(a), c + R * 0.9 * math.sin(a))], fill=(200, 208, 222, 255), width=3 * k)
+    d.ellipse((c - r * 0.55, c - r * 0.55, c + r * 0.55, c + r * 0.55), fill=(22, 22, 28, 255))
+    return im.resize((size, size), Image.LANCZOS)
+
+
+def _kunai() -> Image.Image:
+    """A kunai pointing right, with its ring and a bit of chain."""
+    k, w, h = 3, 150, 52
+    im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    ink = (22, 22, 28, 255)
+    for j in range(3):                                  # chain links
+        x = 6 + j * 13
+        d.ellipse((x * k, 18 * k, (x + 15) * k, 34 * k), outline=(150, 156, 170, 255), width=3 * k)
+    d.ellipse((40 * k, 14 * k, 64 * k, 38 * k), outline=ink, width=5 * k)                       # ring
+    d.rounded_rectangle((60 * k, 20 * k, 96 * k, 32 * k), 3 * k, fill=(40, 34, 30, 255), outline=ink, width=2 * k)
+    for x in range(64, 94, 7):                                                                  # wrapped grip
+        d.line([(x * k, 20 * k), ((x + 4) * k, 32 * k)], fill=(170, 40, 46, 255), width=2 * k)
+    d.polygon([(94 * k, 26 * k), (108 * k, 8 * k), (148 * k, 26 * k), (108 * k, 44 * k)], fill=(96, 102, 116, 255),
+              outline=ink, width=3 * k)                                                         # blade
+    d.line([(100 * k, 26 * k), (144 * k, 26 * k)], fill=(200, 208, 222, 255), width=2 * k)
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def _crescent(size: int = 110, col=(120, 220, 255)) -> Image.Image:
+    """The energy slash: a glowing crescent, its open side to the left
+    (it flies to the right)."""
+    k = 3
+    S = size * k
+    m = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(m)
+    d.ellipse((S * 0.05, S * 0.05, S * 0.95, S * 0.95), fill=255)
+    d.ellipse((-S * 0.22, S * 0.0, S * 0.72, S * 1.0), fill=0)
+    m = m.resize((size, size), Image.LANCZOS)
+    glow = Image.new("RGBA", (size, size), col + (0,))
+    glow.putalpha(m.filter(ImageFilter.GaussianBlur(size * 0.06)))
+    core = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    core.putalpha(m.filter(ImageFilter.MinFilter(5)))
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.alpha_composite(glow)
+    edge = Image.new("RGBA", (size, size), col + (255,))
+    edge.putalpha(m)
+    out.alpha_composite(edge)
+    out.alpha_composite(core)
+    return out
+
+
 def _sticker(img: Image.Image, outline: int = 6) -> Image.Image:
     """A picture as a die-cut sticker: a white outline around it (the look
     the idea board used for the newer weapons)."""
@@ -323,6 +386,8 @@ EMOJI_ARMS = {"katana": "1f5e1", "hammer": "1f528", "boomerang": "1fa83", "axe":
               "lightning": "26a1", "magnet": "1f9f2", "banana": "1f34c", "glove": "1f94a", "pan": "1f373",
               "tornado": "1f32a", "blackhole": "1f300", "boulder": "1f5ff", "wand": "1fa84", "potion": "1f9ea"}
 HELD_ANGLE = {"katana": 135, "hammer": -135, "axe": -135, "wand": -45, "bow": -45, "magnet": 90, "glove": -90}
+# the anime weapons' emoji (the shuriken, kunai and slash are drawn)
+ANIME_EMOJI = {"clones": "1f977", "meteor": "2604", "dragon": "1f409", "spikes": "1faa8"}
 
 
 def _wobble(d, pts_fn, col, width, seed=0, passes=2, amp=0.012, n=150, closed=True):
@@ -384,6 +449,34 @@ WEAPONS2.update({
 CLASSICS = ("pistol", "shotgun", "minigun", "rocket", "knife", "shield")
 NEWER = tuple(k for k in WEAPONS2 if k not in CLASSICS)
 FLAME_S, SMALL_S, PAN_BLOCKS, GLOVE_HITS = 1.5, 3.5, 3, 2
+# Anime weapons (7 Nov: Dean picked them off the idea board for the anime-cut
+# comment fights). Only recipes with ``arsenal: 3`` (``anime_arsenal``) draw
+# them, and ``special`` gives the first ball down to its last heart one
+# special move; every other fight plays out exactly as before.
+ANIME_WEAPONS = {
+    "shuriken": ("stars", 1, 2),      # three stars in a fan: 2 hearts at most
+    "slashwave": ("crescent", 2, 2),  # an energy slash flies across the ring, through anything: 2 hearts
+    "clones": ("clones", 1, 1),       # two shadow clones chase the enemy: a heart each on touch
+    "meteor": ("meteor", 3, 1),       # a target follows the enemy, then a meteor lands: 3 close, 1 near
+    "kunai": ("hook", 1, 2),          # chain kunai: hooks them (1), yanks them in, a kick (1 more)
+    "dragon": ("dragon", 2, 1),       # a fire dragon flies after the enemy: 2 hearts
+    "spikes": ("spikes", 2, 2),       # earth spikes burst up in a line along the floor: 2 hearts
+}
+ALL_WEAPONS = {**WEAPONS2, **ANIME_WEAPONS}
+ANIME = tuple(ANIME_WEAPONS)
+ANIME_KINDS = tuple(v[0] for v in ANIME_WEAPONS.values())
+ANIME_THINGS = ("star", "crescent", "kunai", "clone", "meteor", "dragon", "spikeline")
+METEOR_FALL, SPECIAL_CHARGE, SPECIAL_DMG = 1.1, 0.7, 3
+
+
+def anime_arsenal(recipe: dict) -> dict:
+    """The anime fights' weapons: 3 classics, 4 newer ones and 4 anime ones
+    (own rng, so nothing else in the recipe changes), plus the special move."""
+    mix = random.Random(f"anime-weapons-{recipe['seed']}")
+    recipe["arsenal"] = 3
+    recipe["weapons"] = mix.sample(CLASSICS, 3) + mix.sample(NEWER, 4) + mix.sample(ANIME, 4)
+    recipe["special"] = True
+    return recipe
 
 
 # ---- the duel -----------------------------------------------------------------
@@ -400,7 +493,8 @@ C_CY, C_K = 1050, 1.08
 # ARENA_SHAPES, in the duel's own coordinates).
 ARENAS = ("neon", "notebook", "chalk", "ice", "boxing")
 ARENA_SHAPES = {"ice": (540, 1130, 420, 480, 170), "boxing": (540, 1130, 440, 440, 14)}
-NEW_FX = {"wave": 2.2, "bolt": 3.2, "flame": 2.6, "slashfx": 3.0, "fall": 1.5}      # how fast the newer effects fade
+NEW_FX = {"wave": 2.2, "bolt": 3.2, "flame": 2.6, "slashfx": 3.0, "fall": 1.5,      # how fast the newer effects fade
+          "aura": 1 / SPECIAL_CHARGE, "megabeam": 1.4, "poof": 2.4, "crater": 0.8}
 NEW_KINDS = ("dash", "slam", "throw", "bow", "chain", "flame", "magnet", "trap", "glove", "pan", "summon",
              "potion")
 D_BALL = 64
@@ -422,10 +516,13 @@ class DuelSim:
         self.keep = False            # tournament: a ball holding a weapon walks past the others
         self.ring = D_R              # tournament: sudden death closes the ring in
         self.max_drops = 4           # weapons waiting at once while rushing (battle royale: more)
-        self.new_arms = recipe.get("arsenal") == 2
+        self.new_arms = recipe.get("arsenal") in (2, 3)
         self.arms = WEAPONS2 if self.new_arms else WEAPONS
         if recipe.get("weapons"):
-            self.arms = {k: WEAPONS2[k] for k in recipe["weapons"] if k in WEAPONS2}
+            self.arms = {k: ALL_WEAPONS[k] for k in recipe["weapons"] if k in ALL_WEAPONS}
+        # the special move (anime fights): once, for the first ball down to one heart
+        self.special = bool(recipe.get("special")) and not players
+        self.special_used = False
         self.bombs: list = []
         self.things: list = []       # thrown / summoned things (the newer weapons)
         # the arena's walls: None = the ring (every older fight); else a rounded
@@ -569,6 +666,8 @@ class DuelSim:
         if self.new_arms:
             self._things(dt)
             self._status(dt)
+            if self.special:
+                self._special(dt)
         self._effects(dt)
         if self.t > SECONDS_CAP - END_HOLD - 0.1 and self.done_at is None:
             self.done_at = self.t        # nobody won in time: a bad seed
@@ -599,8 +698,8 @@ class DuelSim:
 
     def _move(self, dt):
         for b in self._movers():
-            if b["frozen"] > 0:
-                continue                 # frozen solid: it stays where it is
+            if b["frozen"] > 0 or b.get("powering"):
+                continue                 # frozen solid (or powering up a special): it stays where it is
             b["x"] += b["vx"] * dt
             b["y"] += b["vy"] * dt
             if self.shape:
@@ -778,6 +877,8 @@ class DuelSim:
             if b["frozen"] > 0:
                 b["frozen"] = max(0.0, b["frozen"] - dt)
                 continue                 # frozen: can't use its weapon either
+            if b.get("powering"):
+                continue                 # powering up the special move
             w = b["weapon"]
             if not w or not b["alive"]:
                 continue
@@ -819,6 +920,8 @@ class DuelSim:
                         self.sfx.append((self.t, "charge", 0))
             elif kind in NEW_KINDS:
                 self._use(b, o, w, kind, dmg, aim, dt)
+            elif kind in ANIME_KINDS:
+                self._use_anime(b, o, w, kind, dmg, aim, dt)
             elif w == "minigun" and b["burst"] > 0:
                 b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 4)
                 b["burst"] -= dt
@@ -1078,6 +1181,239 @@ class DuelSim:
         sp = 1.9 * D_SPEED
         t["vx"], t["vy"] = sp * math.cos(ang), sp * math.sin(ang)
 
+    # -- the anime weapons (ANIME_WEAPONS, arsenal 3)
+    def _use_anime(self, b, o, w, kind, dmg, aim, dt):
+        b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 7)
+        a = b["wang"]
+        x, y = b["x"] + math.cos(a) * (D_BALL + 40), b["y"] + math.sin(a) * (D_BALL + 40)
+        if kind == "clones":
+            if b["held"] > 0.35:
+                for s in (-1, 1):                         # one each side, then they chase
+                    ca = aim + s * 1.9
+                    cx, cy = b["x"] + math.cos(ca) * 150, b["y"] + math.sin(ca) * 150
+                    if self._outside(cx, cy, -D_BALL):
+                        cx, cy = b["x"], b["y"]
+                    self.things.append({"k": "clone", "x": cx, "y": cy, "a": ca, "owner": b, "t0": self.t,
+                                        "dmg": dmg})
+                    self.effects.append({"k": "poof", "x": cx, "y": cy, "life": 1.0})
+                self.sfx.append((self.t, "clone", 0))
+                b["weapon"] = None
+            return
+        if kind == "meteor":
+            if b["held"] > 0.35:
+                self.things.append({"k": "meteor", "x": o["x"], "y": o["y"], "target": o, "owner": b,
+                                    "t0": self.t, "dmg": dmg})
+                self.sfx.append((self.t, "whistle", 0))
+                b["weapon"] = None
+            return
+        if kind == "dragon":
+            if b["held"] > 0.45:
+                self.things.append({"k": "dragon", "x": x, "y": y, "a": a, "owner": b, "t0": self.t,
+                                    "trail": [(x, y)] * 18, "dmg": dmg})
+                self.sfx.append((self.t, "roar", 0))
+                b["kick"] = 1.0
+                b["weapon"] = None
+            return
+        # aimed: stars, the slash, the kunai, the spikes
+        if b["held"] > 0.4 and (abs(_ang_diff(aim, a)) < 0.2 or b["held"] > 1.5):
+            if kind == "stars":
+                grp = {"hits": 0}
+                for s in (-1, 0, 1):
+                    sa = a + s * 0.17
+                    self.things.append({"k": "star", "x": x, "y": y, "vx": 1300 * math.cos(sa),
+                                        "vy": 1300 * math.sin(sa), "owner": b, "t0": self.t, "spin": 0.0,
+                                        "grp": grp})
+                self.sfx.append((self.t, "stars", 0))
+            elif kind == "crescent":
+                self.things.append({"k": "crescent", "x": x, "y": y, "vx": 1150 * math.cos(a),
+                                    "vy": 1150 * math.sin(a), "a": a, "owner": b, "t0": self.t, "hit": set(),
+                                    "dmg": dmg})
+                self.sfx.append((self.t, "slashwave", 0))
+                self.effects.append({"k": "slashfx", "x": x, "y": y, "ang": a, "life": 1.0})
+            elif kind == "hook":
+                self.things.append({"k": "kunai", "x": x, "y": y, "vx": 1500 * math.cos(a),
+                                    "vy": 1500 * math.sin(a), "a": a, "owner": b, "t0": self.t, "target": None})
+                self.sfx.append((self.t, "chain", 0))
+            elif kind == "spikes":
+                self.things.append({"k": "spikeline", "x": x, "y": y, "a": a, "owner": b, "t0": self.t,
+                                    "pts": [], "hit": set(), "dmg": dmg, "done": None})
+                self.sfx.append((self.t, "spikes", 0))
+                self.shake = max(self.shake, 0.3)
+            b["kick"] = 1.0
+            b["weapon"] = None                            # thrown / cast: it's gone
+
+    def _special(self, dt):
+        """The special move: the first ball down to its last heart stops,
+        powers up for SPECIAL_CHARGE and fires a giant beam (SPECIAL_DMG)."""
+        for b in self.balls:
+            if not b["alive"]:
+                b["powering"] = 0.0
+                continue
+            if not self.special_used and b["hp"] == 1:
+                self.special_used = True
+                b["powering"] = SPECIAL_CHARGE
+                b["frozen"] = 0.0
+                self.sfx.append((self.t, "special", b["i"]))
+                self.effects.append({"k": "aura", "ball": b, "x": b["x"], "y": b["y"], "life": 1.0,
+                                     "col": b["col"]})
+            if b.get("powering", 0) > 0:
+                o = self.other(b)
+                aim = math.atan2(o["y"] - b["y"], o["x"] - b["x"])
+                b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 8)
+                b["powering"] = max(0.0, b["powering"] - dt)
+                if b["powering"] <= 0:
+                    self._megabeam(b, aim)
+                    sp = self._spd(b)
+                    b["vx"], b["vy"] = sp * math.cos(aim + math.pi), sp * math.sin(aim + math.pi)
+
+    def _megabeam(self, b, a):
+        x0, y0 = b["x"] + math.cos(a) * (D_BALL + 20), b["y"] + math.sin(a) * (D_BALL + 20)
+        dx, dy = math.cos(a), math.sin(a)
+        L = 0.0
+        while L < 2400 and not self._outside(x0 + dx * L, y0 + dy * L):
+            L += 8
+        self.effects.append({"k": "megabeam", "x": x0, "y": y0, "x1": x0 + dx * L, "y1": y0 + dy * L, "life": 1.0,
+                             "col": b["col"]})
+        self.sfx.append((self.t, "megabeam", b["i"]))
+        self.shake = max(self.shake, 0.8)
+        b["kick"] = 1.0
+        for o in self._boom_targets(b):
+            if not o["alive"]:
+                continue
+            t = max(0.0, min(L, (o["x"] - x0) * dx + (o["y"] - y0) * dy))
+            if math.hypot(o["x"] - (x0 + dx * t), o["y"] - (y0 + dy * t)) < D_BALL + 40:
+                if self.damage(o, SPECIAL_DMG, x0 + dx * t, y0 + dy * t, b) and o["alive"]:
+                    self._fling(o, a)
+
+    def _anime_thing(self, m, dt) -> bool:
+        """One frame of an anime weapon's thing; True when it's gone."""
+        k = m["k"]
+        age = self.t - m["t0"]
+        own = m["owner"]
+        foes = [t for t in self._boom_targets(own) if t["alive"]]
+        if k in ("star", "crescent", "kunai"):
+            if k == "kunai" and m["target"] is not None:
+                t = m["target"]                           # hooked: reel them in, then a kick
+                m["x"], m["y"] = t["x"], t["y"]
+                if not t["alive"] or age > 1.4:
+                    return True
+                want = math.atan2(own["y"] - t["y"], own["x"] - t["x"])
+                t["knock"] = 0.15
+                sp = self._spd(t)
+                t["vx"], t["vy"] = sp * math.cos(want), sp * math.sin(want)
+                if math.hypot(own["x"] - t["x"], own["y"] - t["y"]) < 2 * D_BALL + 30:
+                    if self.damage(t, 1, (own["x"] + t["x"]) / 2, (own["y"] + t["y"]) / 2, own) and t["alive"]:
+                        self._fling(t, want + math.pi)
+                    self.sfx.append((self.t, "punch", 0))
+                    own["kick"] = 1.0
+                    return True
+                return False
+            m["x"] += m["vx"] * dt
+            m["y"] += m["vy"] * dt
+            m["spin"] = m.get("spin", 0.0) + dt * 24
+            for t in foes:
+                dd = math.hypot(t["x"] - m["x"], t["y"] - m["y"])
+                if k == "star" and dd < D_BALL + 22:
+                    if m["grp"]["hits"] < 2 and self.damage(t, 1, m["x"], m["y"], own):
+                        m["grp"]["hits"] += 1
+                    return True
+                if k == "crescent" and t["i"] not in m["hit"] and dd < D_BALL + 70:
+                    m["hit"].add(t["i"])
+                    self.damage(t, m["dmg"], m["x"], m["y"], own)
+                if k == "kunai" and dd < D_BALL + 24:
+                    if self.damage(t, 1, m["x"], m["y"], own) and t["alive"]:
+                        m["target"], m["t0"] = t, self.t
+                        self.sfx.append((self.t, "yoink", 0))
+                        self.effects.append({"k": "num", "x": t["x"], "y": t["y"] - 120, "text": "YOINK!",
+                                             "life": 1.0, "col": own["col"]})
+                        return False
+                    return True
+            if k == "kunai" and age > 0.75:
+                return True                               # missed: the chain pulls it back
+            if self._outside(m["x"], m["y"], 30 if k == "crescent" else 0):
+                self.effects.append({"k": "spark", "x": m["x"], "y": m["y"], "life": 0.6, "col": (230, 240, 255)})
+                return True
+            return False
+        if k == "clone":
+            if age > 4.0:
+                self.effects.append({"k": "poof", "x": m["x"], "y": m["y"], "life": 1.0})
+                return True
+            if not foes:
+                return False
+            t = min(foes, key=lambda t: math.hypot(t["x"] - m["x"], t["y"] - m["y"]))
+            want = math.atan2(t["y"] - m["y"], t["x"] - m["x"])
+            m["a"] += _ang_diff(want, m["a"]) * min(1, dt * (1.5 if age < 0.3 else 3.2))
+            m["x"] += 720 * math.cos(m["a"]) * dt
+            m["y"] += 720 * math.sin(m["a"]) * dt
+            if self._outside(m["x"], m["y"], -D_BALL):
+                m["a"] = math.atan2(D_CY - m["y"], D_CX - m["x"])
+            if math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < 2 * D_BALL - 8:
+                self.damage(t, m["dmg"], (t["x"] + m["x"]) / 2, (t["y"] + m["y"]) / 2, own)
+                self.effects.append({"k": "poof", "x": m["x"], "y": m["y"], "life": 1.0})
+                self.sfx.append((self.t, "poof", 0))
+                return True
+            return False
+        if k == "meteor":
+            t = m["target"]
+            if age < METEOR_FALL - 0.25 and t["alive"]:  # the target follows them, a step behind
+                m["x"] += (t["x"] - m["x"]) * min(1, dt * 5)
+                m["y"] += (t["y"] - m["y"]) * min(1, dt * 5)
+            if age >= METEOR_FALL:
+                self.sfx.append((self.t, "boom", 0))
+                self.shake = max(self.shake, 0.7)
+                self.effects.append({"k": "boom", "x": m["x"], "y": m["y"], "life": 1.0, "col": (255, 150, 50)})
+                self.effects.append({"k": "crater", "x": m["x"], "y": m["y"], "life": 1.0})
+                for o in foes:
+                    dd = math.hypot(o["x"] - m["x"], o["y"] - m["y"])
+                    if dd < 150:
+                        self.damage(o, m["dmg"], m["x"], m["y"], own)
+                    elif dd < 270:
+                        self.damage(o, 1, m["x"], m["y"], own)
+                return True
+            return False
+        if k == "dragon":
+            want = m["a"]
+            if foes:
+                t = min(foes, key=lambda t: math.hypot(t["x"] - m["x"], t["y"] - m["y"]))
+                want = math.atan2(t["y"] - m["y"], t["x"] - m["x"])
+            m["a"] += _ang_diff(want, m["a"]) * min(1, dt * 2.6)
+            m["x"] += 820 * math.cos(m["a"]) * dt
+            m["y"] += 820 * math.sin(m["a"]) * dt
+            m["trail"] = [(m["x"], m["y"])] + m["trail"][:-1]
+            for t in foes:
+                if math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + 40:
+                    self.damage(t, m["dmg"], m["x"], m["y"], own)
+                    self.sfx.append((self.t, "fire", 0))
+                    for _ in range(14):
+                        fa = self.rng.uniform(0, 6.28)
+                        fs = self.rng.uniform(200, 520)
+                        self.effects.append({"k": "flame", "x": m["x"], "y": m["y"], "vx": fs * math.cos(fa),
+                                             "vy": fs * math.sin(fa), "life": 1.0, "r": self.rng.uniform(14, 26)})
+                    return True
+            if age > 3.2:
+                self.effects.append({"k": "poof", "x": m["x"], "y": m["y"], "life": 1.0})
+                return True
+            return False
+        if k == "spikeline":
+            if m["done"] is None:
+                n = int(age / 0.045) + 1
+                while len(m["pts"]) < n:
+                    j = len(m["pts"])
+                    px = m["x"] + math.cos(m["a"]) * (30 + j * 62)
+                    py = m["y"] + math.sin(m["a"]) * (30 + j * 62)
+                    if self._outside(px, py, -40) or j >= 18:
+                        m["done"] = self.t
+                        break
+                    m["pts"].append((px, py, self.t))
+                    for t in foes:
+                        if t["i"] not in m["hit"] and math.hypot(t["x"] - px, t["y"] - py) < D_BALL + 44:
+                            m["hit"].add(t["i"])
+                            if self.damage(t, m["dmg"], px, py, own) and t["alive"]:
+                                side = _ang_diff(math.atan2(t["y"] - py, t["x"] - px), m["a"]) > 0
+                                self._fling(t, m["a"] + (1.4 if side else -1.4))
+            return m["done"] is not None and self.t - m["done"] > 0.7
+        return True
+
     def _things(self, dt):
         for m in list(self.things):
             k = m["k"]
@@ -1151,6 +1487,8 @@ class DuelSim:
                         m["cool"][t["i"]] = self.t + 0.5
                         self.damage(t, 1, m["x"], m["y"], m["owner"])
                 gone = age > m["life"]
+            elif k in ANIME_THINGS:
+                gone = self._anime_thing(m, dt)
             if gone:
                 self.things.remove(m)
 
@@ -1200,6 +1538,8 @@ class DuelSim:
             elif k in ("ring", "ice"):
                 e["x"], e["y"] = e["ball"]["x"], e["ball"]["y"]
                 e["life"] -= dt * (1.2 if k == "ring" else 0.0)
+            elif k == "aura":
+                e["x"], e["y"] = e["ball"]["x"], e["ball"]["y"]
             elif k == "shard":
                 e["x"] += e["vx"] * dt
                 e["y"] += e["vy"] * dt
@@ -1288,7 +1628,7 @@ class DuelPainter:
         self.knife = _emoji("1f52a", 118)
         self.shield = _emoji("1f6e1", 118)
         self.icons = {**self.guns, "knife": self.knife, "shield": self.shield}
-        if recipe.get("arsenal") == 2:
+        if recipe.get("arsenal") in (2, 3):
             self.guns.update(laser=_gun("laser"), freeze=_gun("freeze"), flamethrower=_gun("flamethrower"))
             self.saw = _saw()
             self.bomb = _emoji("1f4a3", 104)
@@ -1303,6 +1643,18 @@ class DuelPainter:
             self.twister = _emoji("1f32a", 170)
             self.peel = _emoji("1f34c", 76)
             self.spin_pics = {w: _emoji(EMOJI_ARMS[w], 92) for w in ("boomerang", "axe")}
+        if recipe.get("arsenal") == 3:                    # the anime weapons
+            self.icons["shuriken"] = _sticker(_shuriken(96), 4)
+            self.icons["kunai"] = _sticker(_kunai(), 4)
+            self.icons["slashwave"] = _sticker(_crescent(100), 4)
+            for w, code in ANIME_EMOJI.items():
+                self.icons[w] = _sticker(_emoji(code, 100), 5)
+            self.star_pic = _shuriken(60)
+            self.kunai_pic = _kunai()
+            self.crescent_pic = _crescent(190)
+            self.dragon_head = _emoji("1f409", 120)
+            self.comet = _emoji("2604", 170)
+            self.rock = _emoji("1faa8", 60)
         self.rocket = Image.new("RGBA", (90, 40), (0, 0, 0, 0))          # a rocket in flight
         rd = ImageDraw.Draw(self.rocket)
         rd.rounded_rectangle((4, 10, 70, 30), 8, fill=(220, 220, 228, 255), outline=(22, 22, 28, 255), width=3)
@@ -1811,6 +2163,101 @@ class DuelPainter:
             im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
             c = sl(40) * grow
             d.ellipse((x - c, y - c, x + c, y + c), fill=(0, 0, 0, 255))
+        elif k in ANIME_THINGS:
+            self.anime_thing(im, d, sim, m, x, y, age)
+
+    def anime_thing(self, im, d, sim, m, x, y, age):
+        """The anime weapons' things in flight."""
+        P, sl, sw = self.P, self.sl, self.sw
+        k = m["k"]
+        if k == "star":
+            g = self.img("star-pic", self.star_pic).rotate(-math.degrees(m["spin"]) % 360, resample=Image.BICUBIC)
+            a = math.atan2(m["vy"], m["vx"])
+            tx, ty = P(m["x"] - math.cos(a) * 70, m["y"] - math.sin(a) * 70)
+            d.line([(tx, ty), (x, y)], fill=(220, 230, 255, 110), width=sw(10))
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "crescent":
+            g = self.img("crescent", self.crescent_pic).rotate(-math.degrees(m["a"]), resample=Image.BICUBIC,
+                                                               expand=True)
+            a = m["a"]
+            for j in (3, 2, 1):                      # an after-image behind it
+                gx, gy = P(m["x"] - math.cos(a) * 46 * j, m["y"] - math.sin(a) * 46 * j)
+                ghost = g.copy()
+                ghost.putalpha(ghost.getchannel("A").point(lambda v, f=0.5 - 0.13 * j: int(v * f)))
+                im.alpha_composite(ghost, (int(gx - g.width / 2), int(gy - g.height / 2)))
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "kunai":
+            ow = m["owner"]
+            hx, hy = P(ow["x"] + math.cos(ow["wang"]) * (D_BALL + 10), ow["y"] + math.sin(ow["wang"]) * (D_BALL + 10))
+            a = math.atan2(m["y"] - ow["y"], m["x"] - ow["x"])
+            n = max(2, int(math.hypot(x - hx, y - hy) / sl(22)))
+            for j in range(n):                       # the chain, link by link
+                cx, cy = hx + (x - hx) * j / n, hy + (y - hy) * j / n
+                r = sl(9)
+                d.ellipse((cx - r, cy - r * 0.6, cx + r, cy + r * 0.6), outline=(160, 166, 180, 255), width=sw(4))
+            if m["target"] is None:
+                g = self.img("kunai-pic", self.kunai_pic).rotate(-math.degrees(a), resample=Image.BICUBIC, expand=True)
+                im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "clone":
+            ow = m["owner"]
+            sp = self.ball_sprite(ow, m["a"], "angry", False, False, 0)
+            ghost = sp.copy()
+            ghost.putalpha(ghost.getchannel("A").point(lambda v: int(v * 0.7)))
+            for j in (2, 1):                          # dark smoke behind it
+                a = m["a"]
+                sx, sy = P(m["x"] - math.cos(a) * 34 * j, m["y"] - math.sin(a) * 34 * j)
+                r = sl(D_BALL * (1 - 0.2 * j))
+                d.ellipse((sx - r, sy - r, sx + r, sy + r), fill=(30, 20, 50, 60))
+            im.alpha_composite(ghost, (int(x - ghost.width / 2), int(y - ghost.height / 2)))
+        elif k == "meteor":
+            f = min(1.0, age / METEOR_FALL)
+            r = sl(150) * (0.55 + 0.45 * f)
+            pulse = 0.5 + 0.5 * math.sin(age * 26)
+            q = int(r * 1.2) + 8                      # its own layer, so the zone stays see-through
+            lay = Image.new("RGBA", (2 * q, 2 * q), (0, 0, 0, 0))
+            ld = ImageDraw.Draw(lay)
+            ld.ellipse((q - r, q - r, q + r, q + r), fill=(255, 50, 40, int(40 + 50 * f)),
+                       outline=(255, 70, 60, int(150 + 100 * pulse)), width=sw(6))
+            for j in range(4):                        # the target's cross-hair ticks
+                a = j * math.pi / 2 + age * 2
+                ld.line([(q + math.cos(a) * r * 0.55, q + math.sin(a) * r * 0.55),
+                         (q + math.cos(a) * r * 1.15, q + math.sin(a) * r * 1.15)], fill=(255, 90, 80, 230),
+                        width=sw(6))
+            im.alpha_composite(lay, (int(x - q), int(y - q)))
+            fall = (age - (METEOR_FALL - 0.5)) / 0.5
+            if fall > 0:                              # it comes down from the top right
+                mx, my = x + sl(520) * (1 - fall), y - sl(1100) * (1 - fall)
+                for j in range(1, 6):
+                    tx, ty = mx + sl(60) * j, my - sl(125) * j
+                    rr = sl(44 - 6 * j)
+                    d.ellipse((tx - rr, ty - rr, tx + rr, ty + rr), fill=(255, 150 - 18 * j, 40, 180 - 30 * j))
+                g = self.img("comet", self.comet)
+                im.alpha_composite(g, (int(mx - g.width * 0.62), int(my - g.height * 0.38)))
+        elif k == "dragon":
+            tr = m["trail"]
+            for j in range(len(tr) - 1, -1, -1):      # the body, thinning to the tail
+                tx, ty = P(*tr[j])
+                r = sl(34 * (1 - j / len(tr) * 0.75))
+                col = (230, 60 + int(8 * j), 30) if j % 2 else (255, 160 - 4 * j, 40)
+                d.ellipse((tx - r, ty - r, tx + r, ty + r), fill=col + (235,))
+            g = self.img("dragon-head", self.dragon_head)
+            if math.cos(m["a"]) < 0:
+                g = g.transpose(Image.FLIP_LEFT_RIGHT)
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "spikeline":
+            for px, py, t0 in m["pts"]:
+                up = min(1.0, (sim.t - t0) / 0.08)
+                if m["done"] is not None:
+                    up *= max(0.0, 1 - (sim.t - m["done"]) / 0.7)
+                if up <= 0:
+                    continue
+                X, Y = P(px, py)
+                hgt, wid = sl(96) * up, sl(30)
+                d.ellipse((X - wid * 1.4, Y + sl(6), X + wid * 1.4, Y + sl(24)), fill=(60, 40, 30, 140))
+                d.polygon([(X - wid, Y + sl(14)), (X - wid * 0.15, Y + sl(14) - hgt), (X + wid, Y + sl(14))],
+                          fill=(140, 110, 86, 255), outline=(50, 36, 26, 255))
+                d.line([(X - wid * 0.15, Y + sl(14) - hgt), (X + wid * 0.4, Y + sl(12))], fill=(186, 160, 134, 255),
+                       width=sw(3))
 
     # -- the arenas (Dean picked notebook, chalkboard, ice rink, boxing ring)
     def arena_bg(self) -> Image.Image:
@@ -1907,6 +2354,10 @@ class DuelPainter:
             img, dist, rot = self.saw, D_BALL + 74, -math.degrees(a) * 4
         elif w == "bomb":
             img, dist, rot = self.bomb, D_BALL + 30, -math.degrees(a) * 0.3
+        elif w in ANIME_WEAPONS:
+            img = self.icons[w]
+            rot = -math.degrees(a) * 3 if w == "shuriken" else -math.degrees(a) if w in ("kunai", "slashwave") else 0
+            dist = D_BALL + img.width * 0.38 - b["kick"] * 14
         elif w in EMOJI_ARMS:
             img = self.icons[w]
             base = HELD_ANGLE.get(w)
@@ -2040,6 +2491,44 @@ class DuelPainter:
             elif k == "shard":
                 r = sl(e["r"] * L + 2)
                 d.regular_polygon((ex, ey, r), 3, rotation=(1 - L) * 400, fill=e["col"] + (int(255 * L),))
+            elif k == "aura":                           # powering up the special move
+                b = e["ball"]
+                c = tuple(b["col"])
+                for j in range(3):
+                    f = ((sim.t * 2.4 + j / 3) % 1)
+                    r = sl(D_BALL + 20 + f * 120)
+                    d.ellipse((ex - r, ey - r, ex + r, ey + r), outline=c + (int(220 * (1 - f)),), width=sw(8))
+                rng = random.Random(int(sim.t * 30))
+                for j in range(16):
+                    a = rng.uniform(0, 6.28)
+                    r0, r1 = sl(D_BALL + 10), sl(D_BALL + 40 + rng.uniform(40, 160) * (1 - L * 0.5))
+                    d.line([(ex + math.cos(a) * r0, ey + math.sin(a) * r0),
+                            (ex + math.cos(a) * r1, ey + math.sin(a) * r1)], fill=(255, 240, 160, 200), width=sw(4))
+            elif k == "megabeam":
+                x1, y1 = P(e["x1"], e["y1"])
+                c = tuple(e["col"])
+                wk = 0.4 + 0.6 * L
+                for wd, col in ((180, c + (int(90 * L),)), (110, c + (int(180 * L),)),
+                                (56, (255, 250, 220, int(240 * L))), (20, (255, 255, 255, int(255 * L)))):
+                    d.line([(ex, ey), (x1, y1)], fill=col, width=sw(max(2, int(wd * wk))))
+                r = sl(110 * wk)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=(255, 255, 255, int(220 * L)))
+            elif k == "poof":
+                rng = random.Random(int(e["x"] * 7 + e["y"]))
+                for j in range(7):
+                    a = rng.uniform(0, 6.28)
+                    dd = sl(20 + (1 - L) * 70)
+                    r = sl(26 + (1 - L) * 26)
+                    px, py = ex + math.cos(a) * dd, ey + math.sin(a) * dd
+                    d.ellipse((px - r, py - r, px + r, py + r), fill=(200, 196, 214, int(190 * L)))
+            elif k == "crater":
+                r = sl(130)
+                d.ellipse((ex - r, ey - r * 0.75, ex + r, ey + r * 0.75), fill=(40, 26, 20, int(150 * L)))
+                for j in range(6):
+                    a = j * 1.047 + 0.4
+                    g = self.img("rock", self.rock)
+                    im.alpha_composite(g, (int(ex + math.cos(a) * r * 0.9 - g.width / 2),
+                                           int(ey + math.sin(a) * r * 0.7 - g.height / 2 - sl(30) * (1 - L))))
             elif k == "drop":
                 img = self.icons.get(e["w"])
                 if img is not None:
@@ -3360,6 +3849,65 @@ def _sound(kind: str, seed: int = 0) -> np.ndarray:
         f = 900 * np.exp(-t * 7) + 160 + 40 * seed
         tone = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 9)
         return (tone * 0.5 + _lp(_noise(len(t), seed), 6) * np.exp(-t * 25) * 0.25) * 0.8
+    if kind == "stars":               # shuriken: three quick whips
+        t = tt(0.4)
+        out = np.zeros(len(t))
+        for j in range(3):
+            i = int(j * 0.06 * SR)
+            n = len(t) - i
+            tj = t[:n]
+            out[i:] += _lp(_noise(n, seed + j), 1) * np.sin(np.pi * np.minimum(1, tj / 0.12)) ** 2 * (tj < 0.12)
+        return out * 0.45
+    if kind == "slashwave":           # the energy slash: a bright swish + a ring
+        t = tt(0.6)
+        sw_ = _lp(_noise(len(t), seed), 2) * np.sin(np.pi * np.minimum(1, t / 0.25)) ** 2 * (t < 0.25)
+        ring = np.sin(2 * np.pi * np.cumsum(1800 + 1400 * np.exp(-t * 8)) / SR) * np.exp(-t * 6)
+        return (sw_ * 0.6 + ring * 0.25) * 0.8
+    if kind in ("clone", "poof"):     # a puff of smoke
+        t = tt(0.35 if kind == "clone" else 0.25)
+        puff = _lp(_noise(len(t), seed), 10) * 4 * np.minimum(1, t / 0.01) * np.exp(-t * 12)
+        pop = np.sin(2 * np.pi * np.cumsum(500 * np.exp(-t * 20) + 120) / SR) * np.exp(-t * 25)
+        return np.tanh(puff + pop * 0.6) * (0.45 if kind == "clone" else 0.35)
+    if kind == "whistle":             # the meteor coming down: a falling whistle, METEOR_FALL long
+        t = tt(METEOR_FALL)
+        f = 2400 * np.exp(-t * 1.6) + 300
+        return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.minimum(1, t / 0.1) * 0.16
+    if kind == "chain":               # the kunai flying out: rattling links
+        t = tt(0.45)
+        clicks = (np.random.default_rng(seed + 3).random(len(t)) > 0.996) * 1.0
+        rat = _lp(clicks, 1) * 8 * np.exp(-t * 3)
+        return sum(np.sin(2 * np.pi * f * t) * rat for f in (2100, 3300)) * 0.12
+    if kind == "yoink":               # hooked: a quick rising zip
+        t = tt(0.3)
+        f = 300 + 2200 * t / 0.3
+        return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 6) * 0.3
+    if kind == "roar":                # the fire dragon: a growl through fire
+        t = tt(0.9)
+        f = 70 + 30 * np.sin(2 * np.pi * 9 * t)
+        growl = np.sign(np.sin(2 * np.pi * np.cumsum(f) / SR)) * 0.35
+        fire = _lp(_noise(len(t), seed), 6) * 2
+        return np.tanh((growl + fire) * np.minimum(1, t / 0.05) * np.exp(-t * 2.4) * 1.5) * 0.55
+    if kind == "spikes":              # earth spikes: a run of crunches
+        t = tt(0.9)
+        out = np.zeros(len(t))
+        for j in range(12):
+            i = int(j * 0.045 * SR)
+            n = min(len(t) - i, int(0.12 * SR))
+            tj = t[:n]
+            out[i:i + n] += _lp(_noise(n, seed + j), 4) * np.exp(-tj * 40)
+        return np.tanh(out * 2.2) * 0.6
+    if kind == "special":             # powering up: a rising roar, SPECIAL_CHARGE long
+        t = tt(SPECIAL_CHARGE)
+        f = 90 + 700 * (t / SPECIAL_CHARGE) ** 2
+        hum = np.sin(2 * np.pi * np.cumsum(f) / SR) + 0.5 * np.sin(2 * np.pi * np.cumsum(f * 1.5) / SR)
+        air = _lp(_noise(len(t), seed), 3) * (t / SPECIAL_CHARGE)
+        return np.tanh((hum * 0.5 + air) * np.minimum(1, t / 0.05) * 1.4) * 0.4
+    if kind == "megabeam":            # the special move's beam
+        t = tt(1.3)
+        body = np.sin(2 * np.pi * np.cumsum(55 + 40 * np.exp(-t * 4)) / SR)
+        zap = np.sin(2 * np.pi * np.cumsum(1600 * np.exp(-t * 5) + 200) / SR) * 0.5
+        noise = _lp(_noise(len(t), seed), 5) * 3
+        return np.tanh((body + zap + noise) * np.exp(-t * 2.2) * 2) * 0.9
     if kind == "steal":               # lines stolen (race)
         t = tt(0.2)
         return _lp(_noise(len(t), seed), 4) * np.exp(-t * 22) * 0.35

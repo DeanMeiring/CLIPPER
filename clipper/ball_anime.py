@@ -403,6 +403,29 @@ class Cut:
         return self.band
 
 
+    def special_band(self, i):
+        """The special move's cut-in: the one powering up, and the words."""
+        if not hasattr(self, "_sp"):
+            self._sp = {}
+        if i not in self._sp:
+            band = Image.new("RGBA", (W, 300), (0, 0, 0, 0))
+            d = ImageDraw.Draw(band)
+            c = self.cols[i]
+            d.polygon([(0, 0), (W, 30), (W, 300), (0, 270)], fill=tuple(int(v * 0.35) for v in c) + (240,))
+            rng = random.Random(11 + i)
+            for _ in range(46):
+                y, x = rng.uniform(20, 280), rng.uniform(-200, W)
+                d.line([(x, y), (x + rng.uniform(160, 460), y - 20)], fill=(255, 240, 170, rng.randint(50, 150)),
+                       width=rng.randint(3, 8))
+            d.line([(0, 0), (W, 30)], fill=(255, 214, 40, 255), width=10)
+            d.line([(0, 270), (W, 300)], fill=(255, 214, 40, 255), width=10)
+            band.alpha_composite(_disc(self.pics[i], c, 250, 8), (70, 25))
+            words = _fit("SPECIAL MOVE!", 120, W - 420, fill=(255, 214, 40, 255), stroke=(0, 0, 0, 255), sw=9)
+            band.alpha_composite(words, (W - 60 - words.width, 150 - words.height // 2))
+            self._sp[i] = band
+        return self._sp[i]
+
+
 def _painted_bg(bg, sim):
     """The arena as the duel's painter left it on this frame: its white K.O.
     flash put on and taken back out (``_unflash``), and its screen shake --
@@ -433,6 +456,7 @@ def frames(recipe, sim_cls, painter_cls):
     """Yields (image, fight time or None) for every output frame; the sim
     and the marks (output seconds of vs / fight / slow / ko) are on the
     returned generator's ``state`` dict once it's done."""
+    from clipper import ball_duel as bd
     probe = sim_cls(recipe)
     last_heart = None
     while not probe.finished:
@@ -470,6 +494,7 @@ def frames(recipe, sim_cls, painter_cls):
     focus = None
     ko_done = False
     slow_start = None
+    special = None                       # (fight second, ball) of the special move
     while not sim.finished:
         sim.step()
         if arena:
@@ -478,6 +503,10 @@ def frames(recipe, sim_cls, painter_cls):
         new = sim.sfx[seen:]
         seen = len(sim.sfx)
         ts = sim.t
+        for (st, kind, v) in new:
+            if kind == "special":
+                special = (st, v)
+        powering = special is not None and ts - special[0] < bd.SPECIAL_CHARGE + 0.05
         in_slow = t_ko is not None and sim.done_at is None and ts >= t_ko - SLOW_LEAD
         after = sim.done_at is not None and ts - sim.done_at <= AFTER_SLOW
         pts = [painter.P(b["x"], b["y"]) for b in sim.balls]
@@ -510,6 +539,8 @@ def frames(recipe, sim_cls, painter_cls):
             reps = SLOW_EVERY
         elif after:
             reps = 2
+        elif powering:
+            reps = 2                       # the special move powers up at half speed
         else:
             reps = 1 + (HITSTOP if any(kind == "hit" and v >= 2 for (_t, kind, v) in new) else 0)
         for k in range(reps):
@@ -530,6 +561,13 @@ def frames(recipe, sim_cls, painter_cls):
                 else:
                     fr = _dim_edges(fr, 0.65 * (1 - (ts - sim.done_at) / AFTER_SLOW)).convert("RGBA")
                     _paste(fr, cut.ko, W / 2, H * 0.30, rot=-7, alpha=1 - _ease((ts - sim.done_at) / AFTER_SLOW))
+            elif powering:
+                age = ts - special[0]
+                c = cut.cols[special[1]]
+                fr = _dim_edges(fr, 0.55, tuple(int(v * 0.5) for v in c)).convert("RGBA")
+                slide = (1 - _ease(age / 0.12)) * -W if age < 0.55 else _ease((age - 0.55) / 0.2) * W
+                fr.alpha_composite(cut.special_band(special[1]), (int(slide), int(H * 0.16)))
+                fr = _shake(fr.convert("RGB"), 6, n[0])
             else:
                 if k > 0:                                  # hit-stop: hold, and shake
                     fr = _shake(fr, 22 - 4 * k, n[0])
@@ -627,6 +665,8 @@ def mix(sim, tmap, marks, t_ko, last_heart, seed=0) -> np.ndarray:
             w = cache[(kind, k % 3)] = bd._sound(kind, k % 3).astype(np.float32)
         if t_ko is not None and t_ko - SLOW_LEAD <= t < t_ko:       # slowed: deeper
             w = np.interp(np.arange(0, len(w), 1 / 1.7), np.arange(len(w)), w).astype(np.float32)
+        elif kind == "special":                                     # its power-up plays at half speed
+            w = np.interp(np.arange(0, len(w), 1 / 2.0), np.arange(len(w)), w).astype(np.float32)
         put(w, at(t), 0.8)
     put(_sweep(rng, 0.32, 300, 6000, 0.45), 0.0)
     put(_boom(rng, 1.0, 0.8), marks["vs"])
