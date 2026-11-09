@@ -1378,6 +1378,9 @@ class Voice:
         return (bed / rms * 0.06 * fade).astype(np.float32)
 
 
+_MEME_SOUNDS = ("demon_meow", "quack", "huh", "bruh", "goat", "bonk", "boing")   # = ball_sounds.MEMES
+
+
 def mix_audio(sim: Sim) -> np.ndarray:
     v = Voice(sim.recipe)
     n = int(SR * (sim.t + 1))
@@ -1417,6 +1420,13 @@ def mix_audio(sim: Sim) -> np.ndarray:
             return _normalise(fx * 0.5 + ball_sounds.song_track(song, hits, n) + (0 if cursed is None else cursed))
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"song failed, keeping the ball sounds: {e}", flush=True)
+    if track is None and sim.recipe.get("bounce_sound") in _MEME_SOUNDS:
+        # Dean (9 Nov): a meme sound on every ball hit, deeper as it fills up
+        # (ball_sounds.meme_track), over the balls' own sounds, no noise bed
+        from clipper import ball_sounds
+        hits = [(et, vol) for et, kind, _val, vol in sim.events if kind in ("tick", "knock", "thud")]
+        return _normalise(fx * 0.5 + ball_sounds.meme_track(sim.recipe["bounce_sound"], hits, n)
+                          + (0 if cursed is None else cursed))
     bed = v.music(sim.t + 1)[:n]
     mix = fx + bed
     if track is not None:                 # "merge": a tune played by the bounces
