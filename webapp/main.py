@@ -62,6 +62,7 @@ from clipper import ball_starters
 from clipper import ball_cursed
 from clipper import ball_photos
 from clipper import ball_evolution
+from clipper import ball_arenas
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
@@ -6110,6 +6111,9 @@ def _balls_make(vid: str) -> None:
         recipe["art"] = art
         if art in ("sticker", "notebook", "pixel", "comic"):
             recipe["backdrop"] = "black"
+    if fmt == "box" and not recipe.get("shape"):
+        # Dean (9 Nov): other box shapes in the same look, taking turns
+        recipe["shape"] = _balls_pick_shape(vid)
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
@@ -6369,6 +6373,8 @@ def _balls_view(v: dict) -> dict:
             if r.get("bounce_sound") == "song" and r.get("song"):
                 sound = f"🎵 {r['song'].get('name') or 'song'}"
             c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
+            if r.get("shape"):
+                c["chips"].append(ball_arenas.B_SHAPE_LABELS.get(r["shape"], r["shape"]))
             c["chips"] = [x for x in c["chips"] if x]
         elif r.get("bounce_sound") == "song" and r.get("song"):
             c["chips"] += [x for x in (r.get("skin"), f"🎵 {r['song'].get('name') or 'song'}") if x]
@@ -6379,6 +6385,17 @@ def _balls_view(v: dict) -> dict:
     if r.get("anime_arena"):
         c["chips"].append(f"⛩️ {ball_anime_arenas.LABELS.get(r['anime_arena'], r['anime_arena'])}")
     return c
+
+
+def _balls_pick_shape(exclude: str) -> str:
+    """The box shape (ball_arenas.B_SHAPES) used longest ago among the box
+    videos made so far; one never used first. Older box videos have no
+    shape: they count as the square."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("format") == "box"]
+    made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
+    last = {(v["recipe"].get("shape") or "square"): i for i, v in enumerate(made)}
+    shapes = ball_arenas.B_SHAPES
+    return min(shapes, key=lambda k: (last.get(k, -1), shapes.index(k)))
 
 
 def _balls_last_art(exclude: str) -> Optional[str]:

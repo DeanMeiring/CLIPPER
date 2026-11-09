@@ -1552,6 +1552,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_balls_last_art` didn't have). Center skips it like sticker; Claude's
   last look is told it's on purpose. The sticker look draws exactly as
   before (checked).
+- **Box shapes (9 Nov):** Dean asked for "other designs like the box, same
+  art style, a bit different". `recipe["shape"]` for `box`
+  (`ball_arenas.B_SHAPES`): square (the old box; no shape = square, byte for
+  byte as before, hash-checked), circle, hexagon, funnel, heart, pegs (the
+  square with staggered peg rows) and diamond. Each is a polyline from one
+  side of the hole round to the other (`box_outline`) inside the square's
+  footprint, so the header and counter stay put. A ball is out when its
+  centre leaves the shape (a half-size polygon mask), and the live cap and
+  `B_FULL` scale with the shape's area. The heart and diamond drain through
+  their tip, so their hole is `B_SMALL_HOLE` 100 (with 140 the heart was
+  over in ~18 s); runs end ~25-48 s. A spinning box was tried and dropped:
+  one ball rode the turning walls and hardly ever fell out.
+  `_balls_pick_shape`: box videos take the shape used longest ago (old ones
+  count as square). Cards show the shape chip.
 - **Four a day (7 Nov):** Dean asked for 4 videos a day, 2 fights + 2
   drops: comment fights at 12:00 and 20:00 (`crowd_slots`), drop videos at
   08:00 and 15:00 (`slots`), put on the live settings once by

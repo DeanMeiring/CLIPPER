@@ -24,6 +24,7 @@ import colorsys
 import math
 import random
 
+import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from clipper import ball_circles as bc
@@ -1082,6 +1083,73 @@ B_TARGET = 2500         # the count for the final form
 B_FULL = 1150           # recipe["fill"]: balls in the box when it's full
 
 
+# Other box shapes (Dean, 9 Nov: "other designs like the box, same art
+# style, a bit different"). recipe["shape"]; none / "square" is the box
+# above, exactly as before. Each outline is a polyline from one side of the
+# hole round to the other (the hole is the gap between its ends), all in
+# the square's footprint so the header and counter stay where they are.
+B_SHAPES = ("square", "circle", "hexagon", "funnel", "heart", "pegs", "diamond")
+B_SHAPE_LABELS = {"square": "⬛ box", "circle": "⚪ round", "hexagon": "⬢ hexagon", "funnel": "🔻 funnel",
+                  "heart": "❤️ heart", "pegs": "📍 box with pegs", "diamond": "🔷 diamond"}
+B_CX, B_CY = 540, 860           # the square's middle
+B_HOLE_W = B_HOLE[1] - B_HOLE[0]
+B_SMALL_HOLE = 100              # the heart and the diamond drain through their tip: a smaller hole
+B_PEG_R = 16
+# (a spinning box was tried: one ball rode the turning walls round and round
+# and hardly ever fell out, so it's not here)
+
+
+def box_outline(shape: str) -> list:
+    """The shape's wall as a polyline (screen coordinates)."""
+    h = B_HOLE_W / 2
+    if shape in ("heart", "diamond"):
+        h = B_SMALL_HOLE / 2
+    if shape == "circle":
+        R, mid = 440.0, math.pi / 2 + 0.25          # the hole a bit left of the bottom, like the box's
+        half = h / R
+        a0, a1 = mid + half, mid - half + 2 * math.pi
+        return [(B_CX + R * math.cos(a0 + (a1 - a0) * k / 120), B_CY + R * math.sin(a0 + (a1 - a0) * k / 120))
+                for k in range(121)]
+    if shape == "hexagon":
+        R = 440.0
+        v = [(B_CX + R * math.cos(math.radians(a)), B_CY + R * math.sin(math.radians(a)))
+             for a in (0, 60, 120, 180, 240, 300)]
+        yb = v[1][1]
+        return [(B_HOLE[0], yb), v[2], v[3], v[4], v[5], v[0], v[1], (B_HOLE[1], yb)]
+    if shape == "funnel":
+        return [(B_CX - h, B_B), (B_L, 1010), (B_L, B_T), (B_R, B_T), (B_R, 1010), (B_CX + h, B_B)]
+    if shape == "heart":
+        sc, y0 = 27.5, 760.0
+        cut = math.asin((h / sc / 16) ** (1 / 3))      # where the heart is as wide as the hole
+        ts = [math.pi + cut + (2 * math.pi - 2 * cut) * k / 160 for k in range(161)]
+        return [(B_CX + sc * 16 * math.sin(t) ** 3,
+                 y0 - sc * (13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)))
+                for t in ts]
+    if shape == "pegs":
+        return [(B_HOLE[0], B_B), (B_L, B_B), (B_L, B_T), (B_R, B_T), (B_R, B_B), (B_HOLE[1], B_B)]
+    if shape == "diamond":
+        R, cy = 420.0, B_CY + 20                     # its tip kept clear of the "Balls:" counter
+        return [(B_CX - h, cy + R - h), (B_CX - R, cy), (B_CX, cy - R), (B_CX + R, cy), (B_CX + h, cy + R - h)]
+    raise ValueError(shape)
+
+
+def box_pegs(shape: str) -> list:
+    """The pegs inside the box ("pegs" only): staggered rows under the
+    drop-in band, kept off the walls."""
+    if shape != "pegs":
+        return []
+    out = []
+    for row, y in enumerate(range(660, 1200, 120)):
+        off = 0 if row % 2 == 0 else 70
+        for x in range(B_L + 110 + off, B_R - 60, 140):
+            out.append((x, y))
+    return out
+
+
+def _area(pts: list) -> float:
+    return abs(sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1]))) / 2
+
+
 class BoxSim(ArenaSim):
     """Balls in a box with a hole in the floor. Every ball that falls out
     adds three at the top. The count climbs fast; past B_LIVE the extra
@@ -1095,10 +1163,28 @@ class BoxSim(ArenaSim):
         sp = self.space = pymunk.Space()
         sp.gravity = (0, 1300)
         sp.iterations = 8
-        walls = [((B_L, B_T), (B_R, B_T)), ((B_L, B_T), (B_L, B_B)), ((B_R, B_T), (B_R, B_B)),
-                 ((B_L, B_B), (B_HOLE[0], B_B)), ((B_HOLE[1], B_B), (B_R, B_B))]
+        shape = recipe.get("shape") or "square"
+        self.shape = shape
+        self.live_cap, self.full = B_LIVE, B_FULL
+        if shape == "square":
+            walls = [((B_L, B_T), (B_R, B_T)), ((B_L, B_T), (B_L, B_B)), ((B_R, B_T), (B_R, B_B)),
+                     ((B_L, B_B), (B_HOLE[0], B_B)), ((B_HOLE[1], B_B), (B_R, B_B))]
+            wall_body = sp.static_body
+        else:
+            pts = box_outline(shape)
+            self.outline = pts
+            walls = list(zip(pts, pts[1:]))
+            # as many balls as the shape holds, the box's numbers scaled by area
+            share = _area(pts) / ((B_R - B_L) * (B_B - B_T))
+            self.live_cap, self.full = int(B_LIVE * share), int(B_FULL * share)
+            self.mask, self.mask_off = self._mask(pts)
+            wall_body = sp.static_body
+            for x, y in box_pegs(shape):
+                pg = pymunk.Circle(sp.static_body, B_PEG_R, (x, y))
+                pg.elasticity, pg.friction, pg.collision_type = 0.9, 0.2, 3
+                sp.add(pg)
         for p, q in walls:
-            w = pymunk.Segment(sp.static_body, p, q, 6)
+            w = pymunk.Segment(wall_body, p, q, 6)
             w.elasticity, w.friction, w.collision_type = 0.9, 0.2, 3
             sp.add(w)
         sp.on_collision(1, 3, begin=self._on_wall)
@@ -1108,10 +1194,37 @@ class BoxSim(ArenaSim):
         self._add()
         self.thresholds = [round(B_TARGET ** (k / self.last)) for k in range(self.last + 1)]
 
+    @staticmethod
+    def _mask(pts: list):
+        """Inside the shape (the hole closed), at half size: a quick test of
+        whether a ball has got out."""
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        x0, y0 = min(xs) - 4, min(ys) - 4
+        w, h = int((max(xs) - x0) / 2) + 8, int((max(ys) - y0) / 2) + 8
+        im = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(im).polygon([((x - x0) / 2, (y - y0) / 2) for x, y in pts], fill=255)
+        return np.asarray(im) > 0, (x0, y0)
+
+    def _inside(self, x: float, y: float) -> bool:
+        i, j = int((y - self.mask_off[1]) / 2), int((x - self.mask_off[0]) / 2)
+        return 0 <= i < self.mask.shape[0] and 0 <= j < self.mask.shape[1] and bool(self.mask[i, j])
+
+    def _spawn_at(self):
+        top = min(p[1] for p in self.outline)
+        for _ in range(60):
+            x, y = self.rng.uniform(B_L + 40, B_R - 40), top + 50 + self.rng.uniform(0, 120)
+            m = B_BALL + 10
+            if all(self._inside(x + dx, y + dy) for dx, dy in ((0, 0), (m, 0), (-m, 0), (0, -m), (0, m))):
+                return x, y
+        return B_CX, top + 200
+
     def _add(self):
         pm = self.pm
         body = pm.Body()
-        body.position = (self.rng.uniform(B_L + 40, B_R - 40), B_T + 40 + self.rng.uniform(0, 60))
+        if self.shape == "square":
+            body.position = (self.rng.uniform(B_L + 40, B_R - 40), B_T + 40 + self.rng.uniform(0, 60))
+        else:
+            body.position = self._spawn_at()
         body.velocity = (self.rng.uniform(-500, 500), self.rng.uniform(-200, 200))
         shape = pm.Circle(body, B_BALL)
         shape.density, shape.elasticity, shape.friction, shape.collision_type = 1.0, 0.85, 0.2, 1
@@ -1125,6 +1238,15 @@ class BoxSim(ArenaSim):
             self.bounce(0.5)
         return True
 
+    def _out(self, b: dict) -> None:
+        """A ball got out of a shaped box: +3 (the square counts its own, below)."""
+        b["out"] = True
+        if self.done_at is None:
+            self.escaped += 1
+            self.count += B_PLUS
+            self.waiting += B_PLUS
+            self.events.append((self.t, "note", self.escaped % 40, 0.6))
+
     def step(self):
         dt = 1 / FPS
         for _ in range(2):
@@ -1132,6 +1254,16 @@ class BoxSim(ArenaSim):
         live = 0
         for b in list(self.balls):
             y = b["body"].position.y
+            if self.shape != "square":
+                x = b["body"].position.x
+                if not b["out"] and not self._inside(x, y):
+                    self._out(b)
+                if y > H + 60:
+                    self.space.remove(b["body"], b["shape"])
+                    self.balls.remove(b)
+                elif not b["out"]:
+                    live += 1
+                continue
             if not b["out"] and y > B_B + B_BALL + 4:
                 b["out"] = True
                 if self.done_at is None:
@@ -1145,7 +1277,7 @@ class BoxSim(ArenaSim):
             elif not b["out"]:
                 live += 1
         # new balls drop in at the top, a few per frame
-        cap = B_FULL + 40 if self.final_at is not None else B_LIVE
+        cap = self.full + 40 if self.final_at is not None else self.live_cap
         for _ in range(min(self.waiting, 12)):
             if live >= cap:
                 break
@@ -1158,7 +1290,7 @@ class BoxSim(ArenaSim):
             self.reveal(tier)
             if self.count >= B_TARGET and self.fill:
                 self.final()
-                if live >= B_FULL:
+                if live >= self.full:
                     self.finish(ok=True)
             elif self.count >= B_TARGET:
                 self.finish(ok=True)
@@ -1170,8 +1302,19 @@ class BoxPainter(ArenaPainter):
 
     def __init__(self, recipe: dict):
         super().__init__(recipe)
-        lines = [([(B_HOLE[0], B_B), (B_L, B_B), (B_L, B_T), (B_R, B_T), (B_R, B_B), (B_HOLE[1], B_B)], (245, 245, 255))]
+        shape = recipe.get("shape") or "square"
+        if shape == "square":
+            lines = [([(B_HOLE[0], B_B), (B_L, B_B), (B_L, B_T), (B_R, B_T), (B_R, B_B), (B_HOLE[1], B_B)],
+                      (245, 245, 255))]
+        else:
+            lines = [(box_outline(shape), (245, 245, 255))]
+            # a peg is a dot: a line that starts and ends almost in the same place
+            lines += [([(x - 0.5, y), (x + 0.5, y)], (245, 245, 255)) for x, y in box_pegs(shape)]
         self.static = _glow_lines(lines, width=10)
+        if shape == "pegs":
+            d = ImageDraw.Draw(self.static)
+            for x, y in box_pegs(shape):
+                d.ellipse((x - B_PEG_R, y - B_PEG_R, x + B_PEG_R, y + B_PEG_R), fill=(245, 245, 255, 255))
 
     def frame(self, sim: BoxSim) -> Image.Image:
         im = self.base(sim)
