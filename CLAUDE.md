@@ -1562,6 +1562,22 @@ merge it yourself; merging stays Dean's call per the rule above.
   four uploads use exactly `BALLS_UPLOADS_PER_DAY` 4: a manual "Post now"
   on top would push a slot to the next quota day. The call-out check stands
   down (20:00 is a fight, which takes the oldest call-out first).
+- **Meme sounds (9 Nov):** the yellow sticker box ("How fast does it fill
+  up?", 16.6k views, 109% average watched, brought subs) works on the fill
+  plus the cursed meow going deeper. Dean asked for more sounds like it.
+  `ball_sounds.MEMES`: demon meow (growl + an octave below + cave echo, to
+  6x slower), deep quack, "huh?", "bruh", goat bleat, bonk, boing -- all
+  synthesised in numpy (formant voices like the meow, no recordings, nothing
+  to claim). `meme_track` makes each one slower and deeper by the VIDEO's
+  progress (time / last hit, so the deepest lands when it's full; the old
+  meow bottoms out after ~60 bounces), with wider gaps as they lengthen.
+  Formants drop less than the pitch on the deepest ones and every one is
+  low-passed as it slows, so it stays audible on a phone speaker (checked:
+  >= ~30% of the energy above 250 Hz at the deepest). `_balls_sound` gives
+  `BALLS_MEME_KINDS` (the meow kinds + Escape, via `be.mix_audio` on the
+  ball hits) `_balls_pick_meme`: the sound used longest ago, the cursed meow
+  included. Make's song menu has "sfx:<kind>" choices to test one. Old
+  recipes (meow / knock / phonk / none) sound exactly as before.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

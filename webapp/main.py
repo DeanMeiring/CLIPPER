@@ -62,6 +62,7 @@ from clipper import ball_starters
 from clipper import ball_cursed
 from clipper import ball_photos
 from clipper import ball_evolution
+from clipper import ball_sounds
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
@@ -3327,7 +3328,9 @@ def rocket_league_page() -> str:
 
 @protected.get("/ball-evolution", response_class=HTMLResponse)
 def ball_evolution_page() -> str:
-    return BALLS_HTML.replace("__NAV_LINKS__", _nav_links("/ball-evolution"))
+    sounds = [[k, ball_sounds.LABELS[k]] for k in BALLS_MEME_SOUNDS]
+    return (BALLS_HTML.replace("__NAV_LINKS__", _nav_links("/ball-evolution"))
+            .replace("__SOUND_CHOICES__", json.dumps(sounds, ensure_ascii=False)))
 
 
 # ---- Long-form: "The Story Of" streamer documentaries ------------------------
@@ -6118,7 +6121,7 @@ def _balls_make(vid: str) -> None:
         pack = _balls_pick_pack(vid, opts.get("pack"))
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
-    _balls_sound(recipe, fmt, opts.get("song"))
+    _balls_sound(recipe, fmt, opts.get("song"), vid)
     if fmt != "merge" and fmt not in ball_evolution.NO_PACK:
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -6365,13 +6368,15 @@ def _balls_view(v: dict) -> dict:
         if pack:
             c["chips"][1] = f"🖼 {pack['title']}"
         if fmt == "merge" or fmt in ball_evolution.ARENA_HOOKS:
-            sound = {"meow": "🐱 cursed meow", "phonk": "🥁 phonk", "knock": "🔊 ball sounds"}.get(r.get("bounce_sound") or "")
+            sound = ball_sounds.LABELS.get(r.get("bounce_sound") or "")
             if r.get("bounce_sound") == "song" and r.get("song"):
                 sound = f"🎵 {r['song'].get('name') or 'song'}"
             c["chips"] = [c["chips"][0], c["chips"][1], sound or (r.get("tune") and f"🎹 {r['tune'].replace('_', ' ')}")]
             c["chips"] = [x for x in c["chips"] if x]
         elif r.get("bounce_sound") == "song" and r.get("song"):
             c["chips"] += [x for x in (r.get("skin"), f"🎵 {r['song'].get('name') or 'song'}") if x]
+        elif r.get("bounce_sound") in ball_sounds.MEMES:
+            c["chips"] += [x for x in (r.get("skin"), ball_sounds.LABELS[r["bounce_sound"]]) if x]
         else:
             c["chips"] += [x for x in (r.get("skin"), r.get("sound") and f"🔊 {r['sound']}") if x]
     if r.get("art"):
@@ -7055,7 +7060,10 @@ def balls_make(req: BallsMakeRequest) -> dict:
             _ball_packs.load(req.pack)
         except (KeyError, OSError, ValueError):
             raise HTTPException(400, "that picture pack doesn't exist")
-    if req.song and req.song not in ("auto", "none") and not any(t["id"] == req.song for t in _balls.tracks()):
+    if req.song and req.song.startswith("sfx:"):
+        if req.song[4:] not in BALLS_MEME_SOUNDS:
+            raise HTTPException(400, "unknown sound")
+    elif req.song and req.song not in ("auto", "none") and not any(t["id"] == req.song for t in _balls.tracks()):
         raise HTTPException(400, "that song isn't there any more")
     waiting = sum(1 for v in _balls.videos() if v.get("status") in _BALLS_MAKING)
     count = max(1, min(int(req.count or 1), 7))
@@ -7264,13 +7272,43 @@ BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make t
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
 
-def _balls_sound(recipe: dict, fmt: str, choice: Optional[str] = None) -> None:
+# Dean (9 Nov): the yellow box filling up with the meow going deeper brings
+# in subs, so more sounds like it: these take turns on the kinds that had the
+# cursed meow (+ Escape, which fills its ring), the one used longest ago next
+# (ball_sounds.MEMES: each gets deeper as the video fills up).
+BALLS_MEME_SOUNDS = ("meow",) + tuple(ball_sounds.MEMES)
+BALLS_MEME_KINDS = tuple(k for k, v in BALLS_NO_SONG_SOUND.items() if v == "meow") + ("escape",)
+
+
+def _balls_pick_meme(exclude: str, fmt: str = "") -> str:
+    """The meme sound used longest ago (never used first, in BALLS_MEME_SOUNDS
+    order) among the videos made so far. Escape has no bounce track of its
+    own, so it plays only the new ones (be.mix_audio), never the old meow."""
+    pool = BALLS_MEME_SOUNDS if fmt in BALLS_NO_SONG_SOUND else tuple(ball_sounds.MEMES)
+    made = [v for v in _balls.videos() if v["id"] != exclude
+            and (v.get("recipe") or {}).get("bounce_sound") in BALLS_MEME_SOUNDS]
+    made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
+    last = {v["recipe"]["bounce_sound"]: i for i, v in enumerate(made)}
+    return min(pool, key=lambda k: (last.get(k, -1), BALLS_MEME_SOUNDS.index(k)))
+
+
+def _balls_sound(recipe: dict, fmt: str, choice: Optional[str] = None, vid: str = "") -> None:
     """A song on the growing ball (or any kind, when a Make picked one song
-    by hand to test it); everything else gets BALLS_NO_SONG_SOUND."""
+    by hand to test it); everything else gets BALLS_NO_SONG_SOUND, and the
+    meow kinds a meme sound in turn. A Make can pick a sound by hand
+    ("sfx:<kind>")."""
+    if choice and choice.startswith("sfx:"):
+        if (fmt in BALLS_MEME_KINDS or fmt == "merge") and not (fmt == "escape" and choice == "sfx:meow"):
+            recipe["bounce_sound"] = choice[4:]
+            recipe.pop("song", None)
+            return
+        choice = None
     if choice not in (None, "", "auto", "none") or (fmt in BALLS_SONG_KINDS and choice != "none"):
         _balls_pick_song(recipe, choice)
     if recipe.get("bounce_sound") != "song" and fmt in BALLS_NO_SONG_SOUND:
         recipe["bounce_sound"] = BALLS_NO_SONG_SOUND[fmt]
+    if recipe.get("bounce_sound") != "song" and fmt in BALLS_MEME_KINDS:
+        recipe["bounce_sound"] = _balls_pick_meme(vid, fmt)
 
 
 def _balls_pick_song(recipe: dict, choice: Optional[str] = None) -> None:
@@ -12997,7 +13035,7 @@ __NAV_LINKS__
 
   <div class="section" data-tab="packs">
     <h3>🎵 Songs for the bounces</h3>
-    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">Your songs play on the 🔴 Ball grows every bounce videos only. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The other kinds play no music, just their ball sounds and cursed sounds: the cursed meow on the bounces, cursed noises on Merge's merges, hits and shots in the duel. To test a song on another kind, pick it in Make.</div>
+    <details class="more"><summary>ℹ️ How it works</summary><div class="hint">Your songs play on the 🔴 Ball grows every bounce videos only. Each bounce lets the song play on for a moment, so it only moves while the ball bounces. Every video takes the song used least, starting at its drop (the app finds it; ▶ plays from there and you can change the second). The other kinds play no music, just their ball sounds and cursed sounds: a meme sound on the bounces that gets deeper as the video fills up (the cursed meow, demon meow, deep quack, huh?, bruh, goat, bonk, boing -- they take turns, the one used longest ago next), cursed noises on Merge's merges, hits and shots in the duel. To test a song or one sound on a video, pick it in Make.</div>
     <div class="music-links">
       <b>Where to get free songs</b>
       <a href="https://www.youtube.com/audiolibrary" target="_blank" rel="noopener">🎧 YouTube Audio Library →</a>
@@ -13207,6 +13245,7 @@ $('ap-on').addEventListener('change', () => {
   saveSettings({ autopilot: on });
 });
 const NO_BOUNCE_MUSIC = [];   // every kind plays your songs now (14 Oct)
+const SOUND_CHOICES = __SOUND_CHOICES__;
 function songPickState() {
   const kind = $('m-format').value || (S && S.autopilot.today), sel = $('m-song');
   const off = NO_BOUNCE_MUSIC.includes(kind);
@@ -13768,6 +13807,8 @@ function renderTracks() {
   opt('auto', SG.songs.length ? '🔀 Auto: your songs on 🔴 Ball grows, ball + cursed sounds on the rest' : '🔊 Auto (no songs yet)');
   for (const t of SG.songs) opt(t.id, `🎵 ${t.name}`);
   opt('none', '🔊 No song: ball + cursed sounds');
+  // a meme sound by hand (deeper as it fills up) on the meow kinds, Escape and Merge
+  for (const [k, label] of SOUND_CHOICES) opt('sfx:' + k, `${label}: on every bounce, deeper as it fills`);
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
   if (typeof S !== 'undefined' && S) songPickState();
 }
