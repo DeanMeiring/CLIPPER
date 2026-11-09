@@ -235,8 +235,8 @@ class MergeSim:
         """The tune, one note per ring hit (ball_evolution.mix_audio adds it);
         or the cursed meow / phonk riff when the recipe picked one."""
         kind = self.recipe.get("bounce_sound")
-        if kind in ("meow", "phonk", "knock", "none"):
-            from clipper import ball_sounds
+        from clipper import ball_sounds
+        if kind in ball_sounds.TRACK_KINDS:
             return ball_sounds.track(kind, self.hits, n)
         if kind == "song" and self.recipe.get("song"):
             from clipper import ball_sounds
