@@ -13105,8 +13105,9 @@ __NAV_LINKS__
     <label class="toggle"><input id="ap-on" type="checkbox"> 🤖 Autopilot: make and post them on its own</label>
     <div class="hint" id="ap-hint"></div>
     <div class="row2">
-      <div><label for="ap-t1">Post at (SA time)</label><input id="ap-t1" type="time"></div>
+      <div><label for="ap-t1">Drop videos at (SA time)</label><input id="ap-t1" type="time"></div>
       <div><label for="ap-t2">and at</label><input id="ap-t2" type="time"></div>
+      <div><label for="ap-t3">and at</label><input id="ap-t3" type="time"></div>
       <div><label for="s-mark">Name on the videos</label><input id="s-mark" maxlength="40" placeholder="@yourchannel"></div>
     </div>
     <label class="check"><input id="ap-ig" type="checkbox"> 📸 Also post each one to Instagram when it goes public</label>
@@ -13283,8 +13284,8 @@ async function saveSettings(body) {
 }
 for (const [id, key] of [['s-mark', 'watermark'], ['s-desc', 'description'], ['s-bed', 'bed']])
   $(id).addEventListener('change', () => saveSettings({ [key]: $(id).value }));
-for (const id of ['ap-t1', 'ap-t2'])
-  $(id).addEventListener('change', () => saveSettings({ slots: [$('ap-t1').value, $('ap-t2').value].filter(Boolean) }));
+for (const id of ['ap-t1', 'ap-t2', 'ap-t3'])
+  $(id).addEventListener('change', () => saveSettings({ slots: ['ap-t1', 'ap-t2', 'ap-t3'].map(x => $(x).value).filter(Boolean) }));
 $('ap-ig').addEventListener('change', () => saveSettings({ auto_instagram: $('ap-ig').checked }));
 $('ap-on').addEventListener('change', () => {
   const on = $('ap-on').checked;
@@ -13309,9 +13310,11 @@ $('m-format').addEventListener('change', () => {
 function renderAutopilot() {
   const ap = S.autopilot, st = S.settings;
   $('ap-on').checked = ap.on;
-  const [t1, t2] = ap.slots;
-  if (document.activeElement !== $('ap-t1')) $('ap-t1').value = t1 || '';
-  if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
+  // the drop videos' own times (settings.slots); the comment fights' times are in the Fights tab
+  const own = st.slots || ap.slots;
+  ['ap-t1', 'ap-t2', 'ap-t3'].forEach((id, i) => {
+    if (document.activeElement !== $(id)) $(id).value = own[i] || '';
+  });
   $('ap-ig').checked = st.auto_instagram !== false;
   const mix = st.drop !== false
     ? 'Every time that isn’t a comment fight is a drop video: box (“every escape adds 3”), escape and zen take turns, box most often, in two looks that take turns too (yellow sticker stripes and blue comic dots).'
