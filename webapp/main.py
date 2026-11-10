@@ -6085,8 +6085,10 @@ def _balls_make(vid: str) -> None:
             recipe["arena"] = "neon"
             recipe["anime_arena"] = ball_anime_arenas.pick(_balls_last_anime_arena(vid), recipe["seed"])
             # the anime weapons (shuriken, energy slash, clones...) and the
-            # special move on the last heart (Dean, 7 Nov)
-            ball_duel.anime_arsenal(recipe)
+            # special move on the special bar (Dean, 7 Nov); since 10 Nov the
+            # newer set too (flash step, talismans, sword rain, frost nova,
+            # thunder, gravity) and a special move of each fighter's own
+            ball_duel.anime_arsenal2(recipe)
     elif looks and fmt in ball_learn.LOOKS:
         # the fights' look (colours / flags / 2 VS 2) by the learned mix too
         getattr(ball_duel, f"{fmt}_recipe")(recipe, force=ball_learn.pick(looks, f"look-{recipe['seed']}"))
