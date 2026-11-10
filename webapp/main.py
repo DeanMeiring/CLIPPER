@@ -6104,7 +6104,7 @@ def _balls_make(vid: str) -> None:
             league_pick = None
     art = ball_looks.pick(recipe, _balls_last_art(vid), recipe["seed"])
     if opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_DROP_CYCLE \
-            and not crowd:
+            and fmt in ball_looks.KINDS and not crowd:
         # the drop videos take turns between the two looks that did well
         last = _balls_last_art(vid)
         art = BALLS_DROP_ARTS[(BALLS_DROP_ARTS.index(last) + 1) % len(BALLS_DROP_ARTS)] \
@@ -6128,6 +6128,10 @@ def _balls_make(vid: str) -> None:
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_sound(recipe, fmt, opts.get("song"), vid)
+    if fmt in ball_evolution.MORE_HOOKS and recipe.get("hook"):
+        # the hook is the title: not the same words as the kind's last videos
+        recipe["hook"] = ball_evolution.fresh_hook(fmt, recipe["hook"], _balls_recent_hooks(fmt, vid),
+                                                   recipe["seed"])
     if fmt != "merge" and fmt not in ball_evolution.NO_PACK:
         recipe["bed"] = settings.get("bed") or "auto"
     out_dir = _balls.video_dir(vid)
@@ -6405,6 +6409,14 @@ def _balls_pick_shape(exclude: str) -> str:
     return min(shapes, key=lambda k: (last.get(k, -1), shapes.index(k)))
 
 
+def _balls_recent_hooks(fmt: str, exclude: str, n: int = 6) -> List[str]:
+    """The hooks (= titles) of the last n videos of this kind."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("format") == fmt
+            and (v.get("recipe") or {}).get("hook")]
+    made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
+    return [v["recipe"]["hook"] for v in made[-n:]]
+
+
 def _balls_last_art(exclude: str) -> Optional[str]:
     """The look of the most recently made video that had one."""
     made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("art")]
@@ -6453,7 +6465,13 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "escape", "box", "zen", "box", "escape", "zen")
+BALLS_DROP_CYCLE = ("box", "duel", "zen", "box", "shrink", "duel", "zen", "box", "escape", "duel")
+# 10 Nov (the research on the channel's numbers): every hit was a fill-up
+# box, a spike ring (zen), a colour duel or the growing ball, all 33-45 s,
+# so the drop slots draw those (box 3, duel 3, zen 2, shrink 1, escape 1 in
+# 10; 10 shares no factor with 3 drop slots a day, so every slot sees every
+# kind). The duels are league fights (ball_league) in their own arenas: the
+# art looks below only go on ball_looks.KINDS.
 # the drop videos' two looks, taking turns (comic added 7 Nov: Dean asked for
 # a second look like sticker, so the drop videos aren't all one template)
 BALLS_DROP_ARTS = ("sticker", "comic")
@@ -6867,12 +6885,22 @@ def _balls_drop_plan_once() -> None:
     7 Nov (later): four a day -- comment fights at 12:00 and 20:00, drop
     videos at 08:00 and 15:00."""
     s = _balls.settings()
-    if s.get("four_a_day_7nov"):
+    if not s.get("four_a_day_7nov"):
+        _balls.save_settings({"crowd_slots": ["12:00", "20:00"], "slots": ["08:00", "15:00"], "drop": True,
+                              "drop_plan_7nov": True, "four_a_day_7nov": True})
+        print("[autopilot] four a day: comment fights at 12:00 and 20:00, drop videos at 08:00 and 15:00",
+              flush=True)
+        s = _balls.settings()
+    if s.get("research_plan_10nov"):
         return
-    _balls.save_settings({"crowd_slots": ["12:00", "20:00"], "slots": ["08:00", "15:00"], "drop": True,
-                          "drop_plan_7nov": True, "four_a_day_7nov": True})
-    print("[autopilot] four a day: comment fights at 12:00 and 20:00, drop videos at 08:00 and 15:00",
-          flush=True)
+    # 10 Nov, after the research: the comment fights reach the usual 1.5-2k
+    # but none broke out (0 of 11) and their "stayed to watch" fell fight by
+    # fight, while drop videos and colour duels made every hit. So one
+    # comment fight a day (12:00) and three drop videos (08:00, 15:00,
+    # 20:00) -- still four a day.
+    _balls.save_settings({"crowd_slots": ["12:00"], "slots": ["08:00", "15:00", "20:00"], "drop": True,
+                          "research_plan_10nov": True})
+    print("[autopilot] research plan: comment fight at 12:00, drop videos at 08:00, 15:00 and 20:00", flush=True)
 
 
 def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, s: Optional[dict] = None) -> str:
@@ -13077,8 +13105,9 @@ __NAV_LINKS__
     <label class="toggle"><input id="ap-on" type="checkbox"> 🤖 Autopilot: make and post them on its own</label>
     <div class="hint" id="ap-hint"></div>
     <div class="row2">
-      <div><label for="ap-t1">Post at (SA time)</label><input id="ap-t1" type="time"></div>
+      <div><label for="ap-t1">Drop videos at (SA time)</label><input id="ap-t1" type="time"></div>
       <div><label for="ap-t2">and at</label><input id="ap-t2" type="time"></div>
+      <div><label for="ap-t3">and at</label><input id="ap-t3" type="time"></div>
       <div><label for="s-mark">Name on the videos</label><input id="s-mark" maxlength="40" placeholder="@yourchannel"></div>
     </div>
     <label class="check"><input id="ap-ig" type="checkbox"> 📸 Also post each one to Instagram when it goes public</label>
@@ -13255,8 +13284,8 @@ async function saveSettings(body) {
 }
 for (const [id, key] of [['s-mark', 'watermark'], ['s-desc', 'description'], ['s-bed', 'bed']])
   $(id).addEventListener('change', () => saveSettings({ [key]: $(id).value }));
-for (const id of ['ap-t1', 'ap-t2'])
-  $(id).addEventListener('change', () => saveSettings({ slots: [$('ap-t1').value, $('ap-t2').value].filter(Boolean) }));
+for (const id of ['ap-t1', 'ap-t2', 'ap-t3'])
+  $(id).addEventListener('change', () => saveSettings({ slots: ['ap-t1', 'ap-t2', 'ap-t3'].map(x => $(x).value).filter(Boolean) }));
 $('ap-ig').addEventListener('change', () => saveSettings({ auto_instagram: $('ap-ig').checked }));
 $('ap-on').addEventListener('change', () => {
   const on = $('ap-on').checked;
@@ -13281,9 +13310,11 @@ $('m-format').addEventListener('change', () => {
 function renderAutopilot() {
   const ap = S.autopilot, st = S.settings;
   $('ap-on').checked = ap.on;
-  const [t1, t2] = ap.slots;
-  if (document.activeElement !== $('ap-t1')) $('ap-t1').value = t1 || '';
-  if (document.activeElement !== $('ap-t2')) $('ap-t2').value = t2 || '';
+  // the drop videos' own times (settings.slots); the comment fights' times are in the Fights tab
+  const own = st.slots || ap.slots;
+  ['ap-t1', 'ap-t2', 'ap-t3'].forEach((id, i) => {
+    if (document.activeElement !== $(id)) $(id).value = own[i] || '';
+  });
   $('ap-ig').checked = st.auto_instagram !== false;
   const mix = st.drop !== false
     ? 'Every time that isn’t a comment fight is a drop video: box (“every escape adds 3”), escape and zen take turns, box most often, in two looks that take turns too (yellow sticker stripes and blue comic dots).'
@@ -13436,7 +13467,7 @@ function renderLearn() {
   const L = S.learn;
   $('ln-on').checked = L.on;
   $('ln-hint').textContent = L.on
-    ? 'Once a day it reads the channel’s YouTube numbers (views, how many keep watching instead of swiping away, likes) for every video at least 2 days old, adds them up per kind, and ' + (L.claude ? 'Claude' : 'a formula') + ' sets the mix for the next videos: more of what does well. Every kind keeps at least 2% so it still gets tried, none goes over 34%, and new kinds still go first.'
+    ? 'Once a day it reads the channel’s YouTube numbers (views, how many keep watching instead of swiping away, likes) for every video at least 5 days old, adds them up per kind, and ' + (L.claude ? 'Claude' : 'a formula') + ' sets the mix for the next videos: more of what does well. Every kind keeps at least 2% so it still gets tried, none goes over 34%, and new kinds still go first.'
     : 'Off: the autopilot’s kinds take turns in a fixed order.';
   if (S.settings.drop !== false) $('ln-hint').textContent += ' Right now the autopilot posts drop videos (box, escape, zen) and comment fights, so the mix is only shown here.';
   const st = $('ln-status');

@@ -1604,6 +1604,24 @@ merge it yourself; merging stays Dean's call per the rule above.
   ball hits) `_balls_pick_meme`: the sound used longest ago, the cursed meow
   included. Make's song menu has "sfx:<kind>" choices to test one. Old
   recipes (meow / knock / phonk / none) sound exactly as before.
+- **Research plan (10 Nov):** Dean asked for strong research on the
+  channel (3 agents: its own numbers, YouTube's Shorts rules, the big
+  ball-sim channels) and then "build all this". The numbers (report run 10
+  Nov, Studio 28 days to 9 Nov): the middle video sits at 1.4-2k every
+  week; growth is a few hits, all drop videos or colour duels of 33-45 s
+  with 62%+ stayed or 75%+ average watched; comment fights 0 of 11 broke
+  out and their stayed fell fight by fight (57 -> 33%, lowest on the anime
+  cut); 16-ball fights 23-36% stayed; duel / zen hits lose 25-40% of
+  viewers in the last 5-10% (they leave once the result shows), the box
+  loops (106%). So: `_balls_drop_plan_once` (flag `research_plan_10nov`)
+  puts one comment fight (12:00) and three drop videos (08:00, 15:00,
+  20:00) on the live settings; `BALLS_DROP_CYCLE` is box 3, duel 3, zen 2,
+  shrink 1, escape 1 in 10 (duels are league fights in their own arenas:
+  drop art looks only go on `ball_looks.KINDS`); titles rotate
+  (`be.MORE_HOOKS` / `fresh_hook`: not a hook the kind's last 6 videos
+  used); `ball_learn.MIN_AGE_H` is 120 (the report's 48 h views read 1,025
+  for the 25.7k box). YouTube Analytics runs ~2 days behind, so judge any
+  change on day 5+.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
