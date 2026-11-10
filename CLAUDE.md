@@ -1604,6 +1604,20 @@ merge it yourself; merging stays Dean's call per the rule above.
   ball hits) `_balls_pick_meme`: the sound used longest ago, the cursed meow
   included. Make's song menu has "sfx:<kind>" choices to test one. Old
   recipes (meow / knock / phonk / none) sound exactly as before.
+- **Colour cast back in the league (10 Nov, from the research):** the
+  colour duels were still the best fights (Royal Purple VS Cherry Red
+  15.4k, median 6.2k, 85% watched), and the fastest-growing ball channels
+  grow on a fixed cast of named characters (SEEDPIT's Seed and Kevin:
+  14 subs in Aug, 155k by 10 Nov). Dean had moved the league to brands on
+  1 Nov ("nobody relates to colours"), so both now run side by side as a
+  test: with `settings["league_colours"]` (default on; page toggle in the
+  Ball League box) every other league fight is category "colours"
+  (`ball_league.COLOUR_CAST`, the 8 duel colours with their faces, own
+  champion and records, `next_cat(colours=True)`), first fight the Royal
+  Purple VS Cherry Red rematch as "part 2". A pair that fought before is a
+  rivalry with a number (`RIVAL_HOOKS`, `league["part"]`, pill "COLOURS ·
+  PART 3"). The report's `duel:colours` / `duel:brands` compares them.
+  With the toggle off the brand league runs exactly as before.
 - **Loop ending + intro test (10 Nov, from the research):** the duel and
   zen hits lost 25-40% of viewers in the last 5-10% (they swipe once the
   result shows); the box, whose end runs back into its start, kept 106%.

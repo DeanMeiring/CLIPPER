@@ -38,6 +38,7 @@ DEFAULT_SETTINGS = {
     "learn": True,          # the autopilot's mix of kinds follows the channel's numbers (ball_learn)
     # comment fights (ball_crowd): the crowd_slot's video is always one;
     # crowd_blocked = channel ids Dean took out
+    "league_colours": True,  # 10 Nov: the colour characters take turns with the brands (ball_league)
     "crowd": True,
     "crowd_slot": "15:00",
     # Dean (6 Nov): morning, afternoon and evening are all 1v1 comment fights
