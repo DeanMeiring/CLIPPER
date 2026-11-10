@@ -299,6 +299,17 @@ def _pictures(recipe: dict) -> str:
     return (recipe.get("pack") or {}).get("title") or recipe.get("theme") or ""
 
 
+def _variant(rec: dict) -> str:
+    """What's being tested on this video (10 Nov): the loop ending, the
+    anime cut with or without its VS intro."""
+    out = []
+    if rec.get("cut") == "anime":
+        out.append("anime, no intro" if rec.get("intro") == "none" else "anime + VS intro")
+    if rec.get("loop"):
+        out.append("loop end")
+    return ", ".join(out)
+
+
 def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] = None) -> List[dict]:
     """One row per posted video with numbers: what it was (kind, look, hook,
     pictures, sound, length) next to how it did. Newest first."""
@@ -316,7 +327,8 @@ def video_rows(videos: List[dict], stats: Dict[str, dict], now: Optional[float] 
                .strftime("%Y-%m-%d %H:%M"), "age_h": round((now - posted) / 3600),
                "kind": kind_of(rec), "title": (v.get("title") or "")[:90], "hook": (rec.get("hook") or "")[:80],
                "pictures": _pictures(rec)[:60],
-               "sound": _sound(rec)[:60], "art": rec.get("art") or rec.get("anime_arena") or "", "seconds": round(v.get("seconds") or 0, 1),
+               "sound": _sound(rec)[:60], "art": rec.get("art") or rec.get("anime_arena") or "",
+               "variant": _variant(rec), "seconds": round(v.get("seconds") or 0, 1),
                "views": round(views), "avg_pct": round(st.get("avg_pct", 0), 1),
                "likes": round(st.get("likes", 0)), "comments": round(st.get("comments", 0)),
                "shares": round(st.get("shares", 0))}

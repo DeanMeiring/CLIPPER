@@ -478,21 +478,35 @@ def frames(recipe, sim_cls, painter_cls):
         painter.bg = arena_bg
     seed = int(recipe.get("seed") or 0)
     cut = Cut(recipe, win)
-    state = {"sim": sim, "marks": {"vs": 0.35}, "t_ko": t_ko, "last_heart": last_heart}
+    # recipe["intro"] == "none" (10 Nov): straight into the fight -- the
+    # comment fights' "stayed to watch" fell to 33-39% with the anime cut,
+    # and its 0.9 s VS card is the likely cost; the autopilot alternates it
+    intro = recipe.get("intro") != "none"
+    state = {"sim": sim, "marks": {"vs": 0.35} if intro else {}, "t_ko": t_ko, "last_heart": last_heart}
     n = [0]
+    first = []
 
     def now():
         return n[0] / FPS
 
     def out(im, t):
         n[0] += 1
+        if recipe.get("loop"):
+            # the loop ending (be.loop_phase): the last moment blends into the first frame
+            if not first:
+                first.append(im.copy())
+            else:
+                lp = be.loop_phase(recipe, sim)
+                if lp:
+                    im = Image.blend(im.convert("RGB"), first[0].convert("RGB"), be._smooth(min(1.0, lp)))
         return im, t
 
     yield state
-    for f in range(int(INTRO_S * FPS)):
-        yield out(cut.intro(f / FPS), None)
-    for _ in range(3):
-        yield out(Image.new("RGB", (W, H), (255, 255, 255)), 0.0)
+    if intro:
+        for f in range(int(INTRO_S * FPS)):
+            yield out(cut.intro(f / FPS), None)
+        for _ in range(3):
+            yield out(Image.new("RGB", (W, H), (255, 255, 255)), 0.0)
     state["marks"]["fight"] = now()
     seen = 0
     focus = None
@@ -501,6 +515,9 @@ def frames(recipe, sim_cls, painter_cls):
     special = None                       # (fight second, ball) of the special move
     while not sim.finished:
         sim.step()
+        lp = be.loop_phase(recipe, sim)
+        if lp is not None and lp > 1:
+            break
         if arena:
             painter.bg = ball_anime_arenas.animate(arena, arena_bg, sim.t, seed)
         base = _unflash(painter.frame(sim), sim)
@@ -674,10 +691,11 @@ def mix(sim, tmap, marks, t_ko, last_heart, seed=0) -> np.ndarray:
         elif kind == "special":                                     # its power-up plays at half speed
             w = np.interp(np.arange(0, len(w), 1 / 2.0), np.arange(len(w)), w).astype(np.float32)
         put(w, at(t), 0.8)
-    put(_sweep(rng, 0.32, 300, 6000, 0.45), 0.0)
-    put(_boom(rng, 1.0, 0.8), marks["vs"])
-    put(_shing(0.9, 0.25), marks["vs"])
-    put(_sweep(rng, 0.2, 5000, 400, 0.3, rise=False), INTRO_S - 0.05)
+    if "vs" in marks:                    # the VS intro's whoosh + slam
+        put(_sweep(rng, 0.32, 300, 6000, 0.45), 0.0)
+        put(_boom(rng, 1.0, 0.8), marks["vs"])
+        put(_shing(0.9, 0.25), marks["vs"])
+        put(_sweep(rng, 0.2, 5000, 400, 0.3, rise=False), INTRO_S - 0.05)
     ko = marks.get("ko", len(tmap) / FPS)
     slow = marks.get("slow", ko)
     lh = at(last_heart) if last_heart is not None else ko

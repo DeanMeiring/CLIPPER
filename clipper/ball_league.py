@@ -20,6 +20,17 @@ Instagram -- a side people already argue about.
   ``league`` (+ ``winner`` / ``winner_hp`` after render); the standings are
   the brand fights posted or slotted earlier. The old colour-league fights
   (no ``cat``) are left out, so brand fight #1 starts the count.
+
+10 Nov (the research on the channel): the colour duels were still the
+channel's best fights (Royal Purple VS Cherry Red 15.4k, median 6.2k, 85%
+watched) and the fast-growing ball channels grow on a fixed cast of named
+characters that keep coming back (SEEDPIT's Seed and Kevin, Earclacks'
+named balls). So the colour balls come back as the league's own cast,
+taking turns with the brands (``next_cat(colours=True)``): category
+"colours", the 8 duel colours with their faces, its own champion and
+records, first fight the Royal Purple VS Cherry Red rematch. A pair that
+has fought before is a rivalry with a part number ("Part 3"), brands too.
+The report's look (duel:colours / duel:brands) shows which does better.
 """
 
 from __future__ import annotations
@@ -35,10 +46,16 @@ from PIL import Image, ImageDraw
 
 PACKS = Path(__file__).resolve().parent / "assets" / "packs"
 CATEGORIES = ("phones", "cars", "apps", "gaming", "sports")
-CAT_LABEL = {"phones": "PHONES", "cars": "CARS", "apps": "APPS", "gaming": "GAMING", "sports": "SPORTS"}
-CAT_EMOJI = {"phones": "📱", "cars": "🚗", "apps": "📲", "gaming": "🎮", "sports": "👟"}
+CAT_LABEL = {"phones": "PHONES", "cars": "CARS", "apps": "APPS", "gaming": "GAMING", "sports": "SPORTS",
+             "colours": "COLOUR LEAGUE"}
+CAT_EMOJI = {"phones": "📱", "cars": "🚗", "apps": "📲", "gaming": "🎮", "sports": "👟", "colours": "⚔️"}
 FIRST = {"phones": ("Apple", "Samsung"), "cars": ("BMW", "Audi"), "apps": ("TikTok", "Instagram"),
-         "gaming": ("PlayStation", "Steam"), "sports": ("Nike", "Adidas")}
+         "gaming": ("PlayStation", "Steam"), "sports": ("Nike", "Adidas"),
+         "colours": ("Royal Purple", "Cherry Red")}
+# the colour cast: the duel's 8 colours (ball_duel.COLOURS), faces and all
+COLOUR_CAST = {"Cherry Red": (228, 52, 64), "Ocean Blue": (84, 140, 245), "Lime Green": (96, 204, 84),
+               "Royal Purple": (154, 96, 232), "Sunny Yellow": (246, 200, 46), "Hot Pink": (240, 92, 172),
+               "Tangerine Orange": (250, 142, 44), "Ice Cyan": (70, 210, 230)}
 CREDIT = "Logos: Simple Icons. The logos belong to their owners; this video isn't made or endorsed by them."
 CLOSE_HP = 2
 TAGS = ("REMATCH", "NEW CHALLENGER", "TOP CONTENDER", "YOUR PICK", "FIRST FIGHT")
@@ -51,6 +68,8 @@ HOOKS = {
     "YOUR PICK": ["You asked for it: {a} VS {b}", "{a} VS {b}: you picked this one"],
 }
 STREAK_HOOKS = ["Can anyone stop {a}? {n} wins in a row", "{a} goes for {m} in a row"]
+# a pair that has fought before: the rivalry goes on, numbered
+RIVAL_HOOKS = ["{a} VS {b}, part {n}", "{a} VS {b}: part {n}", "{b} VS {a}, round {n}"]
 
 
 @lru_cache(maxsize=1)
@@ -64,6 +83,8 @@ def roster() -> Dict[str, dict]:
             im = Image.open(d / it["file"]).convert("RGB")
             col = im.getpixel((94, 256))           # the badge's own colour, left of the logo
             out[it["name"]] = {"cat": cat, "file": f"logos_{cat}/{it['file']}", "col": list(col)}
+    for name, col in COLOUR_CAST.items():
+        out[name] = {"cat": "colours", "file": None, "col": list(col)}
     return out
 
 
@@ -120,15 +141,20 @@ def standings(history: List[dict], cat: Optional[str] = None) -> dict:
     return {"records": rec, "champ": champ, "streak": streak, "fights": len(fights)}
 
 
-def next_cat(history: List[dict]) -> str:
-    return CATEGORIES[len(_brand_fights(history)) % len(CATEGORIES)]
-
-
-def next_match(history: List[dict], seed, pick: Optional[str] = None) -> dict:
-    """The next brand fight: {no, cat, names [champion, challenger],
-    records, tag, streak, champ, hook}."""
+def next_cat(history: List[dict], colours: bool = False) -> str:
+    """The brand categories in turn; with ``colours`` every other fight is
+    the colour cast's."""
     fights = _brand_fights(history)
-    cat = next_cat(history)
+    if colours and (not fights or fights[-1]["cat"] != "colours"):
+        return "colours"
+    return CATEGORIES[len([f for f in fights if f["cat"] in CATEGORIES]) % len(CATEGORIES)]
+
+
+def next_match(history: List[dict], seed, pick: Optional[str] = None, colours: bool = False) -> dict:
+    """The next league fight: {no, cat, names [champion, challenger],
+    records, tag, streak, champ, part, hook}."""
+    fights = _brand_fights(history)
+    cat = next_cat(history, colours)
     st = standings(history, cat)
     rec = st["records"]
     champ = st["champ"]
@@ -159,13 +185,21 @@ def next_match(history: List[dict], seed, pick: Optional[str] = None) -> dict:
                 best = max(pct(n) for n in pool)
                 b, tag = pick_rng.choice([n for n in pool if pct(n) >= best - 1e-9]), "TOP CONTENDER"
     streak = st["streak"] if champ else 0
+    # the colour cast's first fight is a rematch of the colour duel that
+    # broke out (fought before the league's count started), so it's part 2
+    part = sum(1 for f in fights if set(f["names"]) == {a, b}) + 1 + (cat == "colours" and {a, b} == set(FIRST[cat]))
     if streak >= 2:
         hook = rng.choice(STREAK_HOOKS).format(a=a, n=streak, m=streak + 1)
+    elif part >= 2 and colours:
+        hook = rng.choice(RIVAL_HOOKS).format(a=a, b=b, n=part)
     else:
         hook = rng.choice(HOOKS[tag]).format(a=a, b=b)
-    return {"no": st["fights"] + 1, "cat": cat, "names": [a, b],
-            "records": [list(rec.get(a, [0, 0])), list(rec.get(b, [0, 0]))],
-            "tag": tag, "streak": streak, "champ": bool(champ), "hook": hook}
+    out = {"no": st["fights"] + 1, "cat": cat, "names": [a, b],
+           "records": [list(rec.get(a, [0, 0])), list(rec.get(b, [0, 0]))],
+           "tag": tag, "streak": streak, "champ": bool(champ), "hook": hook}
+    if colours:
+        out["part"] = part
+    return out
 
 
 def apply(recipe: dict, match: dict) -> dict:
@@ -175,12 +209,17 @@ def apply(recipe: dict, match: dict) -> dict:
     players = []
     for n in match["names"]:
         col = list(r[n]["col"])
+        if r[n]["cat"] == "colours":
+            first, _, last = n.partition(" ")
+            players.append([first, last, col])          # a colour ball with its face (ball_duel)
+            continue
         if sum(col) < 150:              # Apple, Nike, TikTok...: black badges vanish on the dark arena
             col = [225, 228, 238]
         players.append([n, "", col, None, "brand:" + r[n]["file"]])
     recipe.pop("team_names", None)
-    recipe.update(look="brands", players=players, hook=match["hook"],
-                  league={k: match[k] for k in ("no", "cat", "names", "records", "tag", "streak", "champ")})
+    keys = ("no", "cat", "names", "records", "tag", "streak", "champ") + (("part",) if "part" in match else ())
+    recipe.update(look="colours" if match["cat"] == "colours" else "brands", players=players, hook=match["hook"],
+                  league={k: match[k] for k in keys})
     return recipe
 
 
@@ -195,6 +234,13 @@ def publish_text(recipe: dict) -> dict:
     cat = lg.get("cat") or ""
     title = f"{recipe['hook']} {CAT_EMOJI.get(cat, '⚔️')}"
     who_a = "the champion" if lg.get("champ") else ""
+    if cat == "colours":
+        part = lg.get("part") or 1
+        story = f"Part {part} of {a} VS {b}. " if part >= 2 else ""
+        desc = (f"{story}{a} ({ra}{', ' + who_a if who_a else ''}) VS {b} ({rb}) in the Colour League. Ten hearts "
+                f"each, weapons drop into the ring. The winner holds the colour crown for the next fight.\n\n"
+                f"Pick a side before the end 👇\n\n#satisfying #bouncingball #battle")
+        return {"title": title[:100], "description": desc}
     desc = (f"{a} ({ra}{', ' + who_a if who_a else ''}) VS {b} ({rb}). Ten hearts each, weapons drop into the "
             f"ring, every gun fires once. The winner keeps the {CAT_LABEL.get(cat, '').lower()} crown.\n\n"
             f"Team {a} or team {b}? Comment 👇\n\n{CREDIT}\n\n#satisfying #bouncingball #battle")
@@ -206,7 +252,7 @@ def table(history: List[dict]) -> List[dict]:
     fights = _brand_fights(history)
     st = standings(history)
     champs = {}
-    for cat in CATEGORIES:
+    for cat in CATEGORIES + ("colours",):
         s = standings(history, cat)
         if s["champ"]:
             champs[s["champ"]] = s["streak"]
