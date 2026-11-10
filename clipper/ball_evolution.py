@@ -68,10 +68,12 @@ END_FADE = 0.35          # s of audio fade at the very end
 # The loop ending (recipe["loop"], 10 Nov): the duel and spike-ring hits
 # lost 25-40% of their viewers in the last 5-10% -- they swipe once the
 # result shows -- while the fill-up box, whose last frame runs straight
-# back into its first, kept 106%. So a "loop" video stops LOOP_HOLD s after
-# the result (not END_HOLD) and its last LOOP_FADE s blend into its own
-# first frame, so the Shorts player's replay carries on seamlessly.
-LOOP_HOLD = 1.6
+# back into its first, kept 106%. So a "loop" video's last LOOP_FADE s
+# blend into its own first frame, and the Shorts player's replay carries
+# on seamlessly. The result stays up as long as before (LOOP_HOLD =
+# END_HOLD): 1.6 was tried and the league's "KEEPS THE BELT" line, which
+# comes in 0.9-1.15 s after the K.O., was fading as soon as it appeared.
+LOOP_HOLD = 1.8
 LOOP_FADE = 0.45
 MAX_UNLOCK_GAP = 18.0
 GATE_DRIP = 1.5          # gates course: the hole drips every this many s at first
