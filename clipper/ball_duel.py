@@ -365,6 +365,47 @@ def _crescent(size: int = 110, col=(120, 220, 255)) -> Image.Image:
     return out
 
 
+def _charm() -> Image.Image:
+    """A paper charm (talisman): cream paper, a red border and a red swirl,
+    no writing. Long side up."""
+    k, w, h = 3, 34, 60
+    im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle((2 * k, 2 * k, (w - 2) * k, (h - 2) * k), fill=(250, 238, 205, 255), outline=(22, 22, 28, 255),
+                width=2 * k)
+    d.rectangle((6 * k, 6 * k, (w - 6) * k, (h - 6) * k), outline=(205, 30, 40, 255), width=2 * k)
+    d.arc((9 * k, 16 * k, (w - 9) * k, 32 * k), 0, 300, fill=(205, 30, 40, 255), width=3 * k)
+    d.line([(w * k / 2, 34 * k), (w * k / 2, (h - 10) * k)], fill=(205, 30, 40, 255), width=3 * k)
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def _sword() -> Image.Image:
+    """A straight sword, point down (sword rain)."""
+    k, w, h = 3, 40, 150
+    im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    ink = (22, 22, 28, 255)
+    c = w * k / 2
+    d.rounded_rectangle((c - 5 * k, 0, c + 5 * k, 26 * k), 3 * k, fill=(60, 40, 30, 255), outline=ink, width=2 * k)
+    d.rectangle((c - 17 * k, 26 * k, c + 17 * k, 33 * k), fill=(230, 190, 70, 255), outline=ink, width=2 * k)
+    d.polygon([(c - 8 * k, 33 * k), (c + 8 * k, 33 * k), (c + 8 * k, 128 * k), (c, 148 * k), (c - 8 * k, 128 * k)],
+              fill=(176, 186, 204, 255), outline=ink, width=2 * k)
+    d.line([(c, 36 * k), (c, 140 * k)], fill=(240, 246, 255, 255), width=2 * k)
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def _cloud() -> Image.Image:
+    """A dark storm cloud (thunder)."""
+    k, w, h = 2, 300, 170
+    im = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for cx, cy, r, col in ((90, 90, 55, (70, 72, 92)), (160, 72, 66, (80, 82, 104)), (225, 95, 50, (70, 72, 92)),
+                           (150, 105, 58, (58, 60, 78))):
+        d.ellipse(((cx - r) * k, (cy - r) * k, (cx + r) * k, (cy + r) * k), fill=col + (245,))
+    im = im.filter(ImageFilter.GaussianBlur(3))
+    return im.resize((w, h), Image.LANCZOS)
+
+
 def _sticker(img: Image.Image, outline: int = 6) -> Image.Image:
     """A picture as a die-cut sticker: a white outline around it (the look
     the idea board used for the newer weapons)."""
@@ -1943,7 +1984,7 @@ class DuelPainter:
         self.knife = _emoji("1f52a", 118)
         self.shield = _emoji("1f6e1", 118)
         self.icons = {**self.guns, "knife": self.knife, "shield": self.shield}
-        if recipe.get("arsenal") in (2, 3):
+        if recipe.get("arsenal") in (2, 3, 4):
             self.guns.update(laser=_gun("laser"), freeze=_gun("freeze"), flamethrower=_gun("flamethrower"))
             self.saw = _saw()
             self.bomb = _emoji("1f4a3", 104)
@@ -1958,7 +1999,13 @@ class DuelPainter:
             self.twister = _emoji("1f32a", 170)
             self.peel = _emoji("1f34c", 76)
             self.spin_pics = {w: _emoji(EMOJI_ARMS[w], 92) for w in ("boomerang", "axe")}
-        if recipe.get("arsenal") == 3:                    # the anime weapons
+        if recipe.get("arsenal") == 4:                    # the newer anime weapons
+            for w, code in ANIME2_EMOJI.items():
+                self.icons[w] = _sticker(_emoji(code, 100), 5)
+            self.charm_pic = _charm()
+            self.sword_pic = _sword()
+            self.cloud_pic = _cloud()
+        if recipe.get("arsenal") in (3, 4):               # the anime weapons
             self.icons["shuriken"] = _sticker(_shuriken(96), 4)
             self.icons["kunai"] = _sticker(_kunai(), 4)
             self.icons["slashwave"] = _sticker(_crescent(100), 4)
@@ -2268,6 +2315,10 @@ class DuelPainter:
             if abs(scale - 1) > 0.01:
                 sp = sp.resize((int(sp.width * scale), int(sp.height * scale)), Image.LANCZOS)
             x, y = P(b["x"], b["y"])
+            if b.get("lift_h", 0) > 0:                 # gravity: held up in the air, its shadow below
+                r = sl(D_BALL) * (1 - b["lift_h"] / 300)
+                d.ellipse((x - r, y - r * 0.35, x + r, y + r * 0.35), fill=(0, 0, 0, 110))
+                y -= sl(b["lift_h"])
             im.alpha_composite(sp, (int(x - sp.width / 2), int(y - sp.height / 2)))
             if b.get("spin", 0) > 0:                   # slipped on a banana: stars go round
                 for j in range(3):
@@ -2508,6 +2559,101 @@ class DuelPainter:
             d.ellipse((x - c, y - c, x + c, y + c), fill=(0, 0, 0, 255))
         elif k in ANIME_THINGS:
             self.anime_thing(im, d, sim, m, x, y, age)
+        elif k in ANIME2_THINGS:
+            self.anime2_thing(im, d, sim, m, x, y, age)
+
+    def anime2_thing(self, im, d, sim, m, x, y, age):
+        """The newer anime weapons' things (each one shows where it will hit
+        before it does: a wind-up, a bright peak, then it fades)."""
+        P, sl, sw = self.P, self.sl, self.sw
+        k = m["k"]
+        if k == "charm":
+            stuck = m["stuck"] is not None
+            ang = m["off"] + math.pi / 2 if stuck else m["a"] + math.pi / 2
+            g = self.img("charm-pic", self.charm_pic).rotate(-math.degrees(ang), resample=Image.BICUBIC, expand=True)
+            if stuck:                                 # stuck on: glows red, faster as it's about to go off
+                left = max(0.0, CHARM_BOOM - (sim.t - m["grp"]["t0"]))
+                pulse = 0.5 + 0.5 * math.sin(sim.t * (10 + 30 * (1 - left / CHARM_BOOM)))
+                r = sl(30 + 10 * pulse)
+                d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 60, 50, int(80 + 120 * pulse)))
+            else:
+                tx, ty = P(m["x"] - math.cos(m["a"]) * 60, m["y"] - math.sin(m["a"]) * 60)
+                d.line([(tx, ty), (x, y)], fill=(255, 236, 190, 120), width=sw(8))
+            im.alpha_composite(g, (int(x - g.width / 2), int(y - g.height / 2)))
+        elif k == "swords":
+            cx, cy = x, y
+            first = m["pts"][0][2]
+            if sim.t < first:                         # the danger zone, before the first sword lands
+                f = 1 - (first - sim.t) / 0.3
+                r = sl(190)
+                d.ellipse((cx - r, cy - r * 0.8, cx + r, cy + r * 0.8), outline=(255, 70, 60, int(120 + 120 * f)),
+                          width=sw(5))
+            for px, py, at, landed in m["pts"]:
+                X, Y = P(px, py)
+                g = self.img("sword-pic", self.sword_pic)
+                if sim.t < at:
+                    f = (at - sim.t) / 0.3
+                    if f > 1:
+                        continue
+                    yy = Y - sl(700) * f          # falling, point down
+                    d.line([(X, yy - sl(160)), (X, yy - sl(40))], fill=(230, 240, 255, 110), width=sw(6))
+                    im.alpha_composite(g, (int(X - g.width / 2), int(yy - g.height)))
+                else:
+                    fade = max(0.0, 1 - (sim.t - at - 0.35) / 0.35)
+                    if fade <= 0:
+                        continue
+                    if sim.t - at < 0.12:             # the impact: a white flash and dust
+                        r = sl(60)
+                        d.ellipse((X - r, Y - r * 0.5, X + r, Y + r * 0.5), fill=(255, 255, 255, 200))
+                    gg = g if fade >= 1 else g.copy()
+                    if fade < 1:
+                        gg.putalpha(gg.getchannel("A").point(lambda v, f=fade: int(v * f)))
+                    im.alpha_composite(gg, (int(X - g.width / 2), int(Y - g.height * 0.75)))
+        elif k == "icebolt":
+            a = math.atan2(m["vy"], m["vx"])
+            L1, L2, wd = sl(46), sl(20), sl(13)
+            ca, sa = math.cos(a), math.sin(a)
+            pts = [(x + ca * L1, y + sa * L1), (x - sa * wd, y + ca * wd), (x - ca * L2, y - sa * L2),
+                   (x + sa * wd, y - ca * wd)]
+            tx, ty = x - ca * sl(110), y - sa * sl(110)
+            d.line([(tx, ty), (x, y)], fill=(170, 230, 255, 110), width=sw(10))
+            d.polygon(pts, fill=(150, 220, 255, 240), outline=(235, 250, 255, 255))
+            d.line([(x - ca * L2 * 0.5, y - sa * L2 * 0.5), (x + ca * L1 * 0.8, y + sa * L1 * 0.8)],
+                   fill=(255, 255, 255, 255), width=sw(3))
+        elif k == "storm":
+            f = min(1.0, age / STORM_FALL)
+            r = sl(140) * (0.6 + 0.4 * f)
+            q = int(r * 1.2) + 8                      # the strike zone, see-through on its own layer
+            lay = Image.new("RGBA", (2 * q, 2 * q), (0, 0, 0, 0))
+            ld = ImageDraw.Draw(lay)
+            pulse = 0.5 + 0.5 * math.sin(age * 30)
+            ld.ellipse((q - r, q - r * 0.8, q + r, q + r * 0.8), fill=(255, 240, 80, int(30 + 60 * f)),
+                       outline=(255, 240, 120, int(140 + 110 * pulse)), width=sw(6))
+            im.alpha_composite(lay, (int(x - q), int(y - q)))
+            g = self.img("cloud-pic", self.cloud_pic)
+            cy = y - sl(330)
+            im.alpha_composite(g, (int(x - g.width / 2), int(cy - g.height / 2)))
+            if age > STORM_FALL - 0.35 and int(age * 40) % 3 == 0:   # flickers inside the cloud
+                d.ellipse((x - sl(70), cy - sl(30), x + sl(70), cy + sl(30)), fill=(255, 250, 200, 120))
+        elif k == "lift":
+            f = min(1.0, age / LIFT_S)
+            wcol = sl(D_BALL + 30)
+            d.rectangle((x - wcol, y - sl(480), x + wcol, y), fill=(150, 90, 255, int(70 * (0.5 + f))))
+            for j in range(4):                        # rings rising up the column
+                ry = y - sl(480) * ((age * 1.6 + j / 4) % 1)
+                d.ellipse((x - wcol, ry - sl(14), x + wcol, ry + sl(14)), outline=(210, 170, 255, 200), width=sw(4))
+        elif k == "orb":
+            r = sl(m["r"])
+            col = tuple(m["owner"]["col"])
+            for kk, al in ((1.6, 50), (1.3, 90), (1.0, 220)):
+                rr = r * kk
+                d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=col + (al,))
+            rr = r * 0.6
+            d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 255, 255, 235))
+            for j in range(10):                       # sparks swirling round it
+                a = sim.t * 6 + j * 0.628
+                sx, sy = x + math.cos(a) * r * 1.35, y + math.sin(a) * r * 1.35
+                d.ellipse((sx - sl(6), sy - sl(6), sx + sl(6), sy + sl(6)), fill=(255, 255, 220, 230))
 
     def anime_thing(self, im, d, sim, m, x, y, age):
         """The anime weapons' things in flight."""
@@ -2697,7 +2843,7 @@ class DuelPainter:
             img, dist, rot = self.saw, D_BALL + 74, -math.degrees(a) * 4
         elif w == "bomb":
             img, dist, rot = self.bomb, D_BALL + 30, -math.degrees(a) * 0.3
-        elif w in ANIME_WEAPONS:
+        elif w in ANIME_WEAPONS or w in ANIME2_WEAPONS:
             img = self.icons[w]
             rot = -math.degrees(a) * 3 if w == "shuriken" else -math.degrees(a) if w in ("kunai", "slashwave") else 0
             dist = D_BALL + img.width * 0.38 - b["kick"] * 14
@@ -2856,6 +3002,54 @@ class DuelPainter:
                     d.line([(ex, ey), (x1, y1)], fill=col, width=sw(max(2, int(wd * wk))))
                 r = sl(110 * wk)
                 d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=(255, 255, 255, int(220 * L)))
+            elif k == "afterimage":                     # flash step: ghosts of the ball along its path
+                x1, y1 = P(e["x1"], e["y1"])
+                c = tuple(e["col"])
+                d.line([(ex, ey), (x1, y1)], fill=(255, 255, 255, int(200 * L)), width=sw(10))
+                for j in range(1, 5):
+                    gx, gy = ex + (x1 - ex) * j / 5, ey + (y1 - ey) * j / 5
+                    r = sl(D_BALL * (0.7 + 0.06 * j))
+                    d.ellipse((gx - r, gy - r, gx + r, gy + r), fill=c + (int(110 * L * j / 5),))
+            elif k == "xslash":                         # two crossed cuts: drawn in fast, then fade
+                c = tuple(e["col"])
+                grow = min(1.0, (1 - L) * 5 + 0.2)
+                for da in (0.6, -0.6):
+                    a = e["ang"] + da
+                    Lh = sl(230) * grow
+                    p0 = (ex - math.cos(a) * Lh, ey - math.sin(a) * Lh)
+                    p1 = (ex + math.cos(a) * Lh, ey + math.sin(a) * Lh)
+                    d.line([p0, p1], fill=c + (int(150 * L),), width=sw(26))
+                    d.line([p0, p1], fill=(255, 255, 255, int(255 * L)), width=sw(8))
+            elif k == "frostring":
+                r = sl(D_BALL + 30 + (1 - L) * 420)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), outline=(170, 230, 255, int(220 * L)), width=sw(10))
+                d.ellipse((ex - r * 0.9, ey - r * 0.9, ex + r * 0.9, ey + r * 0.9),
+                          outline=(255, 255, 255, int(150 * L)), width=sw(4))
+            elif k == "skybolt":                        # lightning from the top of the screen to the spot
+                rng = random.Random(int(e["x"] * 3 + e["y"]))
+                pts, yy = [], 0.0
+                while yy < ey:
+                    pts.append((ex + rng.uniform(-60, 60) * self.sl(1), yy))
+                    yy += rng.uniform(60, 130)
+                pts.append((ex, ey))
+                for wd, col in ((40, (255, 240, 120, int(90 * L))), (18, (200, 230, 255, int(200 * L))),
+                                (7, (255, 255, 255, int(255 * L)))):
+                    d.line(pts, fill=col, width=sw(wd), joint="curve")
+                r = sl(150 * (1.2 - L * 0.4))
+                d.ellipse((ex - r, ey - r * 0.6, ex + r, ey + r * 0.6), fill=(255, 250, 200, int(160 * L)))
+            elif k == "domainfx":                       # the dark domain: the ring goes dark round them
+                c = tuple(e["col"])
+                a = min(1.0, (1 - L) * 4) * min(1.0, L * 3)
+                r = sl(520)
+                d.ellipse((ex - r, ey - r, ex + r, ey + r), fill=(20, 0, 40, int(150 * a)))
+                for j in range(3):
+                    rr = r * (0.45 + 0.25 * j)
+                    d.ellipse((ex - rr, ey - rr, ex + rr, ey + rr), outline=(200, 80, 255, int(200 * a)), width=sw(4))
+                for j in range(12):
+                    an = j * 0.5236 + sim.t * 0.8
+                    d.line([(ex + math.cos(an) * r * 0.45, ey + math.sin(an) * r * 0.45),
+                            (ex + math.cos(an) * r * 0.95, ey + math.sin(an) * r * 0.95)],
+                           fill=(230, 150, 255, int(150 * a)), width=sw(3))
             elif k == "poof":
                 rng = random.Random(int(e["x"] * 7 + e["y"]))
                 for j in range(7):
@@ -4251,6 +4445,43 @@ def _sound(kind: str, seed: int = 0) -> np.ndarray:
         zap = np.sin(2 * np.pi * np.cumsum(1600 * np.exp(-t * 5) + 200) / SR) * 0.5
         noise = _lp(_noise(len(t), seed), 5) * 3
         return np.tanh((body + zap + noise) * np.exp(-t * 2.2) * 2) * 0.9
+    if kind == "flashstep":           # a flash step: a sharp air-cut + a high ring
+        t = tt(0.45)
+        cut = _lp(_noise(len(t), seed), 1) * np.exp(-t * 30)
+        ring = np.sin(2 * np.pi * np.cumsum(2600 * np.exp(-t * 3) + 900) / SR) * np.exp(-t * 7)
+        return np.tanh((cut * 0.8 + ring * 0.35) * 1.5) * 0.6
+    if kind == "charm":               # paper charms thrown: a flutter
+        t = tt(0.4)
+        flut = _lp(_noise(len(t), seed), 3) * (0.5 + 0.5 * np.sign(np.sin(2 * np.pi * 26 * t)))
+        return flut * np.exp(-t * 6) * 0.4
+    if kind == "stick":               # a charm sticks on: a soft slap
+        t = tt(0.12)
+        return _lp(_noise(len(t), seed), 5) * np.exp(-t * 50) * 0.5
+    if kind == "swordrain":           # swords called down: a rising shimmer
+        t = tt(0.5)
+        f = 600 + 2400 * t / 0.5
+        return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.sin(np.pi * t / 0.5) * 0.18
+    if kind == "stab":                # a sword lands: a metal thunk
+        t = tt(0.25)
+        clank = sum(np.sin(2 * np.pi * f * t) * np.exp(-t * d) for f, d in ((1450, 22), (2730, 30), (520, 16)))
+        thud = _lp(_noise(len(t), seed), 6) * np.exp(-t * 40)
+        return np.tanh((clank * 0.4 + thud) * 1.6) * 0.45
+    if kind == "nova":                # the frost nova: a crystalline burst
+        t = tt(0.7)
+        burst = _lp(_noise(len(t), seed), 1) * np.exp(-t * 14)
+        chime = sum(np.sin(2 * np.pi * f * t) for f in (1800, 2400, 3150)) * np.exp(-t * 5) / 3
+        return np.tanh((burst * 0.7 + chime * 0.5) * 1.4) * 0.6
+    if kind == "gravity":             # gravity: a deep warble going up
+        t = tt(LIFT_S)
+        f = 60 + 180 * (t / LIFT_S) + 20 * np.sin(2 * np.pi * 7 * t)
+        return np.tanh(np.sin(2 * np.pi * np.cumsum(f) / SR) * 2) * np.minimum(1, t / 0.05) * 0.4
+    if kind.startswith("sp_"):        # a special move going off: a big hit + its own colour
+        t = tt(1.1)
+        body = np.sin(2 * np.pi * np.cumsum(50 + 60 * np.exp(-t * 5)) / SR)
+        noise = _lp(_noise(len(t), seed), 4) * 2.5
+        top = {"sp_rush": 3000, "sp_orb": 900, "sp_dragons": 400, "sp_domain": 220}.get(kind, 1200)
+        sweep = np.sin(2 * np.pi * np.cumsum(top * np.exp(-t * 3) + 80) / SR) * 0.6
+        return np.tanh((body + noise + sweep) * np.exp(-t * 2.6) * 2) * 0.85
     if kind == "steal":               # lines stolen (race)
         t = tt(0.2)
         return _lp(_noise(len(t), seed), 4) * np.exp(-t * 22) * 0.35

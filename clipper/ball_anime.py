@@ -421,7 +421,10 @@ class Cut:
             d.line([(0, 0), (W, 30)], fill=(255, 214, 40, 255), width=10)
             d.line([(0, 270), (W, 300)], fill=(255, 214, 40, 255), width=10)
             band.alpha_composite(_disc(self.pics[i], c, 250, 8), (70, 25))
-            words = _fit("SPECIAL MOVE!", 120, W - 420, fill=(255, 214, 40, 255), stroke=(0, 0, 0, 255), sw=9)
+            from clipper import ball_duel as bd
+            sps = self.recipe.get("specials") or []
+            label = bd.SPECIAL_LABELS.get(sps[i], "SPECIAL MOVE!") if len(sps) > i else "SPECIAL MOVE!"
+            words = _fit(label, 120, W - 420, fill=(255, 214, 40, 255), stroke=(0, 0, 0, 255), sw=9)
             band.alpha_composite(words, (W - 60 - words.width, 150 - words.height // 2))
             self._sp[i] = band
         return self._sp[i]
