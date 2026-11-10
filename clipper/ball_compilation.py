@@ -25,6 +25,7 @@ from typing import List
 
 MAX_S = 14 * 60
 MIN_VIDEOS = 3           # YouTube wants 3+ chapters of 10+ s each
+MIN_S = 190              # a vertical video of 3 minutes or less is a Short: no long-form watch hours
 
 
 def pick(items: List[dict], max_s: float = MAX_S) -> List[dict]:

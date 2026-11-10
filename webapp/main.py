@@ -7549,6 +7549,8 @@ def _balls_compile(now: datetime.datetime) -> None:
         items = ball_compilation.pick(_balls_compile_items(now))
         if len(items) < ball_compilation.MIN_VIDEOS:
             raise RuntimeError(f"only {len(items)} videos this week (it needs {ball_compilation.MIN_VIDEOS})")
+        if sum(i["seconds"] for i in items) < ball_compilation.MIN_S:
+            raise RuntimeError("under 3 minutes of videos this week: YouTube would count it as a Short")
         _balls_save_compilation(entry)
         ball_compilation.build(ball_evolution._ffmpeg(), [it["path"] for it in items], out)
         start = datetime.datetime.fromtimestamp(items[0]["posted"], _balls_tz()).date()
@@ -7773,7 +7775,11 @@ def balls_compile_now() -> dict:
     if _balls_compile_state["running"]:
         raise HTTPException(409, "A compilation is being made already.")
     now = datetime.datetime.now(_balls_tz())
-    n = len(ball_compilation.pick(_balls_compile_items(now)))
+    picked = ball_compilation.pick(_balls_compile_items(now))
+    n = len(picked)
+    if n >= ball_compilation.MIN_VIDEOS and sum(i["seconds"] for i in picked) < ball_compilation.MIN_S:
+        raise HTTPException(409, "The posted videos still here add up to under 3 minutes: YouTube would count "
+                                 "the compilation as a Short. Try again later in the week.")
     if n < ball_compilation.MIN_VIDEOS:
         raise HTTPException(409, f"Only {n} posted videos from the last 7 days are still here; it needs "
                                  f"{ball_compilation.MIN_VIDEOS}.")

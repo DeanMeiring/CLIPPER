@@ -132,5 +132,8 @@ class TokenStore:
         # A refresh response doesn't always include a new refresh_token --
         # keep the one already on file if this one didn't send one.
         refreshed.setdefault("refresh_token", data["refresh_token"])
+        # ... nor always the granted scopes (ball_playlists.can_use reads them)
+        if data.get("scope"):
+            refreshed.setdefault("scope", data["scope"])
         self.save(refreshed)
         return refreshed["access_token"]
