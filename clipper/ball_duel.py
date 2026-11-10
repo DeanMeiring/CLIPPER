@@ -2425,6 +2425,8 @@ class DuelPainter:
                 c = self.scaled["crown"] = _emoji("1f451", 70).rotate(18, resample=Image.BICUBIC, expand=True)
             im.alpha_composite(c, (32 - 18, top - 46))
         pill = (f"{lg['cat'].upper()}  ·  {lg['tag']}" if lg.get("cat") else f"{lg['tag']}  ·  FIGHT #{lg['no']}")
+        if (lg.get("part") or 0) >= 2:
+            pill = f"{lg['cat'].upper()}  ·  PART {lg['part']}"      # a rivalry that goes on (ball_league)
         fp = self.fonts.get("pill")
         if fp is None:
             fp = self.fonts["pill"] = _font(32)

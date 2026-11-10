@@ -6098,7 +6098,8 @@ def _balls_make(vid: str) -> None:
         # champion against the next challenger, with their records
         ball_duel.duel_recipe(recipe, force="colours")
         league_pick = settings.get("league_next") or None
-        match = ball_league.next_match(_balls_league_history(video), recipe["seed"], league_pick)
+        match = ball_league.next_match(_balls_league_history(video), recipe["seed"], league_pick,
+                                       colours=settings.get("league_colours", True))
         ball_league.apply(recipe, match)
         if match["tag"] != "YOUR PICK":
             league_pick = None
@@ -7555,8 +7556,9 @@ def _balls_learn_due(s: dict) -> bool:
 
 def _balls_league_view(s: dict) -> dict:
     hist = _balls_league_history()
-    nxt = ball_league.next_match(hist, "preview", s.get("league_next") or None)
-    return {"on": bool(s.get("league")), "slot": s.get("league_slot") or "", "pick": s.get("league_next") or "",
+    nxt = ball_league.next_match(hist, "preview", s.get("league_next") or None,
+                                 colours=s.get("league_colours", True))
+    return {"on": bool(s.get("league")), "colours_on": s.get("league_colours", True), "slot": s.get("league_slot") or "", "pick": s.get("league_next") or "",
             "fights": nxt["no"] - 1, "table": ball_league.table(hist),
             "next": {"names": nxt["names"], "tag": nxt["tag"], "cat": nxt.get("cat")},
             "last": [{"no": f.get("no"), "names": f["names"], "winner": f["winner"], "tag": f.get("tag")}
@@ -7952,6 +7954,7 @@ class BallsSettings(BaseModel):
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
+    league_colours: Optional[bool] = None
 
 
 @protected.put("/api/balls/settings")
@@ -7997,6 +8000,8 @@ def balls_settings(req: BallsSettings) -> dict:
         if req.league_slot and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", req.league_slot):
             raise HTTPException(400, "Use a time like 15:00.")
         data["league_slot"] = req.league_slot
+    if req.league_colours is not None:
+        data["league_colours"] = bool(req.league_colours)
     if req.league_next is not None:
         if req.league_next and req.league_next not in ball_league.BY_NAME:
             raise HTTPException(400, "unknown colour")
@@ -13126,7 +13131,8 @@ __NAV_LINKS__
 
   <div class="section" data-tab="fights">
     <h3>🏆 Ball League</h3>
-    <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a brand fight</label>
+    <label class="toggle"><input id="lg-on" type="checkbox"> Make every 1v1 duel a league fight</label>
+    <label class="toggle"><input id="lg-colours" type="checkbox"> The colour characters (Royal Purple, Cherry Red...) take turns with the brands</label>
     <details class="more"><summary>ℹ️ How it works</summary><div class="hint">The 1v1 duels are one running series of brand fights: Apple VS Samsung, BMW VS Audi, TikTok VS Instagram, PlayStation VS Steam, Nike VS Adidas, with the brands’ logos as the balls. The category changes every fight, each has its own champion, both records are on screen, a close loss gets a rematch and new brands step up. Pick a brand people ask for in the comments and it gets the next fight in its category.</div></details>
     <div class="lg-next" id="lg-next"></div>
     <div class="lg-row"><label for="lg-pick">Next challenger (from the comments):</label>
@@ -13400,6 +13406,7 @@ function renderLeague() {
   const G = S.league;
   if (!G) return;
   $('lg-on').checked = G.on;
+  $('lg-colours').checked = G.colours_on;
   const dot = (name) => {
     const r = G.table.find(x => x.name === name);
     const d = el('span', 'lg-dot'); d.style.background = r ? r.col : '#888'; return d;
@@ -13430,6 +13437,7 @@ function renderLeague() {
   for (const f of G.last) last.appendChild(el('li', '', `#${f.no}: ${f.names[0]} VS ${f.names[1]} — ${f.winner} won`));
 }
 $('lg-on').addEventListener('change', () => saveSettings({ league: $('lg-on').checked }));
+$('lg-colours').addEventListener('change', () => saveSettings({ league_colours: $('lg-colours').checked }));
 $('lg-pick').addEventListener('change', () => saveSettings({ league_next: $('lg-pick').value }));
 
 function renderLearn() {
