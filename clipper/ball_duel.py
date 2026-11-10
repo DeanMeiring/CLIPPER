@@ -476,6 +476,28 @@ METEOR_FALL, SPECIAL_CHARGE, SPECIAL_DMG = 1.1, 0.7, 3
 # ``special: True`` (the first anime-weapon videos) keeps the
 # first-to-the-last-heart rule and 3 hearts.
 SPECIAL_FULL, SPECIAL_DEALT, SPECIAL_METER_DMG = 6.0, 0.0, 2
+# More anime weapons + special moves (10 Nov, Dean: "update the weapons, make
+# new weapons, new special moves"). Only recipes with ``arsenal: 4``
+# (``anime_arsenal2``) draw them; every older fight plays out as before.
+ANIME2_WEAPONS = {
+    "flashstep": ("flashstep", 2, 2),   # vanishes, appears behind them and slashes: 2 hearts
+    "talisman": ("talisman", 1, 2),     # four paper charms home in and stick, then go off: a heart each, 3 at most
+    "swordrain": ("swordrain", 1, 2),   # swords rain down around them: a heart a sword, 2 at most
+    "frostnova": ("nova", 1, 2),        # ice shards burst out all round: 1 heart and frozen
+    "thunder": ("thunder", 2, 2),       # a storm cloud follows them, then lightning: 2 close, 1 near
+    "gravity": ("lift", 2, 1),          # lifts them into the air and slams them down: 2 hearts
+}
+ALL_WEAPONS.update(ANIME2_WEAPONS)
+ANIME2 = tuple(ANIME2_WEAPONS)
+ANIME2_KINDS = tuple(v[0] for v in ANIME2_WEAPONS.values())
+ANIME2_THINGS = ("charm", "swords", "icebolt", "storm", "lift", "rush", "orb", "domain")
+ANIME2_EMOJI = {"flashstep": "1f4a8", "talisman": "1f4dc", "swordrain": "2694", "frostnova": "2744",
+                "thunder": "26c8", "gravity": "1fa90"}
+STORM_FALL, LIFT_S, CHARM_BOOM, SWORDS_N = 1.0, 0.75, 1.3, 7
+# Each fighter's own special move (``recipe["specials"]``, one per fighter):
+SPECIALS = ("beam", "rush", "orb", "dragons", "domain")
+SPECIAL_LABELS = {"beam": "MEGA BEAM!", "rush": "THOUSAND CUTS!", "orb": "GIANT ORB!", "dragons": "DRAGON STORM!",
+                  "domain": "DARK DOMAIN!"}
 
 
 def anime_arsenal(recipe: dict) -> dict:
@@ -485,6 +507,19 @@ def anime_arsenal(recipe: dict) -> dict:
     recipe["arsenal"] = 3
     recipe["weapons"] = mix.sample(CLASSICS, 3) + mix.sample(NEWER, 4) + mix.sample(ANIME, 4)
     recipe["special"] = "meter"
+    return recipe
+
+
+def anime_arsenal2(recipe: dict) -> dict:
+    """The newer anime fights (arsenal 4): 3 classics, 3 newer, 2 of the first
+    anime weapons and 4 of the new ones, and a special move of each
+    fighter's own (two different ones), on the special bar."""
+    mix = random.Random(f"anime2-weapons-{recipe['seed']}")
+    recipe["arsenal"] = 4
+    recipe["weapons"] = (mix.sample(CLASSICS, 3) + mix.sample(NEWER, 3) + mix.sample(ANIME, 2)
+                         + mix.sample(ANIME2, 4))
+    recipe["special"] = "meter"
+    recipe["specials"] = mix.sample(SPECIALS, 2)
     return recipe
 
 
@@ -503,7 +538,8 @@ C_CY, C_K = 1050, 1.08
 ARENAS = ("neon", "notebook", "chalk", "ice", "boxing")
 ARENA_SHAPES = {"ice": (540, 1130, 420, 480, 170), "boxing": (540, 1130, 440, 440, 14)}
 NEW_FX = {"wave": 2.2, "bolt": 3.2, "flame": 2.6, "slashfx": 3.0, "fall": 1.5,      # how fast the newer effects fade
-          "aura": 1 / SPECIAL_CHARGE, "megabeam": 1.4, "poof": 2.4, "crater": 0.8}
+          "aura": 1 / SPECIAL_CHARGE, "megabeam": 1.4, "poof": 2.4, "crater": 0.8,
+          "afterimage": 2.6, "xslash": 3.2, "frostring": 2.4, "skybolt": 2.2, "domainfx": 0.9}
 NEW_KINDS = ("dash", "slam", "throw", "bow", "chain", "flame", "magnet", "trap", "glove", "pan", "summon",
              "potion")
 D_BALL = 64
@@ -525,7 +561,7 @@ class DuelSim:
         self.keep = False            # tournament: a ball holding a weapon walks past the others
         self.ring = D_R              # tournament: sudden death closes the ring in
         self.max_drops = 4           # weapons waiting at once while rushing (battle royale: more)
-        self.new_arms = recipe.get("arsenal") in (2, 3)
+        self.new_arms = recipe.get("arsenal") in (2, 3, 4)
         self.arms = WEAPONS2 if self.new_arms else WEAPONS
         if recipe.get("weapons"):
             self.arms = {k: ALL_WEAPONS[k] for k in recipe["weapons"] if k in ALL_WEAPONS}
@@ -533,6 +569,7 @@ class DuelSim:
         self.special = bool(recipe.get("special")) and not players
         self.special_used = False
         self.meter_on = self.special and recipe.get("special") == "meter"
+        self.sp_kinds = list(recipe.get("specials") or []) if not players else []
         self.bombs: list = []
         self.things: list = []       # thrown / summoned things (the newer weapons)
         # the arena's walls: None = the ring (every older fight); else a rounded
@@ -713,7 +750,7 @@ class DuelSim:
 
     def _move(self, dt):
         for b in self._movers():
-            if b["frozen"] > 0 or b.get("powering"):
+            if b["frozen"] > 0 or b.get("powering") or b.get("stun", 0) > 0:
                 continue                 # frozen solid (or powering up a special): it stays where it is
             b["x"] += b["vx"] * dt
             b["y"] += b["vy"] * dt
@@ -892,6 +929,8 @@ class DuelSim:
             if b["frozen"] > 0:
                 b["frozen"] = max(0.0, b["frozen"] - dt)
                 continue                 # frozen: can't use its weapon either
+            if b.get("stun", 0) > 0:
+                continue                 # held up (gravity, a special move): no weapon either
             if b.get("powering"):
                 continue                 # powering up the special move
             w = b["weapon"]
@@ -937,6 +976,8 @@ class DuelSim:
                 self._use(b, o, w, kind, dmg, aim, dt)
             elif kind in ANIME_KINDS:
                 self._use_anime(b, o, w, kind, dmg, aim, dt)
+            elif kind in ANIME2_KINDS:
+                self._use_anime2(b, o, w, kind, dmg, aim, dt)
             elif w == "minigun" and b["burst"] > 0:
                 b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 4)
                 b["burst"] -= dt
@@ -1283,7 +1324,11 @@ class DuelSim:
                 b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 8)
                 b["powering"] = max(0.0, b["powering"] - dt)
                 if b["powering"] <= 0:
-                    self._megabeam(b, aim)
+                    kind = self.sp_kinds[b["i"]] if len(self.sp_kinds) > b["i"] else "beam"
+                    if kind == "beam":
+                        self._megabeam(b, aim)
+                    else:
+                        self._special2(b, o, kind, aim)
                     sp = self._spd(b)
                     b["vx"], b["vy"] = sp * math.cos(aim + math.pi), sp * math.sin(aim + math.pi)
 
@@ -1306,6 +1351,250 @@ class DuelSim:
                 if self.damage(o, SPECIAL_METER_DMG if self.meter_on else SPECIAL_DMG, x0 + dx * t, y0 + dy * t, b) \
                         and o["alive"]:
                     self._fling(o, a)
+
+    # -- the newer anime weapons (ANIME2_WEAPONS, arsenal 4)
+    def _use_anime2(self, b, o, w, kind, dmg, aim, dt):
+        b["wang"] += _ang_diff(aim, b["wang"]) * min(1, dt * 7)
+        a = b["wang"]
+        x, y = b["x"] + math.cos(a) * (D_BALL + 40), b["y"] + math.sin(a) * (D_BALL + 40)
+        if b["held"] < 0.4:
+            return
+        if kind == "flashstep":
+            # vanish, appear on their far side, slash on the way through
+            away = math.atan2(o["y"] - b["y"], o["x"] - b["x"])
+            for turn in (0.0, 0.7, -0.7, 1.4, -1.4):
+                nx = o["x"] + math.cos(away + turn) * (2 * D_BALL + 40)
+                ny = o["y"] + math.sin(away + turn) * (2 * D_BALL + 40)
+                if not self._outside(nx, ny, D_BALL + 10):
+                    break
+            else:
+                nx, ny = b["x"], b["y"]
+            self.effects.append({"k": "afterimage", "x": b["x"], "y": b["y"], "x1": nx, "y1": ny, "life": 1.0,
+                                 "col": b["col"]})
+            b["x"], b["y"] = nx, ny
+            self.effects.append({"k": "xslash", "x": o["x"], "y": o["y"], "life": 1.0, "ang": away, "col": b["col"]})
+            self.sfx.append((self.t, "flashstep", 0))
+            if self.damage(o, dmg, o["x"], o["y"], b) and o["alive"]:
+                self._fling(o, away)
+            back = away + math.pi
+            sp = self._spd(b)
+            b["vx"], b["vy"] = sp * math.cos(back), sp * math.sin(back)
+        elif kind == "talisman":
+            grp = {"stuck": 0, "done": False, "target": o, "t0": self.t, "owner": b, "dmg": dmg}
+            for s in (-1.5, -0.5, 0.5, 1.5):
+                ca = a + s * 0.35
+                self.things.append({"k": "charm", "x": x, "y": y, "a": ca, "owner": b, "t0": self.t, "grp": grp,
+                                    "stuck": None, "spin": s})
+            self.sfx.append((self.t, "charm", 0))
+        elif kind == "swordrain":
+            lead = 0.35
+            cx = o["x"] + o["vx"] * lead
+            cy = o["y"] + o["vy"] * lead
+            if self._outside(cx, cy, D_BALL):
+                cx, cy = o["x"], o["y"]
+            pts = []
+            for j in range(SWORDS_N):
+                r, aa = self.rng.uniform(0, 150), self.rng.uniform(0, 6.28)
+                pts.append([cx + r * math.cos(aa), cy + r * math.sin(aa), self.t + 0.3 + j * 0.1, False])
+            self.things.append({"k": "swords", "x": cx, "y": cy, "owner": b, "t0": self.t, "pts": pts, "hits": 0,
+                                "target": o})
+            self.sfx.append((self.t, "swordrain", 0))
+        elif kind == "nova":
+            grp = {"hits": 0}
+            for j in range(14):
+                aa = a + j * 2 * math.pi / 14
+                self.things.append({"k": "icebolt", "x": b["x"] + math.cos(aa) * (D_BALL + 10),
+                                    "y": b["y"] + math.sin(aa) * (D_BALL + 10), "vx": 950 * math.cos(aa),
+                                    "vy": 950 * math.sin(aa), "a": aa, "owner": b, "t0": self.t, "grp": grp,
+                                    "dmg": dmg})
+            self.effects.append({"k": "frostring", "x": b["x"], "y": b["y"], "life": 1.0})
+            self.sfx.append((self.t, "nova", 0))
+        elif kind == "thunder":
+            self.things.append({"k": "storm", "x": o["x"], "y": o["y"], "target": o, "owner": b, "t0": self.t,
+                                "dmg": dmg})
+            self.sfx.append((self.t, "rumble", 0))
+        elif kind == "lift":
+            if math.hypot(o["x"] - b["x"], o["y"] - b["y"]) > 700 and b["held"] < 1.5:
+                return                                    # wait until they're closer
+            self.things.append({"k": "lift", "x": o["x"], "y": o["y"], "target": o, "owner": b, "t0": self.t,
+                                "dmg": dmg})
+            o["stun"] = LIFT_S + 0.1
+            self.sfx.append((self.t, "gravity", 0))
+        b["kick"] = 1.0
+        b["weapon"] = None                                # cast: it's gone
+
+    def _special2(self, b, o, kind, a):
+        """The newer special moves (each fighter's own, recipe["specials"])."""
+        self.sfx.append((self.t, "sp_" + kind, b["i"]))
+        self.shake = max(self.shake, 0.6)
+        b["kick"] = 1.0
+        if kind == "rush":
+            o["stun"] = 0.75
+            b["stun"] = 0.75
+            self.things.append({"k": "rush", "x": o["x"], "y": o["y"], "owner": b, "target": o, "t0": self.t,
+                                "cuts": 0, "home": (b["x"], b["y"])})
+        elif kind == "orb":
+            self.things.append({"k": "orb", "x": b["x"], "y": b["y"] - 40, "a": a, "owner": b, "target": o,
+                                "t0": self.t, "r": 30.0})
+        elif kind == "dragons":
+            for s in (-1, 1):
+                da = a + s * 1.1
+                x, y = b["x"] + math.cos(da) * (D_BALL + 40), b["y"] + math.sin(da) * (D_BALL + 40)
+                self.things.append({"k": "dragon", "x": x, "y": y, "a": da, "owner": b, "t0": self.t,
+                                    "trail": [(x, y)] * 18, "dmg": SPECIAL_METER_DMG // 2})
+        elif kind == "domain":
+            o["stun"] = 1.0
+            self.things.append({"k": "domain", "x": o["x"], "y": o["y"], "owner": b, "target": o, "t0": self.t,
+                                "cuts": 0})
+            self.effects.append({"k": "domainfx", "x": o["x"], "y": o["y"], "life": 1.0, "col": b["col"]})
+
+    def _anime2_thing(self, m, dt) -> bool:
+        """One frame of a newer anime weapon's / special's thing; True when gone."""
+        k = m["k"]
+        age = self.t - m["t0"]
+        own = m["owner"]
+        foes = [t for t in self._boom_targets(own) if t["alive"]]
+        if k == "charm":
+            g = m["grp"]
+            if g["done"]:
+                return True
+            if m["stuck"] is not None:
+                t = m["stuck"]
+                m["x"] = t["x"] + math.cos(m["off"]) * (D_BALL - 6)
+                m["y"] = t["y"] + math.sin(m["off"]) * (D_BALL - 6)
+            else:
+                want = m["a"]
+                if foes:
+                    t = min(foes, key=lambda t: math.hypot(t["x"] - m["x"], t["y"] - m["y"]))
+                    want = math.atan2(t["y"] - m["y"], t["x"] - m["x"])
+                m["a"] += _ang_diff(want, m["a"]) * min(1, dt * (1.0 if age < 0.15 else 4.0))
+                m["x"] += 900 * math.cos(m["a"]) * dt
+                m["y"] += 900 * math.sin(m["a"]) * dt
+                for t in foes:
+                    if math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + 18:
+                        m["stuck"] = t
+                        m["off"] = math.atan2(m["y"] - t["y"], m["x"] - t["x"])
+                        g["stuck"] += 1
+                        g["target"] = t
+                        self.sfx.append((self.t, "stick", 0))
+                        break
+                if m["stuck"] is None and (age > 1.1 or self._outside(m["x"], m["y"])):
+                    return True                           # missed: it flutters away
+            if self.t - g["t0"] >= CHARM_BOOM and not g["done"]:
+                g["done"] = True
+                if g["stuck"] > 0:
+                    t = g["target"]
+                    self.sfx.append((self.t, "boom", 0))
+                    self.effects.append({"k": "boom", "x": t["x"], "y": t["y"], "life": 1.0, "col": (255, 90, 80)})
+                    self.damage(t, min(3, g["stuck"] * g["dmg"]), t["x"], t["y"], own)
+                return True
+            return False
+        if k == "swords":
+            t = m["target"]
+            for p in m["pts"]:
+                if not p[3] and self.t >= p[2]:
+                    p[3] = True
+                    self.sfx.append((self.t, "stab", 0))
+                    if m["hits"] < 2 and t["alive"] and math.hypot(t["x"] - p[0], t["y"] - p[1]) < D_BALL + 30:
+                        if self.damage(t, 1, p[0], p[1], own):
+                            m["hits"] += 1
+            return self.t > m["pts"][-1][2] + 0.7
+        if k == "icebolt":
+            m["x"] += m["vx"] * dt
+            m["y"] += m["vy"] * dt
+            for t in foes:
+                if math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < D_BALL + 16:
+                    if m["grp"]["hits"] < 1 and self.damage(t, m["dmg"], m["x"], m["y"], own) and t["alive"]:
+                        m["grp"]["hits"] += 1
+                        t["frozen"] = 1.0
+                        self.sfx.append((self.t, "freeze", 0))
+                        self.effects.append({"k": "ice", "ball": t, "x": t["x"], "y": t["y"], "life": 1.0})
+                    return True
+            return self._outside(m["x"], m["y"]) or age > 1.2
+        if k == "storm":
+            t = m["target"]
+            if age < STORM_FALL - 0.2 and t["alive"]:
+                m["x"] += (t["x"] - m["x"]) * min(1, dt * 6)
+                m["y"] += (t["y"] - m["y"]) * min(1, dt * 6)
+            if age >= STORM_FALL:
+                self.sfx.append((self.t, "thunder", 0))
+                self.shake = max(self.shake, 0.7)
+                self.effects.append({"k": "skybolt", "x": m["x"], "y": m["y"], "life": 1.0})
+                for o in foes:
+                    dd = math.hypot(o["x"] - m["x"], o["y"] - m["y"])
+                    if dd < 140:
+                        self.damage(o, m["dmg"], m["x"], m["y"], own)
+                    elif dd < 240:
+                        self.damage(o, 1, m["x"], m["y"], own)
+                return True
+            return False
+        if k == "lift":
+            t = m["target"]
+            if not t["alive"]:
+                t["lift_h"] = 0.0
+                return True
+            if age < LIFT_S:
+                t["lift_h"] = 110 * math.sin(min(1.0, age / LIFT_S) * math.pi / 2)
+                return False
+            t["lift_h"] = 0.0
+            self.sfx.append((self.t, "slam", 0))
+            self.shake = max(self.shake, 0.7)
+            self.effects.append({"k": "crater", "x": t["x"], "y": t["y"], "life": 1.0})
+            self.effects.append({"k": "wave", "x": t["x"], "y": t["y"], "life": 1.0, "r": 300})
+            self.damage(t, m["dmg"], t["x"], t["y"], own)
+            return True
+        if k == "rush":
+            t = m["target"]
+            n = min(5, int(age / 0.12))
+            while m["cuts"] < n and t["alive"]:
+                m["cuts"] += 1
+                ang = m["cuts"] * 2.4 + 0.3
+                own["x"] = t["x"] + math.cos(ang) * (2 * D_BALL + 30)
+                own["y"] = t["y"] + math.sin(ang) * (2 * D_BALL + 30)
+                if self._outside(own["x"], own["y"], D_BALL):
+                    own["x"], own["y"] = m["home"]
+                self.effects.append({"k": "xslash", "x": t["x"], "y": t["y"], "life": 1.0, "ang": ang,
+                                     "col": own["col"]})
+                self.sfx.append((self.t, "flashstep", 0))
+            if age >= 0.72:
+                if t["alive"] and self.damage(t, SPECIAL_METER_DMG, t["x"], t["y"], own) and t["alive"]:
+                    self._fling(t, math.atan2(t["y"] - own["y"], t["x"] - own["x"]))
+                return True
+            return False
+        if k == "orb":
+            t = m["target"]
+            if age < 0.3:
+                m["r"] = 30 + 90 * age / 0.3
+                return False
+            want = math.atan2(t["y"] - m["y"], t["x"] - m["x"]) if t["alive"] else m["a"]
+            m["a"] += _ang_diff(want, m["a"]) * min(1, dt * 3)
+            m["x"] += 760 * math.cos(m["a"]) * dt
+            m["y"] += 760 * math.sin(m["a"]) * dt
+            hit = t["alive"] and math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < m["r"] + D_BALL
+            if hit or age > 2.6 or self._outside(m["x"], m["y"], -m["r"] * 0.5):
+                self.sfx.append((self.t, "boom", 0))
+                self.shake = max(self.shake, 0.9)
+                self.effects.append({"k": "boom", "x": m["x"], "y": m["y"], "life": 1.0, "col": tuple(own["col"])})
+                self.effects.append({"k": "wave", "x": m["x"], "y": m["y"], "life": 1.0, "r": 360})
+                if t["alive"] and math.hypot(t["x"] - m["x"], t["y"] - m["y"]) < m["r"] + D_BALL + 90:
+                    if self.damage(t, SPECIAL_METER_DMG, m["x"], m["y"], own) and t["alive"]:
+                        self._fling(t, m["a"])
+                return True
+            return False
+        if k == "domain":
+            t = m["target"]
+            n = min(6, int(age / 0.13))
+            while m["cuts"] < n:
+                m["cuts"] += 1
+                self.effects.append({"k": "xslash", "x": t["x"], "y": t["y"], "life": 1.0,
+                                     "ang": m["cuts"] * 1.05, "col": (200, 80, 255)})
+                self.sfx.append((self.t, "stab", 0))
+            if age >= 0.95:
+                if t["alive"]:
+                    self.damage(t, SPECIAL_METER_DMG, t["x"], t["y"], own)
+                return True
+            return False
+        return True
 
     def _anime_thing(self, m, dt) -> bool:
         """One frame of an anime weapon's thing; True when it's gone."""
@@ -1511,11 +1800,15 @@ class DuelSim:
                 gone = age > m["life"]
             elif k in ANIME_THINGS:
                 gone = self._anime_thing(m, dt)
+            elif k in ANIME2_THINGS:
+                gone = self._anime2_thing(m, dt)
             if gone:
                 self.things.remove(m)
 
     def _status(self, dt):
         for b in self.balls:
+            if b.get("stun", 0) > 0:
+                b["stun"] = max(0.0, b["stun"] - dt)
             for key in ("dash", "fast", "giant", "small", "knock", "spin"):
                 v = b.get(key, 0)
                 if v > 0:
