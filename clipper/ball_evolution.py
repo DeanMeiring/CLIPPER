@@ -65,6 +65,16 @@ PULL = 900.0             # px/s^2, a bit more than gravity
 SECONDS_CAP = 90.0
 END_HOLD = 1.8           # was 4: viewers swipe once the result shows (29 Oct curves)
 END_FADE = 0.35          # s of audio fade at the very end
+# The loop ending (recipe["loop"], 10 Nov): the duel and spike-ring hits
+# lost 25-40% of their viewers in the last 5-10% -- they swipe once the
+# result shows -- while the fill-up box, whose last frame runs straight
+# back into its first, kept 106%. So a "loop" video's last LOOP_FADE s
+# blend into its own first frame, and the Shorts player's replay carries
+# on seamlessly. The result stays up as long as before (LOOP_HOLD =
+# END_HOLD): 1.6 was tried and the league's "KEEPS THE BELT" line, which
+# comes in 0.9-1.15 s after the K.O., was fading as soon as it appeared.
+LOOP_HOLD = 1.8
+LOOP_FADE = 0.45
 MAX_UNLOCK_GAP = 18.0
 GATE_DRIP = 1.5          # gates course: the hole drips every this many s at first
 
@@ -1655,6 +1665,22 @@ def _duel_text_base(recipe: dict) -> dict:
 
 # ---- render ----------------------------------------------------------------
 
+def _smooth(x: float) -> float:
+    return x * x * (3 - 2 * x)
+
+
+def loop_phase(recipe: dict, sim) -> "float | None":
+    """For a "loop" recipe after its result: 0..1 through the blend into
+    the first frame, > 1 once the video should stop; else None."""
+    done = getattr(sim, "done_at", None)
+    if not recipe.get("loop") or done is None:
+        return None
+    d = sim.t - done
+    if d > LOOP_HOLD:
+        return 2.0
+    return max(0.0, (d - (LOOP_HOLD - LOOP_FADE)) / LOOP_FADE)
+
+
 def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) -> dict:
     """Draw and encode the video. ``progress(fraction)`` is called as it
     goes (estimated from ``expected_end`` when pick_seed set it)."""
@@ -1680,12 +1706,21 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
         stdin=subprocess.PIPE)
     total = ((recipe.get("expected_end") or SECONDS_CAP - END_HOLD) + END_HOLD) * FPS
     frame = 0
+    first = None
     try:
         while not sim.finished:
             sim.step()
+            lp = loop_phase(recipe, sim)
+            if lp is not None and lp > 1:
+                break
             im = painter.frame(sim)
             if look:
                 im = look.apply(im)
+            if recipe.get("loop"):
+                if first is None:
+                    first = im.copy()
+                elif lp:
+                    im = Image.blend(im, first, _smooth(lp))
             proc.stdin.write(im.tobytes())
             frame += 1
             if progress and frame % 30 == 0:
