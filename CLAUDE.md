@@ -1566,8 +1566,7 @@ merge it yourself; merging stays Dean's call per the rule above.
   one ball rode the turning walls and hardly ever fell out.
   `_balls_pick_shape`: box videos take the shape used longest ago (old ones
   count as square). Cards show the shape chip.
-- **Fight arsenal 4 (10 Nov, branch `claude/fight-arsenal`, NOT wired in
-  yet -- waiting on Dean):** `ball_duel.anime_arsenal2` (arsenal 4): 3
+- **Fight arsenal 4 (10 Nov):** every anime-cut comment fight now gets `ball_duel.anime_arsenal2` (arsenal 4): 3
   classics + 3 newer + 2 anime + 4 of `ANIME2_WEAPONS` (flash step,
   talismans, sword rain, frost nova, thunder, gravity) and a special of each
   fighter's own (`recipe["specials"]` from `SPECIALS`: beam, rush "Thousand
@@ -1575,8 +1574,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   Effects follow wind-up -> bright peak -> fade, and show the danger zone
   first. New anime arenas: shrine, snowpeak, neonrain, moon. Older fights
   hash-identical. 60 seeds: every new weapon and special used, median
-  27 s, 24 good seeds. To go live: `_balls_make` calls `anime_arsenal2`
-  instead of `anime_arsenal`.
+  27 s, 24 good seeds. `_balls_make` calls `anime_arsenal2` (was
+  `anime_arsenal`). A "3D look" was pitched (pre-rendered 3D sprites from
+  Dean's 3D-Model repo, and/or fake-3D in Pillow: tilted ring, shadows,
+  floor reflection, glow, ~+1-1.5 min a fight); Dean paused it for now.
 - **Four a day (7 Nov):** Dean asked for 4 videos a day, 2 fights + 2
   drops: comment fights at 12:00 and 20:00 (`crowd_slots`), drop videos at
   08:00 and 15:00 (`slots`), put on the live settings once by
