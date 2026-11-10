@@ -6034,6 +6034,18 @@ def _balls_last_anime_arena(exclude: str) -> Optional[str]:
     return made[-1]["recipe"]["anime_arena"] if made else None
 
 
+# The kinds whose hits lost viewers once the result showed (10 Nov): they
+# end on the loop ending. The box already loops by itself.
+BALLS_LOOP_KINDS = ("duel", "zen", "shrink", "escape", "spikes", "center", "jaws", "spiral")
+
+
+def _balls_last_anime_intro(exclude: str) -> Optional[str]:
+    """The intro setting of the last anime-cut comment fight made."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("cut") == "anime"]
+    made.sort(key=lambda v: v.get("made_at") or v.get("started_at") or 0)
+    return (made[-1]["recipe"].get("intro") or "vs") if made else None
+
+
 def _balls_make(vid: str) -> None:
     video = _balls.load(vid)
     opts = video.get("options") or {}
@@ -6080,6 +6092,9 @@ def _balls_make(vid: str) -> None:
         ball_crowd.apply(recipe, crowd)
         if anime:
             recipe["cut"] = "anime"
+            # with or without the 0.9 s VS intro, taking turns (10 Nov: a
+            # week's test -- the report's "variant" shows which is which)
+            recipe["intro"] = "none" if _balls_last_anime_intro(vid) != "none" else "vs"
             # one of the anime arenas (Dean liked all six), never the last
             # fight's; the ring underneath is the neon one's
             recipe["arena"] = "neon"
@@ -6117,6 +6132,10 @@ def _balls_make(vid: str) -> None:
         recipe["art"] = art
         if art in ("sticker", "notebook", "pixel", "comic"):
             recipe["backdrop"] = "black"
+    if fmt in BALLS_LOOP_KINDS or (crowd and crowd["look"] == "duel"):
+        # the loop ending (be.loop_phase): stop soon after the result and
+        # blend into the first frame, so the replay carries on
+        recipe["loop"] = True
     if fmt == "box" and not recipe.get("shape"):
         # Dean (9 Nov): other box shapes in the same look, taking turns
         recipe["shape"] = _balls_pick_shape(vid)
