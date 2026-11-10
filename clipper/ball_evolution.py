@@ -111,6 +111,35 @@ ARENA_HOOKS = {
     "zen": ["Reminds me of something...", "Only one makes it out", "Which one escapes?"],
     "trail": ["With every bounce, the ball evolves", "Every bounce, it grows", "Watch it fill the circle"],
 }
+# More ways to say the same game, so the titles (the hook is the title) don't
+# repeat word for word (10 Nov: YouTube's "inauthentic content" rule reads
+# whole channels for template-looking videos; "Every escape adds 3 balls"
+# had gone out three times). ``fresh_hook`` picks one the last videos of
+# the kind didn't use; ARENA_HOOKS stays as it was, so make_recipe's draws
+# are unchanged.
+MORE_HOOKS = {
+    "box": ["Each ball that escapes brings 3 more", "One hole, and every escape adds 3",
+            "Will the box overflow?", "3 more balls for every escape", "How long until it's full?",
+            "Every ball out means 3 more in"],
+    "zen": ["Only one gets out", "One way out. Who finds it?", "Touch a spike and you stay",
+            "Which ball finds the gap?", "Spikes everywhere, one exit"],
+    "shrink": ["It grows on every bounce", "Can it fill the whole circle?", "Bigger with every bounce",
+               "How many bounces to fill it?"],
+    "escape": ["Will it escape?", "Every escape makes two more", "Can it find the gap?",
+               "How many make it out?"],
+}
+
+
+def fresh_hook(fmt: str, current: str, used: list, seed) -> str:
+    """``current`` if none of ``used`` (the latest videos' hooks of this
+    kind) has it, else one of the kind's hooks they haven't used."""
+    if current not in used or fmt not in MORE_HOOKS:
+        return current
+    pool = list(dict.fromkeys(ARENA_HOOKS.get(fmt, []) + MORE_HOOKS[fmt]))
+    left = [h for h in pool if h not in used] or [h for h in pool if h != current] or [current]
+    return random.Random(f"fresh-hook-{seed}").choice(left)
+
+
 ARENA_ENDINGS = {"center": ["WINNER!", "THE BEST!", "CHAMPION!"], "spikes": ["SURVIVED!", "FINAL FORM!"],
                  "shrink": ["MAXED OUT!", "FINAL FORM!", "STUCK!"], "jaws": ["ESCAPED!", "FINAL FORM!"],
                  "spiral": ["MULTIPLIED!", "SPIRAL GONE!", "FINAL FORM!"], "rays": ["PERFECT FOCUS!", "FINAL FORM!"],
