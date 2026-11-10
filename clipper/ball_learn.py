@@ -22,7 +22,10 @@ import statistics
 from typing import Callable, Dict, List, Optional
 
 ANALYTICS_URL = "https://youtubeanalytics.googleapis.com/v2/reports"
-MIN_AGE_H = 48            # a video's numbers count once it's had two days (the feed tests it first)
+# a video's numbers count once it's had five days: the hits broke out on
+# day 2-4 (10 Nov: the 25.7k box read 1,025 views at 48 h), so two days
+# undercounted exactly the videos that mattered
+MIN_AGE_H = 120
 LOOKBACK_DAYS = 60
 FLOOR = 2.0               # % every rotation kind keeps
 CAP = 34.0                # % no kind goes over
@@ -188,7 +191,7 @@ def clamp(plan: dict, rotation: List[str], allowed: List[str]) -> dict:
 _PROMPT = """You decide what a small YouTube Shorts channel makes next. The channel posts \
 2 physics-simulation Shorts a day (bouncing balls, made by code), picking each video's \
 "kind" from a mix you set. Here are the channel's own numbers from the last {days} days, \
-per kind (only videos at least 2 days old):
+per kind (only videos at least 5 days old):
 
 {table}
 
