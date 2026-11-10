@@ -64,6 +64,8 @@ from clipper import ball_photos
 from clipper import ball_evolution
 from clipper import ball_arenas
 from clipper import ball_sounds
+from clipper import ball_playlists
+from clipper import ball_compilation
 from clipper import instagram
 from clipper.highlights import fetch_vod_clips
 from clipper.long_vod import gather_candidates, is_long_vod, quick_probe_accessible, select_and_map
@@ -2793,7 +2795,9 @@ def youtube_login(profile: str = DEFAULT_CHANNEL_PROFILE) -> RedirectResponse:
     for s, (issued_at, _profile) in list(_youtube_oauth_states.items()):
         if issued_at < cutoff:
             _youtube_oauth_states.pop(s, None)
-    return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state))
+    # the Ball Evolution channel also asks to manage playlists (ball_playlists)
+    extra = (ball_playlists.SCOPE,) if profile == BALLS_PROFILE else ()
+    return RedirectResponse(youtube_oauth.build_authorize_url(redirect_uri, state, extra))
 
 
 @protected.get("/auth/youtube/callback")
@@ -5972,7 +5976,9 @@ BALLS_PROFILE = "balls"
 # channel together (1,600 of 10,000 units each), so on a day with 4 ball
 # uploads, more than 2 clips + Rocket League uploads would be refused.
 BALLS_UPLOADS_PER_DAY = 4
-BALLS_KEEP_DAYS = 3         # a posted Short's video is kept this long, then deleted to save space
+# a posted Short's video is kept this long, then deleted to save space; 8
+# since 10 Nov so Sunday's weekly compilation still has the whole week
+BALLS_KEEP_DAYS = 8
 BALLS_MAX_QUEUE = 10
 BALLS_TIMEOUT = 40 * 60     # a make that runs longer than this is stuck
 _BALLS_MAKING = ("queued", "picking", "rendering")
@@ -7089,7 +7095,8 @@ def balls_state() -> dict:
         used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
     themes = [{"key": k, "label": f"{ball_evolution.emoji_char(t['chain'][0][0])} {k.capitalize()}"}
               for k, t in ball_evolution.THEMES.items()]
-    return {"settings": s, "videos": [_balls_view(v) for v in reversed(videos) if not v.get("hidden")],
+    return {"settings": s, "extras": _balls_extras_view(s),
+            "videos": [_balls_view(v) for v in reversed(videos) if not v.get("hidden")],
             "schedule": taken,
             "next_slot": slot, "uploads_today": _balls_uploads_today(videos),
             "uploads_per_day": BALLS_UPLOADS_PER_DAY, "connected": _youtube_token_stores[BALLS_PROFILE].is_connected(),
@@ -7472,7 +7479,122 @@ def _balls_upload(vid: str, slot: Optional[datetime.datetime]) -> dict:
         _balls_uploading.discard(vid)
     yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
           "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
+    series = _balls_file_in_playlist((video.get("recipe") or {}).get("format") or "", video_id)
+    if series:
+        yt["playlist"] = series
     return _balls_view(_balls.update(vid, lambda v: v.update(status="scheduled" if slot else "posted", youtube=yt)))
+
+
+def _balls_file_in_playlist(kind: str, video_id: str) -> Optional[str]:
+    """Put an upload in its series' playlist (ball_playlists) when the
+    channel's login allows it; never fails the upload."""
+    store = _youtube_token_stores[BALLS_PROFILE]
+    if not ball_playlists.can_use(store.load()):
+        return None
+    try:
+        token = store.get_valid_access_token()
+        series, ids = ball_playlists.file_video(token, _balls.settings().get("playlists") or {}, kind, video_id)
+        _balls.save_settings({"playlists": ids})
+        return series
+    except Exception as e:
+        print(f"[playlists] {video_id} not added: {e}", flush=True)
+        return None
+
+
+# ---- the weekly compilation (ball_compilation) --------------------------------
+# Sunday evening, after the last post, the week's videos go up as one long
+# video with a chapter each: long-form watch hours are the realistic way into
+# the Partner Program (10 Nov research). One extra upload a week, on top of
+# BALLS_UPLOADS_PER_DAY.
+# Sunday (Monday = 0) from 20:01 SA: the 20:05 wake-up posts the 20:00 video,
+# then the same tick makes the compilation with it in
+BALLS_COMPILE_DAY, BALLS_COMPILE_AFTER = 6, "20:01"
+_balls_compile_state: dict = {"running": False, "error": None}
+
+
+def _balls_compilations_file() -> Path:
+    return _balls.root / "compilations.json"
+
+
+def _balls_compilations() -> List[dict]:
+    try:
+        return json.loads(_balls_compilations_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _balls_save_compilation(entry: dict) -> None:
+    items = [c for c in _balls_compilations() if c.get("week") != entry["week"]] + [entry]
+    _balls_compilations_file().write_text(json.dumps(items[-20:], indent=1), encoding="utf-8")
+
+
+def _balls_week_key(now: datetime.datetime) -> str:
+    y, w, _ = now.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _balls_compile_items(now: datetime.datetime) -> List[dict]:
+    """The week's posted videos whose mp4 is still here, oldest first."""
+    since = now.timestamp() - 7 * 86400
+    out = []
+    for v in _balls.videos():
+        yt = v.get("youtube") or {}
+        ts = yt.get("publish_at_ts") or 0
+        path = _balls.video_dir(v["id"]) / "video.mp4"
+        if (not yt.get("video_id") or yt.get("removed") or not (since <= ts <= now.timestamp())
+                or not path.is_file() or not v.get("seconds")):
+            continue
+        out.append({"path": path, "title": v.get("title") or "", "seconds": float(v["seconds"]), "posted": ts})
+    return sorted(out, key=lambda x: x["posted"])
+
+
+def _balls_compilation_due(s: dict, now: datetime.datetime) -> bool:
+    if not s.get("compilation", True) or _balls_compile_state["running"]:
+        return False
+    if now.weekday() != BALLS_COMPILE_DAY or now.strftime("%H:%M") < BALLS_COMPILE_AFTER:
+        return False
+    done = next((c for c in _balls_compilations() if c.get("week") == _balls_week_key(now)), None)
+    return not done or (done.get("status") == "error" and time.time() - (done.get("at") or 0) > 3 * 3600)
+
+
+def _balls_compile(now: datetime.datetime) -> None:
+    """Join the week's videos and upload them as one regular video."""
+    st = _balls_compile_state
+    week = _balls_week_key(now)
+    entry = {"week": week, "status": "making", "at": time.time()}
+    stop_keepalive = threading.Event()
+    threading.Thread(target=_keepalive_loop, args=(stop_keepalive,), daemon=True).start()
+    out = _balls.root / f"compilation-{week}.mp4"
+    try:
+        items = ball_compilation.pick(_balls_compile_items(now))
+        if len(items) < ball_compilation.MIN_VIDEOS:
+            raise RuntimeError(f"only {len(items)} videos this week (it needs {ball_compilation.MIN_VIDEOS})")
+        if sum(i["seconds"] for i in items) < ball_compilation.MIN_S:
+            raise RuntimeError("under 3 minutes of videos this week: YouTube would count it as a Short")
+        _balls_save_compilation(entry)
+        ball_compilation.build(ball_evolution._ffmpeg(), [it["path"] for it in items], out)
+        start = datetime.datetime.fromtimestamp(items[0]["posted"], _balls_tz()).date()
+        text = ball_compilation.text(items, start, now.date())
+        token = _youtube_token_stores[BALLS_PROFILE].get_valid_access_token()
+        if not token:
+            raise RuntimeError("the Ball Evolution YouTube channel isn't connected")
+        video_id = youtube_upload.upload_video(token, out, title=text["title"], description=text["description"],
+                                               privacy_status="public", is_short=False, category_id="24")
+        entry.update(status="posted", video_id=video_id, url=f"https://youtube.com/watch?v={video_id}",
+                     title=text["title"], videos=len(items), seconds=round(sum(i["seconds"] for i in items)))
+        series = _balls_file_in_playlist("compilation", video_id)
+        if series:
+            entry["playlist"] = series
+        print(f"[compilation] {week}: {len(items)} videos, {entry['seconds']} s -> {video_id}", flush=True)
+    except Exception as e:
+        entry.update(status="error", error=str(e)[:300])
+        print(f"[compilation] {week} failed: {e}", flush=True)
+    finally:
+        entry["at"] = time.time()
+        _balls_save_compilation(entry)
+        out.unlink(missing_ok=True)
+        stop_keepalive.set()
+        st["running"] = False
 
 
 @protected.post("/api/balls/videos/{vid}/schedule")
@@ -7666,6 +7788,38 @@ def balls_crowd_block(req: BallsCrowdBlockRequest) -> dict:
     return balls_state()
 
 
+@protected.post("/api/balls/compilation")
+def balls_compile_now() -> dict:
+    """Make and post the compilation of the last 7 days now."""
+    if not _youtube_token_stores[BALLS_PROFILE].is_connected():
+        raise HTTPException(409, "Connect the Ball Evolution YouTube channel first (top of this page).")
+    if _balls_compile_state["running"]:
+        raise HTTPException(409, "A compilation is being made already.")
+    now = datetime.datetime.now(_balls_tz())
+    picked = ball_compilation.pick(_balls_compile_items(now))
+    n = len(picked)
+    if n >= ball_compilation.MIN_VIDEOS and sum(i["seconds"] for i in picked) < ball_compilation.MIN_S:
+        raise HTTPException(409, "The posted videos still here add up to under 3 minutes: YouTube would count "
+                                 "the compilation as a Short. Try again later in the week.")
+    if n < ball_compilation.MIN_VIDEOS:
+        raise HTTPException(409, f"Only {n} posted videos from the last 7 days are still here; it needs "
+                                 f"{ball_compilation.MIN_VIDEOS}.")
+    _balls_compile_state["running"] = True
+    threading.Thread(target=_balls_compile, args=(now,), daemon=True).start()
+    return balls_state()
+
+
+def _balls_extras_view(s: dict) -> dict:
+    """The weekly compilation and the playlists, for the Posting tab."""
+    ids = s.get("playlists") or {}
+    return {"compilation": {"on": s.get("compilation", True), "running": _balls_compile_state["running"],
+                            "last": _balls_compilations()[-3:][::-1]},
+            "playlists": {"on": ball_playlists.can_use(_youtube_token_stores[BALLS_PROFILE].load()),
+                          "lists": [{"name": ball_playlists.SERIES[k][0],
+                                     "url": f"https://www.youtube.com/playlist?list={v}"}
+                                    for k, v in ids.items() if k in ball_playlists.SERIES]}}
+
+
 @protected.get("/api/balls/report")
 def balls_report() -> FileResponse:
     f = _balls.root / "report.json"
@@ -7787,6 +7941,11 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
                 _balls.update(v["id"], lambda x: x.update(instagram={"status": "posting", "started_at": time.time()}))
                 threading.Thread(target=_balls_post_instagram, args=(v["id"], ig), daemon=True).start()
                 out["instagram"] += 1
+        # 4. Sunday evening: the week's videos as one long video (ball_compilation)
+        if _balls_compilation_due(s, now) and _youtube_token_stores[BALLS_PROFILE].is_connected():
+            _balls_compile_state["running"] = True
+            threading.Thread(target=_balls_compile, args=(now,), daemon=True).start()
+            out["compilation"] = _balls_week_key(now)
         _balls_last_tick = out
         if out["errors"]:
             print(f"[autopilot] {out}")
@@ -8001,6 +8160,7 @@ class BallsSettings(BaseModel):
     league: Optional[bool] = None
     league_slot: Optional[str] = None
     league_next: Optional[str] = None
+    compilation: Optional[bool] = None
     league_colours: Optional[bool] = None
 
 
@@ -8047,6 +8207,8 @@ def balls_settings(req: BallsSettings) -> dict:
         if req.league_slot and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", req.league_slot):
             raise HTTPException(400, "Use a time like 15:00.")
         data["league_slot"] = req.league_slot
+    if req.compilation is not None:
+        data["compilation"] = bool(req.compilation)
     if req.league_colours is not None:
         data["league_colours"] = bool(req.league_colours)
     if req.league_next is not None:
@@ -13145,6 +13307,16 @@ __NAV_LINKS__
     <div class="hint" id="quota"></div>
   </div>
 
+  <div class="section" data-tab="posting">
+    <h3>📼 Weekly compilation + playlists</h3>
+    <label class="toggle"><input id="cp-on" type="checkbox"> Every Sunday after the last post, put the week’s videos up as one long video</label>
+    <div class="hint">One chapter per video, under 14 minutes. Long videos count toward the Partner Program’s 4,000 watch hours; Shorts views don’t. It costs one extra upload a week.</div>
+    <ul class="ln-notes" id="cp-last"></ul>
+    <button id="cp-now" type="button" class="secondary">📼 Make one from the last 7 days now</button>
+    <div class="hint" id="pl-hint" style="margin-top:12px"></div>
+    <ul class="ln-notes" id="pl-lists"></ul>
+  </div>
+
   <div class="section" data-tab="numbers">
     <h3>🧠 Learning from your numbers</h3>
     <label class="toggle"><input id="ln-on" type="checkbox"> Pick the kinds by what does well on the channel</label>
@@ -13283,6 +13455,7 @@ function render() {
   renderLearn();
   renderCrowd();
   renderLeague();
+  renderExtras();
   if (document.activeElement !== $('s-mark')) $('s-mark').value = st.watermark;
   if (document.activeElement !== $('s-desc')) $('s-desc').value = st.description;
   $('s-bed').value = st.bed || 'auto';
@@ -13449,6 +13622,42 @@ $('cr-now').onclick = async () => {
   const b = $('cr-now'); b.disabled = true;
   try { S = await api('/api/balls/crowd/refresh', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 4000); }
   catch (e) { alert(e.message); }
+  b.disabled = false;
+};
+
+function renderExtras() {
+  const X = S.extras;
+  if (!X) return;
+  $('cp-on').checked = X.compilation.on;
+  const last = $('cp-last'); last.innerHTML = '';
+  if (X.compilation.running) last.appendChild(el('li', '', '⏳ Making this week’s compilation...'));
+  for (const c of X.compilation.last) {
+    const li = el('li');
+    if (c.status === 'posted') {
+      const a = el('a', '', `${c.week}: ${c.videos} videos, ${Math.round(c.seconds / 60)} min`); a.href = c.url; a.target = '_blank';
+      li.append('✅ ', a);
+    } else if (c.status === 'error') li.textContent = `⚠️ ${c.week}: ${c.error}`;
+    else li.textContent = `⏳ ${c.week}: being made`;
+    last.appendChild(li);
+  }
+  $('cp-now').disabled = X.compilation.running;
+  $('pl-hint').textContent = X.playlists.on
+    ? '📂 Every upload goes into its series’ playlist (fill-up boxes, Ball League, comment fights, spike rings, the rest).'
+    : '📂 Playlists per series are off: press 🔄 Reconnect at the top of the page once and allow “manage your YouTube account”, which playlists need.';
+  const pl = $('pl-lists'); pl.innerHTML = '';
+  for (const p of X.playlists.lists) {
+    const li = el('li'), a = el('a', '', p.name); a.href = p.url; a.target = '_blank'; li.appendChild(a); pl.appendChild(li);
+  }
+}
+$('cp-on').addEventListener('change', () => saveSettings({ compilation: $('cp-on').checked }));
+$('cp-now').onclick = async () => {
+  const b = $('cp-now'); b.disabled = true;
+  try {
+    const r = await fetch('/api/balls/compilation', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'Failed');
+    S = d; render();
+  } catch (e) { alert(e.message); }
   b.disabled = false;
 };
 

@@ -38,13 +38,15 @@ def is_configured() -> bool:
     return bool(os.environ.get("YOUTUBE_OAUTH_CLIENT_ID") and os.environ.get("YOUTUBE_OAUTH_CLIENT_SECRET"))
 
 
-def build_authorize_url(redirect_uri: str, state: str) -> str:
+def build_authorize_url(redirect_uri: str, state: str, extra_scopes=()) -> str:
+    """``extra_scopes``: more than SCOPES for one account (the Ball
+    Evolution channel asks for youtube.force-ssl, for its playlists)."""
     client_id = os.environ["YOUTUBE_OAUTH_CLIENT_ID"]
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": " ".join(SCOPES),
+        "scope": " ".join(list(SCOPES) + [x for x in extra_scopes if x not in SCOPES]),
         "access_type": "offline",
         # Force Google to hand back a refresh_token every time, not just on
         # the very first consent -- reconnecting after a revoke/expiry
@@ -130,5 +132,8 @@ class TokenStore:
         # A refresh response doesn't always include a new refresh_token --
         # keep the one already on file if this one didn't send one.
         refreshed.setdefault("refresh_token", data["refresh_token"])
+        # ... nor always the granted scopes (ball_playlists.can_use reads them)
+        if data.get("scope"):
+            refreshed.setdefault("scope", data["scope"])
         self.save(refreshed)
         return refreshed["access_token"]

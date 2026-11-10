@@ -1650,6 +1650,28 @@ merge it yourself; merging stays Dean's call per the rule above.
   used); `ball_learn.MIN_AGE_H` is 120 (the report's 48 h views read 1,025
   for the 25.7k box). YouTube Analytics runs ~2 days behind, so judge any
   change on day 5+.
+- **Weekly compilation + playlists (10 Nov, from the research):** Shorts
+  pay ~$0.02-0.30 per 1,000 views and the Shorts route into the Partner
+  Program needs 10M views in 90 days (20M for new applicants from 1 Feb
+  2027); the other route is 4,000 long-form watch hours, which the big
+  ball channels earn with compilations. `clipper/ball_compilation.py`:
+  every Sunday from 20:01 SA (the 20:05 wake-up posts the 20:00 video,
+  then the same tick, step 4) the week's posted videos still on disk are
+  joined with ffmpeg's concat demuxer, no re-encode (same 1080x1920 H.264
+  + AAC; one veryfast re-encode only if that fails), newest first up to
+  14 min (unverified channels can't upload over 15), and uploaded public as
+  a regular video (`is_short=False`, category 24) with a chapter per video.
+  One extra upload a week on top of `BALLS_UPLOADS_PER_DAY`. Store
+  `BASE_DIR/_balls/compilations.json`; `BALLS_KEEP_DAYS` is 8 (was 3) so
+  the week's mp4s are still there; `settings["compilation"]` (default on),
+  "📼 Make one from the last 7 days now" (`POST /api/balls/compilation`).
+  Playlists (`clipper/ball_playlists.py`): every upload goes into its
+  series' playlist (box / Ball League / comment fights / spike rings / the
+  rest / weekly), made on first use, ids in `settings["playlists"]`;
+  needs the `youtube.force-ssl` scope, which the balls login now asks for
+  (`youtube_oauth.build_authorize_url(extra_scopes)`, only for that
+  profile): until Dean reconnects, `can_use` is false and nothing changes.
+  50 units per call. A failure never fails the upload.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
