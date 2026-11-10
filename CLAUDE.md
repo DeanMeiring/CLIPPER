@@ -1604,6 +1604,19 @@ merge it yourself; merging stays Dean's call per the rule above.
   ball hits) `_balls_pick_meme`: the sound used longest ago, the cursed meow
   included. Make's song menu has "sfx:<kind>" choices to test one. Old
   recipes (meow / knock / phonk / none) sound exactly as before.
+- **Loop ending + intro test (10 Nov, from the research):** the duel and
+  zen hits lost 25-40% of viewers in the last 5-10% (they swipe once the
+  result shows); the box, whose end runs back into its start, kept 106%.
+  New recipes of `BALLS_LOOP_KINDS` (duel, zen, shrink, escape, spikes,
+  center, jaws, spiral) and comment 1v1s carry `recipe["loop"]`:
+  `be.loop_phase` stops the video `LOOP_HOLD` 1.6 s after the result (not
+  `END_HOLD` 1.8) and blends the last `LOOP_FADE` 0.45 s into the video's
+  own first frame, so the Shorts replay carries on. Comment fights' stayed
+  % fell to 33-39% with the anime cut, so anime fights alternate
+  `recipe["intro"]` "none" (straight into the fight; `ball_anime.frames`
+  skips the VS card and its sounds) / "vs" (`_balls_last_anime_intro`).
+  The report's video lines carry `variant` ("anime, no intro", "loop
+  end"...) to compare them. Recipes without the fields render as before.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
