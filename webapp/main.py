@@ -7494,26 +7494,93 @@ def _balls_upload(vid: str, slot: Optional[datetime.datetime]) -> dict:
         _balls_uploading.discard(vid)
     yt = {"video_id": video_id, "url": f"https://youtube.com/shorts/{video_id}", "uploaded_at": time.time(),
           "publish_at": slot.isoformat() if slot else None, "publish_at_ts": slot.timestamp() if slot else time.time()}
-    series = _balls_file_in_playlist((video.get("recipe") or {}).get("format") or "", video_id)
-    if series:
-        yt["playlist"] = series
+    # its playlist comes later (_balls_playlist_sync): right after the upload
+    # YouTube answers 409 while it's still processing the video
     return _balls_view(_balls.update(vid, lambda v: v.update(status="scheduled" if slot else "posted", youtube=yt)))
 
 
-def _balls_file_in_playlist(kind: str, video_id: str) -> Optional[str]:
-    """Put an upload in its series' playlist (ball_playlists) when the
-    channel's login allows it; never fails the upload."""
-    store = _youtube_token_stores[BALLS_PROFILE]
-    if not ball_playlists.can_use(store.load()):
-        return None
+# Playlists are filed from the tick, not at upload: a video added seconds
+# after its upload came back 409 (still processing). Each run files posted
+# videos at least BALLS_PLAYLIST_AFTER s old, oldest first, up to
+# BALLS_PLAYLIST_PER_DAY a day (50 quota units each, shared with uploads),
+# so the channel's older videos go in over a few days too. A video that
+# fails BALLS_PLAYLIST_TRIES times is left out.
+BALLS_PLAYLIST_AFTER = 15 * 60
+BALLS_PLAYLIST_PER_DAY = 20
+BALLS_PLAYLIST_TRIES = 3
+_balls_playlist_state: dict = {"running": False}
+
+
+def _balls_playlist_todo(now: float) -> List[tuple]:
+    """(kind, video id on YouTube, setter) for every posted video and
+    compilation not in a playlist yet, oldest first."""
+    out = []
+    for v in _balls.videos():
+        yt = v.get("youtube") or {}
+        if (not yt.get("video_id") or yt.get("removed") or yt.get("playlist")
+                or (yt.get("playlist_fails") or 0) >= BALLS_PLAYLIST_TRIES
+                or (yt.get("playlist_tried") or 0) > now - 3600       # a failure waits an hour
+                or (yt.get("publish_at_ts") or 0) > now - BALLS_PLAYLIST_AFTER):
+            continue
+        out.append((yt.get("publish_at_ts") or 0, (v.get("recipe") or {}).get("format") or "", yt["video_id"],
+                    ("video", v["id"])))
+    for c in _balls_compilations():
+        if (c.get("status") == "posted" and c.get("video_id") and not c.get("playlist")
+                and (c.get("playlist_fails") or 0) < BALLS_PLAYLIST_TRIES and (c.get("playlist_tried") or 0) < now - 3600
+                and (c.get("at") or 0) < now - BALLS_PLAYLIST_AFTER):
+            out.append((c.get("at") or 0, "compilation", c["video_id"], ("compilation", c["week"])))
+    return [x[1:] for x in sorted(out)]
+
+
+def _balls_playlist_mark(where: tuple, series: Optional[str]) -> None:
+    def put(d: dict) -> None:
+        if series:
+            d["playlist"] = series
+        else:
+            d["playlist_fails"] = (d.get("playlist_fails") or 0) + 1
+            d["playlist_tried"] = time.time()
+    if where[0] == "video":
+        _balls.update(where[1], lambda v: put(v.setdefault("youtube", {})))
+    else:
+        entry = next((c for c in _balls_compilations() if c.get("week") == where[1]), None)
+        if entry:
+            put(entry)
+            _balls_save_compilation(entry)
+
+
+def _balls_playlist_sync() -> None:
+    """File the videos not in a playlist yet (see above). Runs in a thread."""
+    st = _balls_playlist_state
     try:
+        store = _youtube_token_stores[BALLS_PROFILE]
+        if not ball_playlists.can_use(store.load()):
+            return
+        s = _balls.settings()
+        day = datetime.datetime.now(_balls_tz()).date().isoformat()
+        done = s.get("playlist_day") or {}
+        n = done.get("n", 0) if done.get("day") == day else 0
+        todo = _balls_playlist_todo(time.time())[:max(0, BALLS_PLAYLIST_PER_DAY - n)]
+        if not todo:
+            return
         token = store.get_valid_access_token()
-        series, ids = ball_playlists.file_video(token, _balls.settings().get("playlists") or {}, kind, video_id)
-        _balls.save_settings({"playlists": ids})
-        return series
+        ids = dict(s.get("playlists") or {})
+        added = 0
+        for kind, video_id, where in todo:
+            try:
+                series, _ = ball_playlists.file_video(token, ids, kind, video_id)
+                _balls_playlist_mark(where, series)
+                added += 1
+            except Exception as e:
+                _balls_playlist_mark(where, None)
+                print(f"[playlists] {video_id} not added: {e}", flush=True)
+            _balls.save_settings({"playlists": ids})      # a playlist made before a failed add is kept
+            n += 1
+        _balls.save_settings({"playlist_day": {"day": day, "n": n}})
+        print(f"[playlists] filed {added} of {len(todo)} videos ({n} today)", flush=True)
     except Exception as e:
-        print(f"[playlists] {video_id} not added: {e}", flush=True)
-        return None
+        print(f"[playlists] sync failed: {e}", flush=True)
+    finally:
+        st["running"] = False
 
 
 # ---- the weekly compilation (ball_compilation) --------------------------------
@@ -7597,9 +7664,6 @@ def _balls_compile(now: datetime.datetime) -> None:
                                                privacy_status="public", is_short=False, category_id="24")
         entry.update(status="posted", video_id=video_id, url=f"https://youtube.com/watch?v={video_id}",
                      title=text["title"], videos=len(items), seconds=round(sum(i["seconds"] for i in items)))
-        series = _balls_file_in_playlist("compilation", video_id)
-        if series:
-            entry["playlist"] = series
         print(f"[compilation] {week}: {len(items)} videos, {entry['seconds']} s -> {video_id}", flush=True)
     except Exception as e:
         entry.update(status="error", error=str(e)[:300])
@@ -7956,6 +8020,10 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
                 _balls.update(v["id"], lambda x: x.update(instagram={"status": "posting", "started_at": time.time()}))
                 threading.Thread(target=_balls_post_instagram, args=(v["id"], ig), daemon=True).start()
                 out["instagram"] += 1
+        # 3b. playlists for posted videos (and the older ones, a few a day)
+        if not _balls_playlist_state["running"]:
+            _balls_playlist_state["running"] = True
+            threading.Thread(target=_balls_playlist_sync, daemon=True).start()
         # 4. Sunday evening: the week's videos as one long video (ball_compilation)
         if _balls_compilation_due(s, now) and _youtube_token_stores[BALLS_PROFILE].is_connected():
             _balls_compile_state["running"] = True

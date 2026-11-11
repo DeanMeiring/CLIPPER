@@ -1672,6 +1672,18 @@ merge it yourself; merging stays Dean's call per the rule above.
   (`youtube_oauth.build_authorize_url(extra_scopes)`, only for that
   profile): until Dean reconnects, `can_use` is false and nothing changes.
   50 units per call. A failure never fails the upload.
+  11 Nov: after Dean reconnected, both uploads' adds came back 409 (the
+  add ran seconds after the upload, while YouTube was still processing)
+  and the playlists stayed empty; the ids of the playlists made just
+  before were lost too. Now nothing is added at upload: the tick's step
+  3b (`_balls_playlist_sync`, a thread) files posted videos and
+  compilations at least `BALLS_PLAYLIST_AFTER` 15 min old, oldest first,
+  up to `BALLS_PLAYLIST_PER_DAY` 20 a day (so the older videos go in over
+  a few days), a failure waits an hour, after `BALLS_PLAYLIST_TRIES` 3 it's
+  left out (`youtube.playlist` / `playlist_fails` / `playlist_tried`). A
+  series reuses the channel's playlist with its title (`ball_playlists.find`,
+  1 unit) before making one, and ids are saved even when the add fails.
+  Errors log YouTube's reason on one line.
 - **Brand packs on drop videos (11 Nov):** an evaluation of the 11 Nov
   report found every drop-video hit (boxes 23.7k / 16.2k, spike ring 14.9k)
   had a brand pack (apps / phones / gaming) and the deepening meow, while
