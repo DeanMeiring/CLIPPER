@@ -6316,9 +6316,10 @@ def _balls_pick_pack(vid: str, choice: Optional[str], brands: bool = False) -> O
         except (KeyError, OSError, ValueError):
             pack = None
     _balls_seed_starters()
+    pack = pack or _ball_packs.next_upload()       # Dean's own uploads first, always
     if not pack and brands:
         pack = _ball_packs.next_brand()            # a drop video: a brand pack (BALLS_OTHER_PACK_SHARE)
-    pack = pack or _ball_packs.next_upload() or _ball_packs.next_known() or _ball_packs.next_unused()
+    pack = pack or _ball_packs.next_known() or _ball_packs.next_unused()
     if pack is None and os.environ.get("ANTHROPIC_API_KEY"):
         try:
             pack = _balls_photo_pack()

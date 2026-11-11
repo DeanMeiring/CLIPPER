@@ -1681,8 +1681,8 @@ merge it yourself; merging stays Dean's call per the rule above.
   packs, unused first, then used longest ago) before the usual order,
   except `BALLS_OTHER_PACK_SHARE` 0.2 (seeded by video id) that keep the
   old order, so the channel doesn't turn into one template and the
-  comparison stays readable. Dean's own uploads still come first only on
-  those 20%; a pack picked in Make always wins.
+  comparison stays readable. A pack picked in Make, then Dean's own unused
+  uploads, still come first.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
