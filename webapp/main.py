@@ -12,6 +12,7 @@ import io
 import json
 import os
 import queue
+import random
 import re
 import secrets
 import shutil
@@ -6150,7 +6151,9 @@ def _balls_make(vid: str) -> None:
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
                                           note="Finding the pictures..."))
     if fmt not in ball_evolution.NO_PACK:          # duel / race: the balls are the contestants
-        pack = _balls_pick_pack(vid, opts.get("pack"))
+        brands = (opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_DROP_CYCLE
+                  and random.Random(f"brand-pack-{vid}").random() >= BALLS_OTHER_PACK_SHARE)
+        pack = _balls_pick_pack(vid, opts.get("pack"), brands=bool(brands))
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_sound(recipe, fmt, opts.get("song"), vid)
@@ -6285,7 +6288,16 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
     return True
 
 
-def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
+# 11 Nov (the channel's numbers): every drop-video hit -- the boxes at 23.7k
+# and 16.2k, the spike ring at 14.9k -- had a brand pack (apps, phones,
+# gaming) and the same kinds with flag or cursed packs stayed at 1-1.7k.
+# So autopilot drop videos take a brand pack, except this share, which
+# keeps the usual order (flags, cursed...) so the channel doesn't become
+# one template and the comparison stays readable.
+BALLS_OTHER_PACK_SHARE = 0.2
+
+
+def _balls_pick_pack(vid: str, choice: Optional[str], brands: bool = False) -> Optional[dict]:
     """The pictures for a video: a chosen pack, else your oldest unused
     upload, else a pack of things people know (Dean, 19 Oct: phones,
     countries... not just emojis) -- the bundled logo and flag packs, an
@@ -6304,7 +6316,10 @@ def _balls_pick_pack(vid: str, choice: Optional[str]) -> Optional[dict]:
         except (KeyError, OSError, ValueError):
             pack = None
     _balls_seed_starters()
-    pack = pack or _ball_packs.next_upload() or _ball_packs.next_known() or _ball_packs.next_unused()
+    pack = pack or _ball_packs.next_upload()       # Dean's own uploads first, always
+    if not pack and brands:
+        pack = _ball_packs.next_brand()            # a drop video: a brand pack (BALLS_OTHER_PACK_SHARE)
+    pack = pack or _ball_packs.next_known() or _ball_packs.next_unused()
     if pack is None and os.environ.get("ANTHROPIC_API_KEY"):
         try:
             pack = _balls_photo_pack()
