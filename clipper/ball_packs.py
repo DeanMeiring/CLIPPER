@@ -147,6 +147,15 @@ class PackStore:
         ok = [p for p in self.packs() if not p.get("flagged") and (not known or is_known(p))]
         return min(ok, key=lambda p: (p.get("used_at") or 0, p.get("created_at") or 0)) if ok else None
 
+    def next_brand(self) -> Optional[dict]:
+        """A brand (logo) pack: the oldest unused one, else the one used
+        longest ago (11 Nov: every drop-video hit had a brand pack)."""
+        ok = [p for p in self.packs() if str(p.get("template") or "").startswith("logos_") and not p.get("flagged")]
+        fresh = [p for p in ok if not p.get("used_by")]
+        if fresh:
+            return fresh[0]
+        return min(ok, key=lambda p: (p.get("used_at") or 0, p.get("created_at") or 0)) if ok else None
+
     def next_known(self) -> Optional[dict]:
         """A known-pictures pack (logos, flags): the oldest unused one, else
         the one used longest ago."""

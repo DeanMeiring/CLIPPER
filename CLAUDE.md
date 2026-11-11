@@ -1672,6 +1672,17 @@ merge it yourself; merging stays Dean's call per the rule above.
   (`youtube_oauth.build_authorize_url(extra_scopes)`, only for that
   profile): until Dean reconnects, `can_use` is false and nothing changes.
   50 units per call. A failure never fails the upload.
+- **Brand packs on drop videos (11 Nov):** an evaluation of the 11 Nov
+  report found every drop-video hit (boxes 23.7k / 16.2k, spike ring 14.9k)
+  had a brand pack (apps / phones / gaming) and the deepening meow, while
+  the same kinds with flag or cursed packs stayed at 1-1.7k (~8 videos: a
+  strong lead, not proof). Autopilot drop videos (`BALLS_DROP_CYCLE` kinds,
+  duels have no pack) now take `ball_packs.next_brand()` (the 5 `logos_`
+  packs, unused first, then used longest ago) before the usual order,
+  except `BALLS_OTHER_PACK_SHARE` 0.2 (seeded by video id) that keep the
+  old order, so the channel doesn't turn into one template and the
+  comparison stays readable. Dean's own uploads still come first only on
+  those 20%; a pack picked in Make always wins.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
