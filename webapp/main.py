@@ -6123,6 +6123,10 @@ def _balls_make(vid: str) -> None:
         match = ball_league.next_match(_balls_league_history(video), recipe["seed"], league_pick,
                                        colours=settings.get("league_colours", True))
         ball_league.apply(recipe, match)
+        if match["cat"] == "colours":
+            # 12 Nov: the colour duels that hit were on the dark neon ring; the
+            # first colour-league fight drew the notebook arena and got 4 likes
+            recipe["arena"] = "neon"
         if match["tag"] != "YOUR PICK":
             league_pick = None
     art = ball_looks.pick(recipe, _balls_last_art(vid), recipe["seed"])
@@ -6157,7 +6161,11 @@ def _balls_make(vid: str) -> None:
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_sound(recipe, fmt, opts.get("song"), vid)
-    if fmt in ball_evolution.MORE_HOOKS and recipe.get("hook"):
+    if fmt in BALLS_BEST_HOOKS and random.Random(f"best-hook-{vid}").random() < BALLS_BEST_HOOK_SHARE:
+        # 12 Nov: the titles of the hits come back most of the time
+        recipe["hook"] = BALLS_BEST_HOOKS[fmt][random.Random(f"best-hook-pick-{vid}").randrange(
+            len(BALLS_BEST_HOOKS[fmt]))]
+    elif fmt in ball_evolution.MORE_HOOKS and recipe.get("hook"):
         # the hook is the title: not the same words as the kind's last videos
         recipe["hook"] = ball_evolution.fresh_hook(fmt, recipe["hook"], _balls_recent_hooks(fmt, vid),
                                                    recipe["seed"])
@@ -6294,7 +6302,7 @@ def _balls_redo(vid: str, recipe: dict, verdict: dict) -> bool:
 # So autopilot drop videos take a brand pack, except this share, which
 # keeps the usual order (flags, cursed...) so the channel doesn't become
 # one template and the comparison stays readable.
-BALLS_OTHER_PACK_SHARE = 0.2
+BALLS_OTHER_PACK_SHARE = 0.5      # 12 Nov: was 0.2, but the 29.4k box and the 12.1k spike ring had flag packs
 
 
 def _balls_pick_pack(vid: str, choice: Optional[str], brands: bool = False) -> Optional[dict]:
@@ -6447,7 +6455,25 @@ def _balls_pick_shape(exclude: str) -> str:
     made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
     last = {(v["recipe"].get("shape") or "square"): i for i, v in enumerate(made)}
     shapes = ball_arenas.B_SHAPES
-    return min(shapes, key=lambda k: (last.get(k, -1), shapes.index(k)))
+    # 12 Nov: every box hit was the square, and the rotation kept it off the
+    # channel for a week; now the square 3 in 4, the other shapes take turns
+    # in the rest
+    if random.Random(f"box-shape-{exclude}").random() < BALLS_SQUARE_SHARE:
+        return "square"
+    others = [k for k in shapes if k != "square"]
+    return min(others, key=lambda k: (last.get(k, -1), shapes.index(k)))
+
+
+BALLS_SQUARE_SHARE = 0.75
+
+
+# The hits' own titles (12 Nov): "How fast does it fill up?" was on three box
+# hits in a row (22-29k) and "Every escape adds 3 balls" on the 23.9k one;
+# "Only one makes it out" on both spike-ring hits. They're used 2 in 3, the
+# rotation (fresh_hook) the rest, so titles still vary.
+BALLS_BEST_HOOKS = {"box": ("How fast does it fill up?", "Every escape adds 3 balls"),
+                    "zen": ("Only one makes it out",)}
+BALLS_BEST_HOOK_SHARE = 0.67
 
 
 def _balls_recent_hooks(fmt: str, exclude: str, n: int = 6) -> List[str]:
@@ -7366,14 +7392,24 @@ BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make t
 # cursed meow (+ Escape, which fills its ring), the one used longest ago next
 # (ball_sounds.MEMES: each gets deeper as the video fills up).
 BALLS_MEME_SOUNDS = ("meow",) + tuple(ball_sounds.MEMES)
-BALLS_MEME_KINDS = tuple(k for k, v in BALLS_NO_SONG_SOUND.items() if v == "meow") + ("escape",)
+BALLS_MEME_KINDS = tuple(k for k, v in BALLS_NO_SONG_SOUND.items() if v == "meow")   # Escape out since 12 Nov
+
+
+# 12 Nov: every box and spike-ring hit had the cursed meow, and the rotation
+# (never-used sounds first) gave it to 1 video in 8. Now those kinds keep the
+# meow 3 in 4 (BALLS_MEOW_SHARE, seeded by video id) and the other meme sounds
+# take turns in the rest; Escape is back to its own ball sounds (its best
+# videos had no bounce sound).
+BALLS_MEOW_SHARE = 0.75
 
 
 def _balls_pick_meme(exclude: str, fmt: str = "") -> str:
-    """The meme sound used longest ago (never used first, in BALLS_MEME_SOUNDS
-    order) among the videos made so far. Escape has no bounce track of its
-    own, so it plays only the new ones (be.mix_audio), never the old meow."""
-    pool = BALLS_MEME_SOUNDS if fmt in BALLS_NO_SONG_SOUND else tuple(ball_sounds.MEMES)
+    """The cursed meow BALLS_MEOW_SHARE of the time, else the other meme
+    sound used longest ago (never used first, in BALLS_MEME_SOUNDS order).
+    Escape has no bounce track of its own, so it never gets the old meow."""
+    if fmt in BALLS_NO_SONG_SOUND and random.Random(f"meme-{exclude}").random() < BALLS_MEOW_SHARE:
+        return "meow"
+    pool = tuple(ball_sounds.MEMES)
     made = [v for v in _balls.videos() if v["id"] != exclude
             and (v.get("recipe") or {}).get("bounce_sound") in BALLS_MEME_SOUNDS]
     made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
