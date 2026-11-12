@@ -1080,6 +1080,7 @@ B_BALL = 13
 B_PLUS = 3
 B_LIVE = 520            # balls simulated at once
 B_TARGET = 2500         # the count for the final form
+B_HIT_GAP = 0.02         # shaped boxes: at most one bounce sound event per this many s
 B_FULL = 1150           # recipe["fill"]: balls in the box when it's full
 
 
@@ -1234,7 +1235,13 @@ class BoxSim(ArenaSim):
         self.balls.append(b)
 
     def _on_wall(self, arbiter, space, data):
-        if len(self.hits) < 4000:
+        if self.shape != "square":
+            # 12 Nov: the curved / pegged shapes make many more wall contacts
+            # and hit the 4,000 cap seconds before "full", so the meow went
+            # silent before the climax; one hit per B_HIT_GAP keeps it to the end
+            if not self.hits or self.t - self.hits[-1][0] >= B_HIT_GAP:
+                self.bounce(0.5)
+        elif len(self.hits) < 4000:          # the square, exactly as before
             self.bounce(0.5)
         return True
 

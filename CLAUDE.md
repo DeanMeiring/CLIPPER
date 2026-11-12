@@ -1695,6 +1695,27 @@ merge it yourself; merging stays Dean's call per the rule above.
   old order, so the channel doesn't turn into one template and the
   comparison stays readable. A pack picked in Make, then Dean's own unused
   uploads, still come first.
+- **Back to the hit recipe (12 Nov):** Dean felt the new videos did worse.
+  Two agents (live vidIQ numbers + a code review with test renders) found
+  it was too early to judge the views (n=5, all under 26 h), but that the
+  9-11 Nov rotations kept the hits' recipe off the channel, plus a bug:
+  (1) `BoxSim._on_wall` stopped recording bounces at 4,000 hits; curved /
+  pegged shapes reach that seconds before "full", so the meow went silent
+  before the climax (circle 7 s, heart 14 s). Shaped boxes now record one
+  hit per `B_HIT_GAP` 0.02 s, to the end; the square is unchanged. (2)
+  `_balls_pick_shape` gave every new shape a turn before the square (all
+  box hits were square): now the square `BALLS_SQUARE_SHARE` 0.75 (seeded
+  by video id), the other shapes take turns in the rest. (3) The meme
+  rotation gave the cursed meow 1 video in 8 (every box / zen hit had it):
+  now meow `BALLS_MEOW_SHARE` 0.75, the other memes in turn the rest;
+  Escape is out of `BALLS_MEME_KINDS` (back to its ball sounds). (4)
+  `BALLS_BEST_HOOKS`: the hits' titles ("How fast does it fill up?",
+  "Every escape adds 3 balls", "Only one makes it out") 2 in 3
+  (`BALLS_BEST_HOOK_SHARE`), `fresh_hook` the rest. (5) Brand packs: the
+  29.4k box and the 12.1k zen had flag packs, so `BALLS_OTHER_PACK_SHARE`
+  is 0.5 (the 11 Nov "brands win" read was wrong). (6) Colour-league fights
+  are forced onto the neon arena (the hits were neon; the first one drew
+  the notebook and got 4 likes on 1k views).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
