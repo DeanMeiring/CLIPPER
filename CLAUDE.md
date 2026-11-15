@@ -1684,6 +1684,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   series reuses the channel's playlist with its title (`ball_playlists.find`,
   1 unit) before making one, and ids are saved even when the add fails.
   Errors log YouTube's reason on one line.
+- **First compilation's claims (15 Nov):** the first weekly compilation
+  (13:29, 10-15 Nov) got two Content ID claims from AbsoluteSound ("Epic
+  Phonk Music", "Hard Phonk - Phonk Music": songs from Dean's song box on
+  a growing-ball video): "no impact", but "potential earning limitation".
+  The Shorts playing those songs are likely claimed too. Not monetized yet,
+  so nothing is lost now. Dean: leave it until the channel is monetized,
+  THEN leave song videos (`recipe["bounce_sound"] == "song"`) out of
+  `_balls_compile_items` and swap those songs for YouTube Audio Library /
+  NCS ones. Bring it up when monetization comes.
 - **Brand packs on drop videos (11 Nov):** an evaluation of the 11 Nov
   report found every drop-video hit (boxes 23.7k / 16.2k, spike ring 14.9k)
   had a brand pack (apps / phones / gaming) and the deepening meow, while
