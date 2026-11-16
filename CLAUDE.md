@@ -1745,6 +1745,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   `BALLS_DROP_CYCLE`: escape's place went to zen (box 3, duel 3, zen 3,
   shrink 1). Next steps pitched, not built: sequels of a video past 10k,
   and a "pick one before it ends" line for comments.
+- **Feed stopped + more variety (16 Nov):** from ~12:00 SA on 16 Nov
+  Studio's Realtime went flat for every video, old hits included (new ones
+  1-2 views in hours, public, no notices). Likely YouTube judging the
+  channel as one template: a week of near-identical boxes / rings under the
+  same few titles ("How fast does it fill up?" x4, partly from
+  `BALLS_BEST_HOOKS`). Dean paused the autopilot and asked for: (1) titles
+  that never repeat: box / zen / shrink / escape / spikes take
+  `be.unique_hook` (the kind's hooks + `TITLE_TEMPLATES`, some naming the
+  pack's pictures via `PACK_NOUNS`, "How fast do phone brands fill the
+  box?"), never one of the channel's last `BALLS_TITLE_MEMORY` 40 titles;
+  `BALLS_BEST_HOOKS` is no longer used. (2) 3 a day
+  (`_balls_drop_plan_once` flag `three_a_day_16nov`): drop videos 08:00
+  and 20:00, 15:00 a comment fight every other day and a drop video on the
+  rest. (3) `BALLS_DROP_CYCLE` box 2 in 10, never two in a row, spikes
+  back in (checked in the comic look).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
