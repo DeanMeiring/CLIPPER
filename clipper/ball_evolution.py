@@ -154,6 +154,76 @@ MORE_HOOKS = {
 }
 
 
+# Titles that never repeat (16 Nov): the channel's Shorts stopped being shown
+# after a week of the same few titles ("How fast does it fill up?" 4 times,
+# "Every escape adds 3 balls" 3 times) on near-identical videos; YouTube's
+# 2026 rules push less from channels whose videos look like one template.
+# So each title is one the channel hasn't used lately (``unique_hook``),
+# from the kind's hooks plus ones naming the pack's pictures ({things}).
+TITLE_TEMPLATES = {
+    "box": ["How fast do {things} fill the box?", "{Things} vs one small hole", "Can the box hold all the {things}?",
+            "{Things} keep escaping, and every one adds 3", "Fill the box with {things}",
+            "How many {things} until it's full?", "The box fills itself", "One hole. 3 more for every escape",
+            "Will it overflow in time?", "Watch it fill to the top", "Three in for every one out",
+            "Small hole, big box"],
+    "zen": ["Which of the {things} gets out?", "Only one of the {things} escapes", "{Things} vs a ring of spikes",
+            "Which one of the {things} makes it?", "One exit and a ring of spikes", "Who gets out first?",
+            "Stuck on a spike, or out?", "The last one finds the gap"],
+    "shrink": ["{Things} grow with every bounce", "Which of the {things} fills the circle?",
+               "How big do the {things} get?", "Bounce, grow, repeat", "Until it fills the ring",
+               "Watch it outgrow the circle"],
+    "escape": ["Which of the {things} escapes last?", "{Things} vs a spinning gap", "How many {things} get out?",
+               "Every escape brings two more {things}", "Can the {things} find the gap?", "Through the gap, two more",
+               "Every escape doubles it", "Out through the gap"],
+    "spikes": ["Can the {things} survive the spikes?", "{Things} vs growing spikes", "Can it dodge every spike?",
+               "The spikes keep growing"],
+}
+PACK_NOUNS = {"logos_phones": "phone brands", "logos_apps": "apps", "logos_cars": "car brands",
+              "logos_gaming": "gaming brands", "logos_sports": "sports brands", "flags_africa": "African countries",
+              "flags_asia": "Asian countries", "flags_europe": "European countries",
+              "flags_football": "football nations", "flags_world": "countries"}
+
+
+def _pack_noun(recipe: dict) -> str:
+    tpl = str((recipe.get("pack") or {}).get("template") or "")
+    if tpl in PACK_NOUNS:
+        return PACK_NOUNS[tpl]
+    if tpl.startswith("cursed_"):
+        return tpl[len("cursed_"):] + "s"
+    return ""
+
+
+def title_options(fmt: str, recipe: dict) -> list:
+    """Every title this video could have: the kind's hooks, and the
+    templates (those naming the pictures only when the pack has a noun)."""
+    noun = _pack_noun(recipe)
+    out = list(ARENA_HOOKS.get(fmt, [])) + list(MORE_HOOKS.get(fmt, []))
+    if recipe.get("hook"):
+        out.append(recipe["hook"])
+    for t in TITLE_TEMPLATES.get(fmt, []):
+        if "{" in t:
+            if noun:
+                out.append(t.format(things=noun, Things=noun[:1].upper() + noun[1:]))
+        else:
+            out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def unique_hook(fmt: str, recipe: dict, used: list, seed) -> str:
+    """A title the channel hasn't used (``used``: its recent titles, newest
+    last); when every option was used, the one used longest ago."""
+    opts = title_options(fmt, recipe)
+    low = [u.strip().lower() for u in used]
+    fresh = [o for o in opts if o.lower() not in low]
+    rng = random.Random(f"unique-hook-{seed}")
+    if fresh:
+        named = [o for o in fresh if "{" not in o and _pack_noun(recipe) and _pack_noun(recipe) in o.lower()]
+        # titles that name the pictures half the time, when there are any
+        return rng.choice(named if named and rng.random() < 0.5 else fresh)
+    last = {u: i for i, u in enumerate(low)}
+    return min(opts, key=lambda o: last.get(o.lower(), -1))
+
+
 def fresh_hook(fmt: str, current: str, used: list, seed) -> str:
     """``current`` if none of ``used`` (the latest videos' hooks of this
     kind) has it, else one of the kind's hooks they haven't used."""

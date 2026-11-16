@@ -6164,7 +6164,10 @@ def _balls_make(vid: str) -> None:
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_sound(recipe, fmt, opts.get("song"), vid)
-    if fmt in BALLS_BEST_HOOKS and random.Random(f"best-hook-{vid}").random() < BALLS_BEST_HOOK_SHARE:
+    if fmt in ball_evolution.TITLE_TEMPLATES and recipe.get("hook"):
+        # 16 Nov: never a title the channel used in its last BALLS_TITLE_MEMORY videos
+        recipe["hook"] = ball_evolution.unique_hook(fmt, recipe, _balls_recent_titles(vid), recipe["seed"])
+    elif fmt in BALLS_BEST_HOOKS and random.Random(f"best-hook-{vid}").random() < BALLS_BEST_HOOK_SHARE:
         # 12 Nov: the titles of the hits come back most of the time
         recipe["hook"] = BALLS_BEST_HOOKS[fmt][random.Random(f"best-hook-pick-{vid}").randrange(
             len(BALLS_BEST_HOOKS[fmt]))]
@@ -6476,7 +6479,18 @@ BALLS_SQUARE_SHARE = 0.75
 # rotation (fresh_hook) the rest, so titles still vary.
 BALLS_BEST_HOOKS = {"box": ("How fast does it fill up?", "Every escape adds 3 balls"),
                     "zen": ("Only one makes it out",)}
-BALLS_BEST_HOOK_SHARE = 0.67
+BALLS_BEST_HOOK_SHARE = 0.67   # unused since 16 Nov: those kinds take be.unique_hook (below)
+# 16 Nov: the channel's Shorts stopped being shown after a week of repeated
+# titles on look-alike videos; a title now never repeats within this many
+# of the channel's videos (box / zen / shrink / escape / spikes).
+BALLS_TITLE_MEMORY = 40
+
+
+def _balls_recent_titles(exclude: str, n: Optional[int] = None) -> List[str]:
+    """The hooks (= titles) of the channel's last n made videos, any kind, oldest first."""
+    made = [v for v in _balls.videos() if v["id"] != exclude and (v.get("recipe") or {}).get("hook")]
+    made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
+    return [v["recipe"]["hook"] for v in made[-(n or BALLS_TITLE_MEMORY):]]
 
 
 def _balls_recent_hooks(fmt: str, exclude: str, n: int = 6) -> List[str]:
@@ -6535,7 +6549,9 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "duel", "zen", "box", "shrink", "duel", "zen", "box", "zen", "duel")
+BALLS_DROP_CYCLE = ("box", "zen", "duel", "shrink", "spikes", "box", "escape", "duel", "zen", "shrink")
+# 16 Nov (the channel stopped being shown, likely for looking like one
+# template): box 2 in 10 and never two in a row, spikes back in.
 # 16 Nov (plan for 100k views): escape (9 videos, median 1.7k) gave its
 # place to zen (median 13k); box 3, colour duel 3, zen 3, shrink 1 in 10.
 # The hot start (be.hot_start_at: start just before the first new ball,
@@ -6982,6 +6998,13 @@ def _balls_drop_plan_once() -> None:
               flush=True)
         s = _balls.settings()
     if s.get("research_plan_10nov"):
+        if not s.get("three_a_day_16nov"):
+            # 16 Nov: the channel's Shorts stopped being shown; back to 3 a
+            # day -- drop videos at 08:00 and 20:00, 15:00 the comment fight
+            # on fight days (every other day) and a drop video on the rest
+            _balls.save_settings({"crowd_slots": ["15:00"], "slots": ["08:00", "20:00"], "three_a_day_16nov": True})
+            print("[autopilot] three a day: drop videos at 08:00 and 20:00, 15:00 a comment fight every other day",
+                  flush=True)
         return
     # 10 Nov, after the research: the comment fights reach the usual 1.5-2k
     # but none broke out (0 of 11) and their "stayed to watch" fell fight by
