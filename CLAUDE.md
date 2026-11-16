@@ -1725,6 +1725,26 @@ merge it yourself; merging stays Dean's call per the rule above.
   is 0.5 (the 11 Nov "brands win" read was wrong). (6) Colour-league fights
   are forced onto the neon arena (the hits were neon; the first one drew
   the notebook and got 4 likes on 1k views).
+- **Plan for 100k views (16 Nov):** Dean asked for a plan to get a video
+  past 100k. The hits (boxes 20-30k) win on rewatches (103-109% average
+  watched) but only ~52% stay past the first second (100k Shorts in the
+  niche keep 70-90%); their first frames showed one small ball in an empty
+  box, and the first ball got out after a median ~6 s (up to 15 s; the
+  escape ring's ~5 s). (1) Hot start (`recipe["hot_start"]`, on
+  `BALLS_HOT_SHARE` 0.75 of autopilot drop videos of `BALLS_HOT_KINDS` box /
+  zen / shrink / escape, seeded by video id): `be.render` simulates from 0
+  (painter too, so trails build up) but writes nothing before
+  `be.hot_start_at` = `HOT_LEAD` 0.6 s before the first new ball (at least
+  `HOT_MIN` 0.6 s; the video keeps >= `HOT_KEEP` 20 s), trims the audio to
+  match, and lays the hook big (`hook_card`: Inter Black, white, thick black
+  outline, upper arena) over the first `HOT_CARD` 1.2 s, fading in 0.35 s.
+  `info["hot_start_at"]`; report variant "hot start". Recipes without it
+  render byte for byte as before (checked). (2) Comment fights every other
+  day (`crowd_other_day`, default on, Fights tab toggle; `_balls_crowd_day`:
+  even day ordinals): on the other days the 12:00 slot is a drop video.
+  `BALLS_DROP_CYCLE`: escape's place went to zen (box 3, duel 3, zen 3,
+  shrink 1). Next steps pitched, not built: sequels of a video past 10k,
+  and a "pick one before it ends" line for comments.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
