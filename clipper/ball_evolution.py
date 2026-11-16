@@ -75,6 +75,20 @@ END_FADE = 0.35          # s of audio fade at the very end
 # comes in 0.9-1.15 s after the K.O., was fading as soon as it appeared.
 LOOP_HOLD = 1.8
 LOOP_FADE = 0.45
+# The hot start (recipe["hot_start"], 16 Nov): the first second decides a
+# swipe, and the box hits kept only ~52% past it (the 100k-view Shorts in
+# this niche keep 70-90%). Their first frames showed one small ball in an
+# empty box: the first ball got out after a median ~6 s (up to 15 s), the
+# ring's after ~5 s. So the video starts HOT_LEAD s before the first new
+# ball (the box's first escape, the spike ring's first stuck ball), at least
+# HOT_MIN s in (a ball already moving, with its trail), and the hook is
+# shown big over the first HOT_CARD s.
+HOT_LEAD = 0.6
+HOT_MIN = 0.6
+HOT_MAX = 20.0
+HOT_CARD = 1.2
+HOT_KEEP = 20.0          # s the video keeps at least, however late the first ball is
+HOT_CARD_FADE = 0.35
 MAX_UNLOCK_GAP = 18.0
 GATE_DRIP = 1.5          # gates course: the hole drips every this many s at first
 
@@ -1681,6 +1695,53 @@ def loop_phase(recipe: dict, sim) -> "float | None":
     return max(0.0, (d - (LOOP_HOLD - LOOP_FADE)) / LOOP_FADE)
 
 
+def hot_start_at(recipe: dict) -> float:
+    """Where a hot-start video begins (s into the simulation): HOT_LEAD
+    before the first new ball, never before HOT_MIN."""
+    sim = _parts(recipe)[0](recipe)
+    while sim.t < 0.1 and not sim.finished:
+        sim.step()
+    s0 = sim.spawned
+    while sim.t < HOT_MAX and not sim.finished:
+        sim.step()
+        if sim.spawned != s0:
+            return round(max(HOT_MIN, sim.t - HOT_LEAD), 3)
+    return HOT_MIN
+
+
+def _wrap(d, text: str, font, width: int) -> list:
+    lines = []
+    for word in text.split():
+        if lines and d.textlength(lines[-1] + " " + word, font=font) <= width:
+            lines[-1] += " " + word
+        else:
+            lines.append(word)
+    return lines
+
+
+def hook_card(text: str) -> "Image.Image | None":
+    """The hook, big, for the first moment of a hot-start video: white with
+    a thick black outline (it reads on every backdrop), centred in the upper
+    part of the arena."""
+    text = " ".join((text or "").split())
+    if not text:
+        return None
+    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for size in (132, 118, 104, 92, 80, 70):
+        font = _font(size)
+        lines = _wrap(d, text, font, W - 120)
+        if len(lines) <= 3 and all(d.textlength(ln, font=font) <= W - 120 for ln in lines):
+            break
+    gap = int(size * 1.08)
+    y = int(H * 0.36) - gap * len(lines) // 2
+    for ln in lines:
+        d.text((W // 2, y), ln, font=font, fill=(255, 255, 255), anchor="ma",
+               stroke_width=max(8, size // 9), stroke_fill=(0, 0, 0))
+        y += gap
+    return im
+
+
 def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) -> dict:
     """Draw and encode the video. ``progress(fraction)`` is called as it
     goes (estimated from ``expected_end`` when pick_seed set it)."""
@@ -1707,6 +1768,12 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     total = ((recipe.get("expected_end") or SECONDS_CAP - END_HOLD) + END_HOLD) * FPS
     frame = 0
     first = None
+    # hot start: the simulation (and the painter, whose trails build up)
+    # runs from 0, but nothing before ``skip`` is written
+    skip = hot_start_at(recipe) if recipe.get("hot_start") else 0.0
+    if skip and recipe.get("expected_end"):
+        skip = min(skip, max(HOT_MIN, recipe["expected_end"] - HOT_KEEP))    # never a too-short video
+    card = hook_card(recipe.get("hook") or "") if skip else None
     try:
         while not sim.finished:
             sim.step()
@@ -1714,8 +1781,20 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
             if lp is not None and lp > 1:
                 break
             im = painter.frame(sim)
+            if sim.t < skip:
+                continue
             if look:
                 im = look.apply(im)
+            if card is not None:
+                ct = frame / FPS
+                if ct < HOT_CARD + HOT_CARD_FADE:
+                    a = 1.0 if ct < HOT_CARD else 1.0 - (ct - HOT_CARD) / HOT_CARD_FADE
+                    c = card if a >= 1 else card.copy()
+                    if a < 1:
+                        c.putalpha(c.getchannel("A").point(lambda v: int(v * a)))
+                    im = im.convert("RGBA")
+                    im.alpha_composite(c)
+                    im = im.convert("RGB")
             if recipe.get("loop"):
                 if first is None:
                     first = im.copy()
@@ -1729,6 +1808,8 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
         proc.stdin.close()
         proc.wait()
     mix = mix_audio(sim)
+    if skip:
+        mix = mix[int(SR * skip):]
     # fade the last moment out: the video loops back to its start, and a
     # sound cut off mid-way there sounds like a glitch
     end = int(SR * frame / FPS)
@@ -1747,7 +1828,7 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     video.unlink(missing_ok=True)
     wav.unlink(missing_ok=True)
     chain = getattr(sim, "chain", None) or recipe_chain(recipe)
-    info = dict(recipe, seconds=round(sim.t, 1), dropped=sim.spawned,
+    info = dict(recipe, seconds=round(sim.t - skip, 1), dropped=sim.spawned,
                 done_at=sim.done_at and round(sim.done_at, 1),
                 unlocks={chain[k][1]: round(t, 1) for k, t in sorted(sim.unlocked_at.items())})
     if recipe.get("crowd") and getattr(sim, "winner", None):
@@ -1756,6 +1837,8 @@ def render(recipe: dict, out_path: str | os.PathLike, log=print, progress=None) 
     if recipe.get("league") and getattr(sim, "winner", None):
         # the fight's result, for the next league fight's records (ball_league)
         info["league"] = dict(recipe["league"], winner=sim.winner["name"], winner_hp=sim.winner["hp"])
+    if skip:
+        info["hot_start_at"] = round(skip, 2)
     log(f"rendered {out_path}: {info}")
     return info
 

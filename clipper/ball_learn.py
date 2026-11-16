@@ -301,12 +301,14 @@ def _pictures(recipe: dict) -> str:
 
 def _variant(rec: dict) -> str:
     """What's being tested on this video (10 Nov): the loop ending, the
-    anime cut with or without its VS intro."""
+    anime cut with or without its VS intro; the hot start (16 Nov)."""
     out = []
     if rec.get("cut") == "anime":
         out.append("anime, no intro" if rec.get("intro") == "none" else "anime + VS intro")
     if rec.get("loop"):
         out.append("loop end")
+    if rec.get("hot_start"):
+        out.append("hot start")
     return ", ".join(out)
 
 
