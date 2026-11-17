@@ -175,6 +175,10 @@ TITLE_TEMPLATES = {
     "escape": ["Which of the {things} escapes last?", "{Things} vs a spinning gap", "How many {things} get out?",
                "Every escape brings two more {things}", "Can the {things} find the gap?", "Through the gap, two more",
                "Every escape doubles it", "Out through the gap"],
+    "ringfill": ["Will it fill the whole circle?", "Every bounce makes it bigger", "How many circles fit inside?",
+                 "It grows until it fits", "Fill it, then start again", "Circle inside a circle inside a circle",
+                 "One more circle every time", "Will the last one fill the middle?", "Bounce, grow, lock in",
+                 "How many rings until it's full?", "It keeps growing", "The last circle fills the middle"],
     "spikes": ["Can the {things} survive the spikes?", "{Things} vs growing spikes", "Can it dodge every spike?",
                "The spikes keep growing"],
 }
@@ -294,10 +298,11 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 # ---- recipes -----------------------------------------------------------
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
-           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor")
+           "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
+           "ringfill", "sortrace")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
-NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd")   # crowd: ball_crowd (commenters)
+NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd", "ringfill", "sortrace")   # crowd: ball_crowd (commenters)
 FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
@@ -406,6 +411,12 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     if fmt == "survivor":
         from clipper import ball_survivor
         ball_survivor.survivor_recipe(recipe)
+    elif fmt == "ringfill":
+        from clipper import ball_ringfill
+        ball_ringfill.ringfill_recipe(recipe)
+    elif fmt == "sortrace":
+        from clipper import ball_sortrace
+        ball_sortrace.sortrace_recipe(recipe)
     elif fmt in NO_PACK:
         from clipper import ball_duel
         {"duel": ball_duel.duel_recipe, "race": ball_duel.race_recipe,
@@ -970,6 +981,12 @@ def _parts(recipe: dict):
     if recipe.get("format") == "crowd":
         from clipper import ball_crowd
         return ball_crowd.parts(recipe)
+    if recipe.get("format") == "ringfill":
+        from clipper import ball_ringfill
+        return ball_ringfill.RingFillSim, ball_ringfill.RingFillPainter
+    if recipe.get("format") == "sortrace":
+        from clipper import ball_sortrace
+        return ball_sortrace.SortSim, ball_sortrace.SortPainter
     if recipe.get("format") in NO_PACK:
         from clipper import ball_duel
         return ball_duel.PARTS[recipe["format"]]
@@ -996,6 +1013,10 @@ def good_end(recipe: dict) -> tuple:
         return (15.0, 34.0) if recipe.get("floor") else (18.0, 38.0)
     if recipe.get("format") == "survivor":
         return (20.0, 36.0)
+    if recipe.get("format") == "ringfill":
+        return (18.0, 45.0)
+    if recipe.get("format") == "sortrace":
+        return (24.0, 34.0)
     if recipe.get("format") == "crowd":
         from clipper import ball_crowd
         return ball_crowd.good_end(recipe)
@@ -1620,6 +1641,14 @@ def publish_text(recipe: dict) -> dict:
     if fmt == "crowd":
         from clipper import ball_crowd
         return ball_crowd.publish_text(recipe)
+    if fmt == "sortrace":
+        from clipper import ball_sortrace
+        return ball_sortrace.publish_text(recipe)
+    if fmt == "ringfill":
+        return {"title": recipe["hook"][:100],
+                "description": ("A circle bounces and grows a little with every bounce. When it fills the space it "
+                                "locks in, and a new one starts in the middle, until the last one fills the centre."
+                                "\n\nHow many circles did you count? 👇\n\n#satisfying #asmr #bouncingball")}
     if fmt in NO_PACK:
         return _duel_text(recipe)
     if pack:
