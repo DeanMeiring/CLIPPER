@@ -46,7 +46,7 @@ COLOURS = {"quick": (247, 160, 70), "merge": (110, 200, 245), "heap": (170, 225,
 PAIRS = [("quick", "merge"), ("heap", "comb")]
 TITLES = ["WHO UNSCRAMBLES IT FIRST?", "WHO FIXES IT FIRST?", "WHICH SORT WINS?"]
 HOOKS = ["{a} vs {b}: who unscrambles it first?", "Who puts {pic} back together first?",
-         "{a} vs {b} on {pic}", "16,384 pixels of {pic}. Which sort wins?", "Two sorts, one scrambled {pic}"]
+         "{a} vs {b} on {pic}", "16,384 pixels of {pic}. Which sort wins?", "Two sorts, one scrambled picture of {pic}"]
 FALLBACKS = [{"name": "a cat", "path": "cat.jpg", "credit": "Picture: \"Chelsea\" by Stefan van der Walt, CC0"},
              {"name": "a cup of coffee", "path": "coffee.jpg", "credit": "Picture: coffee by Rachel Michetti, CC0"}]
 # (what the video calls it, Openverse search, words its title must have; None = any)
@@ -177,6 +177,8 @@ def sortrace_recipe(recipe: dict) -> dict:
     rng.shuffle(pair)                         # which one is on top
     recipe.update(algos=pair, title=rng.choice(TITLES), bed="off", ending="WINS!",
                   hook_tpl=rng.choice(HOOKS))
+    # the app picks a downloaded picture before the render (picture_for); until then the bundled cat
+    recipe.setdefault("picture", dict(FALLBACKS[0], path=str(ASSETS / "pictures" / FALLBACKS[0]["path"])))
     name_hook(recipe)
     return recipe
 
