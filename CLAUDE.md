@@ -1760,6 +1760,32 @@ merge it yourself; merging stays Dean's call per the rule above.
   and 20:00, 15:00 a comment fight every other day and a drop video on the
   rest. (3) `BALLS_DROP_CYCLE` box 2 in 10, never two in a row, spikes
   back in (checked in the comic look).
+- **Ring fill + sorting race (17 Nov):** two kinds from reels Dean sent,
+  both `NO_PACK`, 2 in 12 each of `BALLS_DROP_CYCLE` (escape made room).
+  `clipper/ball_ringfill.py` (`format: "ringfill"`, "Will it fill the
+  whole circle?", 230K-like reel): a hollow circle bounces in a big one
+  (`F_R0` 505) and grows each bounce (+15% of the space left, eased in over
+  ~0.15 s so it swells, `F_EASE`); when it fills the space it locks in as a
+  ring (`F_BAND` 16% of that radius) with a flash, and a new small one starts
+  in the middle, faster each round, until a circle under `F_LAST` 52 px is
+  the last: it fills the centre itself (Dean: the first sample's last round
+  filled by itself). Dean's notes: the growing circle, not a band per
+  bounce; bigger, smoother; no music -- `music_track` is sound effects only
+  (tap per bounce, deeper as it grows; thump + whoosh per lock). 4
+  palettes, hooks in `TITLE_TEMPLATES["ringfill"]` (never repeat). ~27 s.
+  `clipper/ball_sortrace.py` (`format: "sortrace"`, "Who unscrambles it
+  first?"): 128x128 pixels of a picture scrambled the same way twice, two
+  algorithms put them back side by side; every comparison and every move is
+  one step at the same rate for both (fair), only close pairs race (`PAIRS`
+  quick/merge, heap/comb; who wins changes by seed), `ok` = finish gap
+  0.15-2.5 s. Pictures (`picture_for`, store `BASE_DIR/_balls/pictures/`):
+  public-domain paintings + animal photos from Openverse (CC0/PDM only, a
+  painting's title words must match), the one used longest ago, credited
+  in the description; bundled CC0 cat / coffee (`clipper/assets/pictures`)
+  when nothing downloads. Dean liked the cat picture in the sample. Sound:
+  a tone per frame per side pitched by the pixel moved + a sweep at the
+  finish (ours, numpy). Openverse is blocked in the sandbox: tested with a
+  fake `requests`.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

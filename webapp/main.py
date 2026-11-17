@@ -60,6 +60,7 @@ from clipper import ball_duel
 from clipper import ball_packs
 from clipper import ball_review
 from clipper import ball_starters
+from clipper import ball_sortrace
 from clipper import ball_cursed
 from clipper import ball_photos
 from clipper import ball_evolution
@@ -6164,6 +6165,12 @@ def _balls_make(vid: str) -> None:
         if pack:
             ball_evolution.apply_pack(recipe, _ball_packs.recipe_pack(pack))
     _balls_sound(recipe, fmt, opts.get("song"), vid)
+    if fmt == "sortrace":
+        # the picture: a public-domain painting / CC0 animal photo, the one used longest ago
+        used = [((v.get("recipe") or {}).get("picture") or {}).get("name") for v in _balls.videos()
+                if v["id"] != vid and (v.get("recipe") or {}).get("format") == "sortrace"]
+        recipe["picture"] = ball_sortrace.picture_for(_balls.root / "pictures", [u for u in used if u])
+        ball_sortrace.name_hook(recipe)
     if fmt in ball_evolution.TITLE_TEMPLATES and recipe.get("hook"):
         # 16 Nov: never a title the channel used in its last BALLS_TITLE_MEMORY videos
         recipe["hook"] = ball_evolution.unique_hook(fmt, recipe, _balls_recent_titles(vid), recipe["seed"])
@@ -6510,7 +6517,7 @@ def _balls_last_art(exclude: str) -> Optional[str]:
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
                          "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-                         "crowd")
+                         "crowd", "ringfill", "sortrace")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6549,7 +6556,11 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "zen", "duel", "shrink", "spikes", "box", "escape", "duel", "zen", "shrink")
+BALLS_DROP_CYCLE = ("box", "zen", "ringfill", "duel", "sortrace", "shrink", "box", "spikes", "ringfill", "duel",
+                    "zen", "sortrace")
+# 17 Nov: two new kinds from reels Dean sent, 2 in 12 each -- the growing
+# circle that locks in as a ring (ball_ringfill) and the sorting race on a
+# painting or animal photo (ball_sortrace); escape made room.
 # 16 Nov (the channel stopped being shown, likely for looking like one
 # template): box 2 in 10 and never two in a row, spikes back in.
 # 16 Nov (plan for 100k views): escape (9 videos, median 1.7k) gave its
@@ -6580,7 +6591,8 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "trail": "🌈 Every bounce, it evolves", "duel": "⚔️ Ball duel",
                        "race": "🏁 First to N wins", "tourney": "🏆 16-ball tournament",
                        "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor",
-                       "crowd": "💬 Comment fight"}
+                       "crowd": "💬 Comment fight", "ringfill": "⭕ Will it fill the circle?",
+                       "sortrace": "🖼 Sorting race"}
 
 
 def _balls_tz():
@@ -7428,7 +7440,7 @@ def balls_song_audio(tid: str) -> FileResponse:
 BALLS_SONG_KINDS = ("shrink",)
 BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
-                       "survivor": "none", "crowd": "none",
+                       "survivor": "none", "crowd": "none", "ringfill": "none", "sortrace": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -13673,7 +13685,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {
