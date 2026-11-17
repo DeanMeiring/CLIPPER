@@ -6170,7 +6170,7 @@ def _balls_make(vid: str) -> None:
         used = [((v.get("recipe") or {}).get("picture") or {}).get("name") for v in _balls.videos()
                 if v["id"] != vid and (v.get("recipe") or {}).get("format") == "sortrace"]
         recipe["picture"] = ball_sortrace.picture_for(_balls.root / "pictures", [u for u in used if u])
-        ball_sortrace.name_hook(recipe)
+        ball_sortrace.name_hook(recipe, avoid=_balls_recent_titles(vid))
     if fmt in ball_evolution.TITLE_TEMPLATES and recipe.get("hook"):
         # 16 Nov: never a title the channel used in its last BALLS_TITLE_MEMORY videos
         recipe["hook"] = ball_evolution.unique_hook(fmt, recipe, _balls_recent_titles(vid), recipe["seed"])
@@ -6993,7 +6993,19 @@ def _balls_drop_kind(dt: datetime.datetime, s: dict) -> str:
     crowd = set(_balls_crowd_times(s)) if s.get("crowd") and _balls_crowd_day(dt, s) else set()
     times = [t for t in _balls_slot_times(s) if t not in crowd] or [hm]
     pos = times.index(hm) if hm in times else sum(1 for t in times if t < hm)
-    return BALLS_DROP_CYCLE[(local.date().toordinal() * len(times) + pos) % len(BALLS_DROP_CYCLE)]
+    # 17 Nov: counted slot by slot from a fixed day, so the cycle runs in order
+    # across days with 2 or 3 drop videos (ordinal x len repeated a kind back to back)
+    day, n = BALLS_DROP_EPOCH, 0
+    all_times = _balls_slot_times(s)
+    crowd_all = set(_balls_crowd_times(s)) if s.get("crowd") else set()
+    while day < local.date():
+        noon = datetime.datetime.combine(day, datetime.time(12, 0), tzinfo=_balls_tz())
+        n += len([t for t in all_times if not (t in crowd_all and _balls_crowd_day(noon, s))]) or 1
+        day += datetime.timedelta(days=1)
+    return BALLS_DROP_CYCLE[(n + pos) % len(BALLS_DROP_CYCLE)]
+
+
+BALLS_DROP_EPOCH = datetime.date(2026, 11, 1)
 
 
 def _balls_drop_plan_once() -> None:

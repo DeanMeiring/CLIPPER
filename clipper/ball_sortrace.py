@@ -183,12 +183,22 @@ def sortrace_recipe(recipe: dict) -> dict:
     return recipe
 
 
-def name_hook(recipe: dict) -> dict:
-    """The hook (= YouTube title), once the picture is known."""
+def name_hook(recipe: dict, avoid: Optional[list] = None) -> dict:
+    """The hook (= YouTube title), once the picture is known; not one of
+    ``avoid`` (the channel's recent titles) when another template works."""
     a, b = (NAMES[x].title() for x in recipe["algos"])
     pic = (recipe.get("picture") or {}).get("name") or "a picture"
-    recipe["hook"] = recipe.get("hook_tpl", HOOKS[0]).format(a=a, b=b, pic=pic)
-    recipe["hook"] = recipe["hook"][0].upper() + recipe["hook"][1:]
+
+    def make(tpl):
+        h = tpl.format(a=a, b=b, pic=pic)
+        return h[0].upper() + h[1:]
+    low = {x.strip().lower() for x in avoid or []}
+    first = recipe.get("hook_tpl", HOOKS[0])
+    for tpl in [first] + [t for t in HOOKS if t != first]:
+        if make(tpl).lower() not in low:
+            recipe["hook_tpl"] = tpl
+            break
+    recipe["hook"] = make(recipe.get("hook_tpl", HOOKS[0]))
     return recipe
 
 

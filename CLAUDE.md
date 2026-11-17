@@ -1785,7 +1785,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   when nothing downloads. Dean liked the cat picture in the sample. Sound:
   a tone per frame per side pitched by the pixel moved + a sweep at the
   finish (ours, numpy). Openverse is blocked in the sandbox: tested with a
-  fake `requests`.
+  fake `requests`. Its titles skip the channel's recent ones (`name_hook(avoid=)`).
+  `_balls_drop_kind` now counts drop slots one by one from
+  `BALLS_DROP_EPOCH` (1 Nov), so the cycle runs in order across days with 2
+  or 3 drop videos (the old ordinal x len put a kind back to back).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
