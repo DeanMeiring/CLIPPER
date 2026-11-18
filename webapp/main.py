@@ -6071,6 +6071,10 @@ def _balls_make(vid: str) -> None:
             if not (_balls_crowd_slot(at, settings) or _balls_league_slot(at, settings)
                     or settings.get("drop", True)):   # those slots keep their kind
                 fmt = _balls_debut_kind(_balls.videos()) or fmt
+            elif settings.get("drop", True) and not (_balls_crowd_slot(at, settings)
+                                                     or _balls_league_slot(at, settings)):
+                # 18 Nov: the newest drop kinds go out first, not when the cycle gets to them
+                fmt = _balls_debut_kind(_balls.videos(), BALLS_DROP_DEBUT, BALLS_DROP_DEBUT_SINCE) or fmt
         except ValueError:
             fmt = _balls_debut_kind(_balls.videos()) or fmt
     crowd = None
@@ -6100,9 +6104,8 @@ def _balls_make(vid: str) -> None:
         ball_crowd.apply(recipe, crowd)
         if anime:
             recipe["cut"] = "anime"
-            # with or without the 0.9 s VS intro, taking turns (10 Nov: a
-            # week's test -- the report's "variant" shows which is which)
-            recipe["intro"] = "none" if _balls_last_anime_intro(vid) != "none" else "vs"
+            # no VS intro (18 Nov: the week's test kept 45% without it vs 37% with)
+            recipe["intro"] = "none"
             # one of the anime arenas (Dean liked all six), never the last
             # fight's; the ring underneath is the neon one's
             recipe["arena"] = "neon"
@@ -6582,6 +6585,10 @@ BALLS_HOT_SHARE = 0.75
 BALLS_DROP_ARTS = ("sticker", "comic")
 BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "survivor": 2}   # ties go to the first
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
+# 18 Nov: Dean restarted after the pause and the ring fill / sorting race
+# only came "later" in the cycle: each goes out once first, then the cycle
+BALLS_DROP_DEBUT = {"ringfill": 1, "sortrace": 1}
+BALLS_DROP_DEBUT_SINCE = 1794988800     # 18 Nov 2026, 10:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
@@ -7069,16 +7076,18 @@ def _balls_learned_kind(dt: datetime.datetime, times: List[str], learned: dict, 
     return kind or BALLS_FORMAT_CYCLE[0]
 
 
-def _balls_debut_kind(videos: List[dict]) -> Optional[str]:
-    """The new kind the next autopilot video should be (BALLS_DEBUT), or
-    None once each has had its videos."""
-    made = {k: 0 for k in BALLS_DEBUT}
+def _balls_debut_kind(videos: List[dict], debut: Optional[dict] = None, since: Optional[float] = None) -> Optional[str]:
+    """The new kind the next autopilot video should be (BALLS_DEBUT, or the
+    drop videos' BALLS_DROP_DEBUT), or None once each has had its videos."""
+    debut = BALLS_DEBUT if debut is None else debut
+    since = BALLS_DEBUT_SINCE if since is None else since
+    made = {k: 0 for k in debut}
     for v in videos:
         fmt = (v.get("recipe") or {}).get("format")
-        if fmt in made and v.get("status") != "error" and (v.get("started_at") or 0) >= BALLS_DEBUT_SINCE:
+        if fmt in made and v.get("status") != "error" and (v.get("started_at") or 0) >= since:
             made[fmt] += 1
-    left = [k for k in BALLS_DEBUT if made[k] < BALLS_DEBUT[k]]
-    return min(left, key=lambda k: made[k] / BALLS_DEBUT[k]) if left else None
+    left = [k for k in debut if made[k] < debut[k]]
+    return min(left, key=lambda k: made[k] / debut[k]) if left else None
 
 
 def _balls_next_format(s: Optional[dict] = None) -> str:
