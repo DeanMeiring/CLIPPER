@@ -171,10 +171,12 @@ def next_match(history: List[dict], seed, pick: Optional[str] = None, colours: b
         loser = next(n for n in last["names"] if n != last.get("winner"))
         if pick and pick in brands and pick != a:
             b, tag = pick, "YOUR PICK"
-        elif (last.get("winner_hp") or 99) <= CLOSE_HP and last.get("tag") != "REMATCH" and loser != a:
-            b, tag = loser, "REMATCH"
         else:
+            # 18 Nov: no rematches -- "round 2" fights got 1.2k and 9 views while a
+            # new pairing got 11k -- so the champion meets someone it hasn't fought
             pool = [n for n in brands if n != a and n not in last["names"]] or [n for n in brands if n != a]
+            unmet = [n for n in pool if not any(set(f["names"]) == {a, n} for f in fights)]
+            pool = unmet or pool
             fresh = [n for n in pool if sum(rec.get(n, [0, 0])) == 0]
             if fresh:
                 b, tag = pick_rng.choice(fresh), "NEW CHALLENGER"

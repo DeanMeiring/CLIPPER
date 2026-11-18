@@ -1789,6 +1789,23 @@ merge it yourself; merging stays Dean's call per the rule above.
   `_balls_drop_kind` now counts drop slots one by one from
   `BALLS_DROP_EPOCH` (1 Nov), so the cycle runs in order across days with 2
   or 3 drop videos (the old ordinal x len put a kind back to back).
+- **One-week check + restart (18 Nov):** the 10 Nov changes worked: median
+  views per video 1.8k (3-10 Nov) -> 6.4k (11-15 Nov), 3k+ hits 6 -> 12 of
+  fewer videos, subscribers ~100 -> ~300. Loop end: 74% vs 68% average
+  watched (n=7). Colour fights beat brand fights, but "round 2" rematches
+  flopped (1.2k, 9 views vs 11k for a new pair). So: (1) no rematches in the
+  league -- `next_match` gives the champion someone it hasn't fought
+  (`unmet`), the REMATCH tag isn't picked any more; (2) anime comment fights
+  always `intro` "none" (45% stayed vs 37% with the VS card); (3) the
+  newest drop kinds go out first after a restart: `BALLS_DROP_DEBUT`
+  (ringfill 1, sortrace 1 since `BALLS_DROP_DEBUT_SINCE`, 18 Nov) via
+  `_balls_debut_kind(videos, debut, since)` -- Dean said they "came in only
+  later". On 18 Nov the 08:00 video didn't post: "Connect the Ball
+  Evolution YouTube channel first" -- the balls token, last connected 11
+  Nov for the playlist scope, stopped working 7 days later, the lifetime of
+  refresh tokens for a Google OAuth app in "Testing". Dean reconnected and
+  posted it by hand; told him to publish the OAuth app (Google Cloud
+  console -> OAuth consent screen -> Publish app) so it stops expiring.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
