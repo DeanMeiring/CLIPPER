@@ -1853,6 +1853,10 @@ merge it yourself; merging stays Dean's call per the rule above.
   race 3, ringfill 2, duel 2, shrink, spikes, sortrace 1.
   `BALLS_DROP_DEBUT` box (a crash box) / mazerace / territory 1 each since
   20 Nov, so the remake after the deploy makes those first.
+  First live crash box: Claude's last look said "the final picture is
+  covered by the crash dialog" and remade it. `ball_review` now adds
+  `_CRASH_NOTE` for crash recipes and takes its last frame 0.3 s before
+  the crash instead of 1.2 s after.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

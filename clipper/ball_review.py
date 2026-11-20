@@ -104,10 +104,22 @@ _ART_NOTES = {
 }
 
 
+# the crash box (ball_arenas, recipe["crash"]): its ending is on purpose
+_CRASH_NOTE = ("This is the 'until it crashes' version: as the box fills, an FPS counter drops and the "
+               "picture stutters on purpose, and at the end the frame freezes, glitches and a fake "
+               "'Not responding' box with 'CRASHED AT N BALLS' covers it. That crash ending is the point "
+               "of the video, not a broken render; the last frame here is from just before the crash.")
+
+
 def frame_times(info: dict) -> List[float]:
     secs = float(info.get("seconds") or 30)
     end = info.get("done_at")
-    end = float(end) + 1.2 if end else secs - 0.5
+    if end and info.get("crash"):
+        # the crash box ends frozen under a "not responding" box: look just
+        # before the crash, where the final picture is in the box
+        end = float(end) - 0.3
+    else:
+        end = float(end) + 1.2 if end else secs - 0.5
     return [min(1.5, secs / 4), secs * 0.4, secs * 0.7, min(end, secs - 0.2)]
 
 
@@ -139,6 +151,8 @@ def review(video: Path, info: dict, title: str, api_key: str,
                             names=" > ".join(names))
     style = _style_note(pack)
     art = _ART_NOTES.get(info.get("art") or "")
+    if info.get("crash"):
+        art = (art + " " + _CRASH_NOTE).strip()
     if art:
         style = (style + " " + art).strip()
     if style:
