@@ -63,6 +63,18 @@ MIN_CHANGES = 3
 TRAIL_FADE = 0.95                                 # per frame
 MAX_QUIET = 13.0                                  # s: never longer than this without a lead change
 WRONG_TURN = 0.5                                  # chance a racer takes a wrong branch at a junction
+# recipe["ai"] (20 Nov, Dean: the "I trained an AI" angle -- made true): each
+# racer is a small Q-learning agent trained on this very maze before the race,
+# each a different number of training runs (AI_RUNS); at a junction it takes
+# the move its training rates best, and where it never learned (a tie) it
+# guesses. Less training = more wrong turns, but a well-trained one can still
+# lose to a lucky one. Measured on 20 mazes: right turn at a junction ~39%
+# after 10 runs, 53% after 20, 71% after 40, 85% after 80, 89% after 160.
+AI_RUNS = (10, 20, 40, 80, 160)
+AI_ALPHA, AI_GAMMA, AI_EPS, AI_STEPS = 0.5, 0.9, 0.3, 300
+AI_HOOKS = ["{n} AIs trained on this maze. Which one wins?", "Which AI learned the maze best?",
+            "I trained {n} AIs on one maze. Pick one", "Same maze, different training. Pick one",
+            "More training or more luck? Pick an AI", "{n} AIs, 1 maze, 1 trophy"]
 WRONG_DEPTH = (1, 3)                              # how far down it goes before it turns back
 DETOUR_MAX = 4.0                                  # s: a wrong turn never lasts longer
 SIDESTEP = 0.5                                    # rad: two racers that meet both keep right
@@ -101,6 +113,40 @@ def mazerace_recipe(recipe: dict) -> dict:
                   hook=rng.choice(HOOKS).format(n=len(codes)), ending="WINS!",
                   maze_colour=rng.randrange(len(PALETTES)))
     return recipe
+
+
+def ai_recipe(recipe: dict) -> dict:
+    """Make it the trained-AI race (own rng, so the rest of the recipe is
+    as before): each racer gets its number of training runs."""
+    rng = random.Random(f"mazerace-ai-{recipe['seed']}")
+    n = len(recipe.get("players") or [])
+    runs = sorted(rng.sample(AI_RUNS, n)) if n <= len(AI_RUNS) else [AI_RUNS[k % len(AI_RUNS)] for k in range(n)]
+    rng.shuffle(runs)
+    recipe.update(ai=True, ai_runs=runs, hook=rng.choice(AI_HOOKS).format(n=n), ending="WINS!")
+    return recipe
+
+
+def train(links: dict, runs: int, rng: random.Random) -> dict:
+    """Tabular Q-learning on the maze's cells (state = cell, action = the
+    next cell): -1 a move, +50 for reaching the trophy, epsilon-greedy."""
+    Q: dict = {}
+    for _ in range(runs):
+        s = rng.choice(START_CELLS)
+        for _ in range(AI_STEPS):
+            acts = sorted(links[s])
+            if rng.random() < AI_EPS:
+                a = rng.choice(acts)
+            else:
+                best = max(Q.get((s, x), 0.0) for x in acts)
+                a = rng.choice([x for x in acts if Q.get((s, x), 0.0) == best])
+            r = 50.0 if a == GOAL_CELL else -1.0
+            nxt = 0.0 if a == GOAL_CELL else max(Q.get((a, y), 0.0) for y in links[a])
+            q = Q.get((s, a), 0.0)
+            Q[(s, a)] = q + AI_ALPHA * (r + AI_GAMMA * nxt - q)
+            s = a
+            if s == GOAL_CELL:
+                break
+    return Q
 
 
 # ---- the maze, from the seed ----------------------------------------------
@@ -295,6 +341,12 @@ class MazeRaceSim:
         self.stuck = 0
         self.stuck_log: list = []
         self._still = {b["i"]: (0.0, b["x"], b["y"]) for b in self.balls}
+        self.ai = bool(recipe.get("ai"))
+        if self.ai:
+            runs = recipe.get("ai_runs") or [AI_RUNS[k % len(AI_RUNS)] for k in range(n)]
+            for b in self.balls:
+                b["runs"] = runs[b["i"]]
+                b["Q"] = train(self.links, b["runs"], random.Random(f"mazerace-train-{recipe['seed']}-{b['i']}"))
 
     @property
     def finished(self) -> bool:
@@ -428,6 +480,9 @@ class MazeRaceSim:
         b["prev"], b["cell"] = b["cell"], cell
         if b["detour"] is not None or cell == GOAL_CELL or len(self.links[cell]) < 3:
             return
+        if self.ai:
+            self._ai_junction(b, cell)
+            return
         g = self.gdist.get(cell, 99)
         wrong = [nb for nb in self.links[cell] if self.gdist.get(nb, 99) >= g and nb != b["prev"]]
         if wrong and self.rng.random() < WRONG_TURN:
@@ -439,6 +494,32 @@ class MazeRaceSim:
                 return                              # someone's down there: no jams in a dead end
             target = max(sorted(sub), key=lambda c: sub[c])
             b["detour"], b["tdist"], b["since"] = target, _cell_bfs(self.links, target), self.t
+
+    def _ai_pick(self, b, cell, prev):
+        acts = sorted(c for c in self.links[cell] if c != prev) or sorted(self.links[cell])
+        Q = b["Q"]
+        best = max(Q.get((cell, x), 0.0) for x in acts)
+        return self.rng.choice([x for x in acts if Q.get((cell, x), 0.0) == best])
+
+    def _ai_junction(self, b, cell):
+        """The racer's own trained choice; a wrong one is followed (still by
+        its training) up to 3 cells, then the way on pulls it back."""
+        g = self.gdist.get(cell, 99)
+        nxt = self._ai_pick(b, cell, b["prev"])
+        if self.gdist.get(nxt, 99) < g:
+            return                                  # the right way: the field takes it there
+        path, prev, cur = [nxt], cell, nxt
+        while len(path) < 3 and len(self.links[cur]) > 1 and cur != GOAL_CELL:
+            step = self._ai_pick(b, cur, prev)
+            if step == prev:
+                break
+            prev, cur = cur, step
+            path.append(cur)
+        busy = {o["cell"] for o in self.balls if o is not b} | {o["detour"] for o in self.balls if o is not b}
+        if busy & set(path):
+            return                                  # someone's down there: no jams in a dead end
+        target = path[-1]
+        b["detour"], b["tdist"], b["since"] = target, _cell_bfs(self.links, target), self.t
 
     def _detour_dir(self, b):
         cell = self.cell_of(b["x"], b["y"])
@@ -658,6 +739,7 @@ class MazeRacePainter:
         self.f_pick = bd._font(62)
         self.f_lead = bd._font(46)
         self.f_rank = bd._font(26)
+        self.f_runs = bd._font(26, "Inter-Bold.ttf")
         self.f_go = bd._font(96)
         self.f_win = bd._font(96)
         self.f_small = bd._font(34, "Inter-Bold.ttf")
@@ -744,7 +826,7 @@ class MazeRacePainter:
         # the pick line for the first seconds, then the lead changes in the same row
         if sim.t < 3.0:
             a = int(255 * min(1.0, (3.0 - sim.t) / 0.4))
-            left, right = "PICK ONE", "NO SWITCHING!"
+            left, right = ("PICK AN AI", "NO SWITCHING!") if sim.ai else ("PICK ONE", "NO SWITCHING!")
             wl = d.textlength(left, font=self.f_pick)
             wr = d.textlength(right, font=self.f_pick)
             total = wl + 80 + wr
@@ -792,6 +874,9 @@ class MazeRacePainter:
             im.alpha_composite(sp, (int(x - sp.width / 2), int(242 - sp.height / 2)))
             d.text((x, 306), b["name"], font=fname, fill=(255, 255, 255, 255), anchor="mm",
                    stroke_width=3, stroke_fill=(0, 0, 0, 255))
+            if sim.ai:
+                d.text((x, 340), f"AI · {b['runs']} runs", font=self.f_runs, fill=(140, 230, 255, 255),
+                       anchor="mm", stroke_width=3, stroke_fill=(0, 0, 0, 255))
             if sim.t >= START_T:
                 bx, by = x - 40, 204
                 d.ellipse((bx - 21, by - 21, bx + 21, by + 21), fill=(255, 214, 80, 255) if gold else (30, 34, 60, 255),
@@ -841,6 +926,15 @@ def publish_text(recipe: dict) -> dict:
     if len(title) > 100:
         title = f"{recipe.get('hook') or HOOKS[0]} 🏁"
     names = ", ".join(p[0] for p in players)
+    if recipe.get("ai"):
+        runs = recipe.get("ai_runs") or []
+        trained = ", ".join(f"{p[0]} {r}" for p, r in zip(players, runs))
+        desc = (f"Each country is a small AI (Q-learning) that practised this exact maze before the race, "
+                f"a different number of times: {trained} training runs. At every junction it takes the move "
+                f"its training rates best, and where it never learned, it guesses. Same speed for all.\n\n"
+                f"Did more training win, or luck? Which one did you pick? 👇\n\n"
+                f"#ai #machinelearning #satisfying #marblerace #countryballs\n\nFlags: flag-icons (MIT)")
+        return {"title": title[:100], "description": desc}
     desc = (f"{len(players)} countries race through a maze to the trophy: {names}. Same speed for all of them; "
             f"the walls and the bumps decide. Pick one before it starts. No switching!\n\n"
             f"Which one did you pick? 👇\n\n#satisfying #marblerace #countryballs #bouncingball\n\n"

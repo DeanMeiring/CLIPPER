@@ -61,6 +61,7 @@ from clipper import ball_packs
 from clipper import ball_review
 from clipper import ball_starters
 from clipper import ball_sortrace
+from clipper import ball_mazerace
 from clipper import ball_cursed
 from clipper import ball_photos
 from clipper import ball_evolution
@@ -6154,6 +6155,9 @@ def _balls_make(vid: str) -> None:
     if (opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_HOT_KINDS
             and random.Random(f"hot-start-{vid}").random() < BALLS_HOT_SHARE):
         recipe["hot_start"] = True
+    if fmt == "mazerace":
+        # 20 Nov (Dean): the racers are small AIs trained on the maze (ball_mazerace.ai_recipe)
+        ball_mazerace.ai_recipe(recipe)
     if fmt == "box" and _balls_box_crash(vid, opts):
         # 20 Nov: "+3 every escape until it crashes" (ball_arenas, recipe["crash"])
         recipe["crash"] = True
@@ -8337,7 +8341,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-20 question formats"      # crash box, maze race, territory war
+BALLS_LOOK_VERSION = "2026-11-20 maze AIs"      # the maze racers are trained AIs
 
 
 def _balls_auto_remake() -> Optional[dict]:

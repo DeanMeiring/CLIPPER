@@ -1853,6 +1853,21 @@ merge it yourself; merging stays Dean's call per the rule above.
   race 3, ringfill 2, duel 2, shrink, spikes, sortrace 1.
   `BALLS_DROP_DEBUT` box (a crash box) / mazerace / territory 1 each since
   20 Nov, so the remake after the deploy makes those first.
+  **Maze AIs (20 Nov):** Dean wanted the maze race sold as a trained ML
+  model "even though it isn't"; told him that would mislead viewers and
+  made it true instead. `ball_mazerace.ai_recipe` (own rng, called for
+  every maze race in `_balls_make`): each racer is a tabular Q-learning
+  agent (`train`: cell = state, next cell = action, -1 a move, +50 at the
+  trophy, alpha 0.5, gamma 0.9, epsilon 0.3) trained on that seed's maze
+  for its own number of runs (`AI_RUNS` 10/20/40/80/160, shown as "AI · N
+  runs" under each flag); at a junction it takes its best-rated move
+  (`_ai_junction`, ties = a guess) and follows a wrong one up to 3 cells.
+  Junction accuracy ~39% at 10 runs to ~89% at 160; on 80 races the
+  most-trained won 27, then 21 / 18 / 11 / 3. Races are shorter (15-21 s),
+  so `good_end` is 14-34 for `ai` recipes and `pick_seed` tries 160 (~1
+  seed in 13 is `ok`). `AI_HOOKS`, honest description ("small AI
+  (Q-learning) that practised this exact maze..."). Training takes
+  milliseconds. Recipes without `ai` race as before.
   First live crash box: Claude's last look said "the final picture is
   covered by the crash dialog" and remade it. `ball_review` now adds
   `_CRASH_NOTE` for crash recipes and takes its last frame 0.3 s before
