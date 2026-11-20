@@ -1095,6 +1095,14 @@ B_SHAPE_LABELS = {"square": "⬛ box", "circle": "⚪ round", "hexagon": "⬢ he
 B_CX, B_CY = 540, 860           # the square's middle
 B_HOLE_W = B_HOLE[1] - B_HOLE[0]
 B_SMALL_HOLE = 100              # the heart and the diamond drain through their tip: a smaller hole
+# recipe["crash"] (20 Nov, the research: "+3 balls after each escape until my
+# computer can't handle it" got 15.5M views -- our box with a payoff): the
+# box fills (like recipe["fill"]), the frame rate "drops" as it fills (an FPS
+# meter, the picture stutters), and at full it crashes: the frame freezes,
+# glitches, and a "not responding" box comes up with the count.
+B_CRASH_LAG0 = 0.25             # share of "full" where the lag starts
+B_CRASH_GLITCH = 0.7            # s of glitch before the crash box
+B_CRASH_HOLD = 2.6              # s after the crash until the end
 B_PEG_R = 16
 # (a spinning box was tried: one ball rode the turning walls round and round
 # and hardly ever fell out, so it's not here)
@@ -1192,8 +1200,54 @@ class BoxSim(ArenaSim):
         self.count = 1
         self.escaped = 0
         self.waiting = 0
+        self.crash = bool(recipe.get("crash"))
+        if self.crash:
+            self.fill = True
+        self.live = 1
         self._add()
         self.thresholds = [round(B_TARGET ** (k / self.last)) for k in range(self.last + 1)]
+
+    @property
+    def finished(self) -> bool:
+        if self.crash:
+            return (self.done_at is not None and self.t - self.done_at > B_CRASH_HOLD) or self.t > SECONDS_CAP
+        return super().finished
+
+    def lag(self) -> float:
+        """recipe["crash"]: how badly it "lags", 0..1, from how full the box is."""
+        # mostly the count on its way to the final picture (so it builds up
+        # through the video), the rest how full the box is at the end
+        p = min(1.0, self.count / B_TARGET) ** 1.3
+        f = max(0.0, min(1.0, (self.live / self.full - 0.5) / 0.5))
+        return max(0.0, min(1.0, (0.75 * p + 0.25 * f - B_CRASH_LAG0) / (1 - B_CRASH_LAG0)))
+
+    def crash_track(self, n: int) -> np.ndarray:
+        """The crash: a harsh digital buzz while it glitches, then the error
+        beep (numpy only)."""
+        out = np.zeros(n, dtype=np.float32)
+        if self.done_at is None:
+            return out
+        sr = be.SR
+        rng = np.random.default_rng(int(self.recipe.get("seed") or 0))
+        i = int(self.done_at * sr)
+        k = int(B_CRASH_GLITCH * sr)
+        t = np.arange(k) / sr
+        buzz = np.sign(np.sin(2 * np.pi * 55 * t)) * 0.5 + np.sign(np.sin(2 * np.pi * 110.7 * t)) * 0.25
+        # a stuck sound buffer: short noise chunks repeating
+        chunk = rng.uniform(-1, 1, int(0.03 * sr)).astype(np.float32)
+        stuck = np.tile(chunk, k // len(chunk) + 1)[:k] * 0.6
+        g = (buzz + stuck) * np.linspace(1.0, 0.6, k)
+        seg = out[i:i + k]
+        seg += g[:len(seg)].astype(np.float32)
+        j = i + k + int(0.12 * sr)
+        for f, at, dur in ((880, 0.0, 0.12), (660, 0.13, 0.22)):
+            m = int(dur * sr)
+            tt = np.arange(m) / sr
+            beep = (np.sin(2 * np.pi * f * tt) * np.exp(-tt * 9)).astype(np.float32) * 0.7
+            a = j + int(at * sr)
+            seg = out[a:a + m]
+            seg += beep[:len(seg)]
+        return out
 
     @staticmethod
     def _mask(pts: list):
@@ -1256,6 +1310,9 @@ class BoxSim(ArenaSim):
 
     def step(self):
         dt = 1 / FPS
+        if self.crash and self.done_at is not None:
+            self.t += dt            # crashed: everything stays frozen where it was
+            return
         for _ in range(2):
             self.space.step(dt / 2)
         live = 0
@@ -1292,6 +1349,7 @@ class BoxSim(ArenaSim):
             self.waiting -= 1
             live += 1
         self.spawned = self.count
+        self.live = live
         if self.done_at is None:
             tier = max(k for k, th in enumerate(self.thresholds) if self.count >= th or k == 0)
             self.reveal(tier)
@@ -1299,6 +1357,8 @@ class BoxSim(ArenaSim):
                 self.final()
                 if live >= self.full:
                     self.finish(ok=True)
+                    if self.crash:      # no fanfare: it crashed
+                        self.events = [e for e in self.events if e[1] != "fanfare"]
             elif self.count >= B_TARGET:
                 self.finish(ok=True)
         self.t += dt
@@ -1324,6 +1384,8 @@ class BoxPainter(ArenaPainter):
                 d.ellipse((x - B_PEG_R, y - B_PEG_R, x + B_PEG_R, y + B_PEG_R), fill=(245, 245, 255, 255))
 
     def frame(self, sim: BoxSim) -> Image.Image:
+        if getattr(sim, "crash", False):
+            return self.crash_frame(sim)
         im = self.base(sim)
         im.paste(self.static, (0, 0), self.static)
         d = ImageDraw.Draw(im, "RGBA")
@@ -1333,6 +1395,89 @@ class BoxPainter(ArenaPainter):
         self.ctext(d, B_T - 90, f"Balls: {sim.count:,}", self.f_count, (255, 255, 255, 255))
         self.watermark(d, W - 60, H - 70)
         self.overlays(im, d, sim, item_y=CY - 160, text_y=CY)
+        return im
+
+    # -- recipe["crash"] --
+
+    def crash_frame(self, sim: BoxSim) -> Image.Image:
+        if sim.done_at is not None:
+            return self._crashed(sim)
+        lag = sim.lag()
+        n = getattr(self, "_n", 0)
+        self._n = n + 1
+        # the stutter: past a little lag only every k-th frame is new
+        k = 1 + int(round(lag ** 1.4 * 5))
+        held = getattr(self, "_held", None)
+        if held is not None and k > 1 and n % k:
+            self.base(sim)      # the trails go on underneath, as on a slow machine
+            return held.copy()
+        im = self.base(sim)
+        im.paste(self.static, (0, 0), self.static)
+        d = ImageDraw.Draw(im, "RGBA")
+        self.balls(im, sim)
+        self.effects(d, sim)
+        self.header(im, d, sim)
+        self.ctext(d, B_T - 90, f"Balls: {sim.count:,}", self.f_count, (255, 255, 255, 255))
+        self._fps(d, sim, lag)
+        self.watermark(d, W - 60, H - 70)
+        self.overlays(im, d, sim, item_y=CY - 160, text_y=CY)
+        self._held = im
+        return im.copy()
+
+    def _fps(self, d, sim: BoxSim, lag: float) -> None:
+        jitter = random.Random(f"fps-{int(sim.t * 4)}").uniform(-2, 2)
+        fps = max(1, int(round(60 - 57 * lag ** 1.2 + (jitter if lag > 0.05 else 0))))
+        col = (90, 255, 120, 255) if fps >= 45 else (255, 215, 70, 255) if fps >= 20 else (255, 70, 70, 255)
+        if not hasattr(self, "_f_fps"):
+            self._f_fps = be._font(46)
+        x, y = B_L, B_B + 40
+        d.rounded_rectangle((x, y, x + 230, y + 70), 14, fill=(0, 0, 0, 200))
+        d.text((x + 18, y + 8), f"FPS {fps}", font=self._f_fps, fill=col)
+        if lag > 0.6:
+            d.text((x + 260, y + 8), "LAGGING...", font=self._f_fps, fill=(255, 70, 70, 255))
+
+    def _crashed(self, sim: BoxSim) -> Image.Image:
+        held = getattr(self, "_held", None) or Image.new("RGB", (W, H))
+        ct = sim.t - sim.done_at
+        rng = random.Random(f"glitch-{int(ct * FPS)}")
+        g = min(1.0, ct / B_CRASH_GLITCH)
+        arr = np.asarray(held).copy()
+        # torn rows + split colour channels, more as it goes
+        for _ in range(int(4 + 26 * g) if ct < B_CRASH_GLITCH else 6):
+            y0 = rng.randrange(0, H - 10)
+            h = rng.randrange(6, 60)
+            arr[y0:y0 + h] = np.roll(arr[y0:y0 + h], rng.randrange(-120, 120) * (1 if g > 0.2 else 0) or 8, axis=1)
+        sh = int(6 + 22 * g)
+        arr[:, :, 0] = np.roll(arr[:, :, 0], sh, axis=1)
+        arr[:, :, 2] = np.roll(arr[:, :, 2], -sh, axis=1)
+        im = Image.fromarray(arr)
+        if ct < B_CRASH_GLITCH:
+            return im
+        # the "not responding" box, over the frozen, darkened frame
+        im = Image.blend(im, Image.new("RGB", (W, H)), 0.68)
+        d = ImageDraw.Draw(im, "RGBA")
+        if not hasattr(self, "_f_dlg"):
+            self._f_dlg, self._f_big, self._f_btn = be._font(50), be._font(96), be._font(42)
+        x0, y0, x1, y1 = 110, 560, 970, 1030
+        d.rounded_rectangle((x0 + 10, y0 + 14, x1 + 10, y1 + 14), 26, fill=(0, 0, 0, 160))
+        d.rounded_rectangle((x0, y0, x1, y1), 26, fill=(246, 246, 250, 255))
+        d.rounded_rectangle((x0, y0, x1, y0 + 92), 26, fill=(214, 40, 52, 255))
+        d.rectangle((x0, y0 + 60, x1, y0 + 92), fill=(214, 40, 52, 255))
+        d.text((x0 + 36, y0 + 18), "ball_sim.exe", font=self._f_dlg, fill=(255, 255, 255, 255))
+        tx, ty = x0 + 50, y0 + 142
+        d.polygon([(tx + 28, ty), (tx + 58, ty + 52), (tx - 2, ty + 52)], fill=(250, 190, 40, 255))
+        d.rectangle((tx + 25, ty + 15, tx + 31, ty + 36), fill=(30, 30, 40, 255))
+        d.rectangle((tx + 25, ty + 41, tx + 31, ty + 47), fill=(30, 30, 40, 255))
+        d.text((tx + 80, y0 + 140), "Not responding", font=self._f_dlg, fill=(30, 30, 40, 255))
+        d.text((x0 + 50, y0 + 215), f"Too many balls ({sim.count:,})", font=self._f_dlg, fill=(70, 70, 90, 255))
+        for i, label in enumerate(("Wait", "Close")):
+            bx = x1 - 470 + i * 240
+            d.rounded_rectangle((bx, y1 - 120, bx + 200, y1 - 40), 16, fill=(225, 225, 235, 255),
+                                outline=(150, 150, 170, 255), width=3)
+            tw = d.textlength(label, font=self._f_btn)
+            d.text((bx + 100 - tw / 2, y1 - 106), label, font=self._f_btn, fill=(30, 30, 40, 255))
+        self.ctext(d, 1110, "CRASHED AT", self._f_dlg, (255, 255, 255, 255))
+        self.ctext(d, 1180, f"{sim.count:,} BALLS", self._f_big, (255, 70, 70, 255))
         return im
 
 

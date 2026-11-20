@@ -1806,6 +1806,53 @@ merge it yourself; merging stays Dean's call per the rule above.
   refresh tokens for a Google OAuth app in "Testing". Dean reconnected and
   posted it by hand; told him to publish the OAuth app (Google Cloud
   console -> OAuth consent screen -> Publish app) so it stops expiring.
+- **Question formats + auto remake (20 Nov):** research (our 85 videos:
+  hits cap at ~31k, box P(>=10k) 58%, zen 83%, comment fights 0 of 23
+  over 3k; niche 1M+ videos all pose one question with a moment of truth:
+  "Will they all hit the same point?" 21M, "+3 balls after each escape
+  until my computer can't handle it" 15.5M on Instagram, "Pick one, no
+  switching" races 15.7M with 15k comments). Dean: "start getting the
+  right videos uploaded". (1) **Crash box** (`recipe["crash"]`,
+  ball_arenas `BoxSim` / `BoxPainter.crash_frame`): the square box fills
+  like `fill`, an FPS meter drops as it fills (`BoxSim.lag`: count on its
+  way to `B_TARGET` + how full) and the picture stutters (only every k-th
+  frame is new), then at full it freezes, glitches `B_CRASH_GLITCH` 0.7 s
+  and shows a generic "ball_sim.exe -- Not responding" box + "CRASHED AT N
+  BALLS" for the rest of `B_CRASH_HOLD` 2.6 s; sound stops at the freeze,
+  then a buzz + error beep (`crash_track`, numpy, via `be.mix_audio`).
+  Titles `TITLE_TEMPLATES["boxcrash"]`. `_balls_box_crash`: the first
+  `BALLS_CRASH_FIRST` 2 box videos since `BALLS_CRASH_SINCE` are crash
+  boxes, then `BALLS_CRASH_SHARE` 0.5. Boxes without it are byte for byte
+  as before (hash-checked frames + events + audio). ~5 min to make a 38 s
+  video. (2) Comment fights once a week: `crowd_every` (1 / 2 / 7 days;
+  7 = Sundays, ordinal % 7), wins over `crowd_other_day`; plan-once flag
+  `question_plan_20nov`; page select "How often". (3) **Auto remake:**
+  `BALLS_LOOK_VERSION` in `webapp/main.py`; the tick's `_balls_auto_remake`
+  runs the Remake-upcoming path (`_balls_remake_upcoming`) once when the
+  saved `look_version` differs, logs "[autopilot] new look (...)". Dean
+  (20 Nov): "I don't have to go press a button because I forget". **Bump
+  `BALLS_LOOK_VERSION` in every PR that changes what the ball videos are or
+  look like** (new kind, rotation, look); leave it for small fixes, since
+  every bump re-makes all made upcoming videos (Railway CPU).
+  (4) **Territory war** (`clipper/ball_territory.py`, `format:
+  "territory"`, NO_PACK, "Which country owns the map?"): 2-4 flag teams on
+  a tile grid; each team's ball flips enemy tiles it hits (digs 3 tiles
+  before bouncing, up to 14 by the deadline -- plain Pong-wars barely
+  moved), "+1" balls and "BOOM!" bombs from ~3 s, a team under 4% is out,
+  the most tiles at the deadline (26-32 s) wins and floods the map; live
+  share bar + "NEW LEADER". ok = enough lead changes, a late or comeback
+  winner, `max_gap` <= 12 s (~1 seed in 4). ~1 min to make a 30 s video.
+  (5) **Maze race** (`clipper/ball_mazerace.py`, `format: "mazerace"`,
+  NO_PACK, "Pick one before it starts"): 4-5 flag balls race through a
+  per-seed 7x9 neon maze to a trophy in the middle at a steady speed,
+  each taking a wrong branch at half the junctions; live standings, "X
+  TAKES THE LEAD!", "X WINS!". ok = 3+ lead changes and the halftime
+  leader loses (~1 in 9; `pick_seed` tries 96). ~1 min a video. Both built
+  by subagents from Dean's go-ahead, with no art looks / hot start / loop.
+  Rotation `BALLS_DROP_CYCLE` (20 slots): box 4, zen 3, territory 3, maze
+  race 3, ringfill 2, duel 2, shrink, spikes, sortrace 1.
+  `BALLS_DROP_DEBUT` box (a crash box) / mazerace / territory 1 each since
+  20 Nov, so the remake after the deploy makes those first.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
