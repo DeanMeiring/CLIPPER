@@ -6154,6 +6154,11 @@ def _balls_make(vid: str) -> None:
     if (opts.get("auto") and opts.get("slot") and settings.get("drop", True) and fmt in BALLS_HOT_KINDS
             and random.Random(f"hot-start-{vid}").random() < BALLS_HOT_SHARE):
         recipe["hot_start"] = True
+    if fmt == "box" and _balls_box_crash(vid, opts):
+        # 20 Nov: "+3 every escape until it crashes" (ball_arenas, recipe["crash"])
+        recipe["crash"] = True
+        recipe["shape"] = "square"
+        recipe["hook"] = ball_evolution.TITLE_TEMPLATES["boxcrash"][0]
     if fmt == "box" and not recipe.get("shape"):
         # Dean (9 Nov): other box shapes in the same look, taking turns
         recipe["shape"] = _balls_pick_shape(vid)
@@ -6176,7 +6181,8 @@ def _balls_make(vid: str) -> None:
         ball_sortrace.name_hook(recipe, avoid=_balls_recent_titles(vid))
     if fmt in ball_evolution.TITLE_TEMPLATES and recipe.get("hook"):
         # 16 Nov: never a title the channel used in its last BALLS_TITLE_MEMORY videos
-        recipe["hook"] = ball_evolution.unique_hook(fmt, recipe, _balls_recent_titles(vid), recipe["seed"])
+        recipe["hook"] = ball_evolution.unique_hook("boxcrash" if recipe.get("crash") else fmt, recipe,
+                                                    _balls_recent_titles(vid), recipe["seed"])
     elif fmt in BALLS_BEST_HOOKS and random.Random(f"best-hook-{vid}").random() < BALLS_BEST_HOOK_SHARE:
         # 12 Nov: the titles of the hits come back most of the time
         recipe["hook"] = BALLS_BEST_HOOKS[fmt][random.Random(f"best-hook-pick-{vid}").randrange(
@@ -6481,6 +6487,24 @@ def _balls_pick_shape(exclude: str) -> str:
 
 
 BALLS_SQUARE_SHARE = 0.75
+
+
+def _balls_box_crash(vid: str, opts: dict) -> bool:
+    """Whether this box video is the crash box: the first BALLS_CRASH_FIRST
+    box videos made since BALLS_CRASH_SINCE are, then BALLS_CRASH_SHARE of
+    them (seeded by the video), so the plain fill-up box keeps going too."""
+    if opts.get("crash") is not None:
+        return bool(opts["crash"])
+    made = sum(1 for v in _balls.videos() if v["id"] != vid and (v.get("recipe") or {}).get("crash")
+               and v.get("status") != "error" and (v.get("started_at") or 0) >= BALLS_CRASH_SINCE)
+    if made < BALLS_CRASH_FIRST:
+        return True
+    return random.Random(f"box-crash-{vid}").random() < BALLS_CRASH_SHARE
+
+
+BALLS_CRASH_FIRST = 2
+BALLS_CRASH_SHARE = 0.5
+BALLS_CRASH_SINCE = 1795125600      # 20 Nov 2026, 00:00 SA time
 
 
 # The hits' own titles (12 Nov): "How fast does it fill up?" was on three box
@@ -6905,6 +6929,7 @@ def _balls_crowd_view(s: dict) -> dict:
             "callouts_on": bool(s.get("crowd_callouts", True)),
             "anime": bool(s.get("crowd_anime", True)),
             "other_day": bool(s.get("crowd_other_day", True)),
+            "every": _balls_crowd_every(s),
             "today": _balls_crowd_day(datetime.datetime.now(_balls_tz()), s),
             "callout_at": co_at.strftime("%H:%M") if co_at else None,
             "callout_check": st.get("callout_check"),
@@ -6930,7 +6955,18 @@ def _balls_crowd_day(dt: datetime.datetime, s: dict) -> bool:
     still posted, while the drop videos make every hit, so with
     ``crowd_other_day`` (default on) they run every other day and the other
     days' fight slots become drop videos."""
-    return not s.get("crowd_other_day", True) or dt.astimezone(_balls_tz()).date().toordinal() % 2 == 0
+    every = _balls_crowd_every(s)
+    return every <= 1 or dt.astimezone(_balls_tz()).date().toordinal() % every == 0
+
+
+def _balls_crowd_every(s: dict) -> int:
+    """Comment fights every 1, 2 or 7 days. ``crowd_every`` (20 Nov: 0 of
+    23 comment fights went past 3k, so once a week, on Sundays) wins over
+    the older ``crowd_other_day`` toggle."""
+    every = s.get("crowd_every")
+    if every in (1, 2, 7):
+        return every
+    return 2 if s.get("crowd_other_day", True) else 1
 
 
 def _balls_crowd_slot(dt: datetime.datetime, s: dict) -> bool:
@@ -7022,6 +7058,11 @@ def _balls_drop_plan_once() -> None:
     7 Nov (later): four a day -- comment fights at 12:00 and 20:00, drop
     videos at 08:00 and 15:00."""
     s = _balls.settings()
+    if not s.get("question_plan_20nov"):
+        # 20 Nov (the research): comment fights once a week
+        _balls.save_settings({"crowd_every": 7, "question_plan_20nov": True})
+        print("[autopilot] comment fights once a week (Sundays)", flush=True)
+        s = _balls.settings()
     if not s.get("four_a_day_7nov"):
         _balls.save_settings({"crowd_slots": ["12:00", "20:00"], "slots": ["08:00", "15:00"], "drop": True,
                               "drop_plan_7nov": True, "four_a_day_7nov": True})
@@ -8051,6 +8092,7 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         s = _balls.settings()
         if not s.get("autopilot"):
             return {"autopilot": False}
+        _balls_auto_remake()
         _balls_resume()
         if _balls_learn_due(s) and _youtube_token_stores[BALLS_PROFILE].is_connected():
             threading.Thread(target=_balls_learn_bg, args=("daily",), daemon=True).start()
@@ -8280,6 +8322,37 @@ def balls_remake_upcoming() -> dict:
     from here -- the app may upload but not delete -- so it's listed with
     its YouTube Studio link; once Dean has deleted it there, pressing again
     frees its time and a new one is made for it."""
+    return dict(balls_state(), remake=_balls_remake_upcoming())
+
+
+# Bump this in a PR that changes what the videos are or look like (a new
+# kind, a new rotation, a new look): the first tick after the deploy remakes
+# every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
+# to go press a button because I forget"). Small fixes leave it alone, so
+# the queued videos aren't made again for nothing.
+BALLS_LOOK_VERSION = "2026-11-20 question formats"
+
+
+def _balls_auto_remake() -> Optional[dict]:
+    """Remake the upcoming videos once after a deploy that bumped
+    BALLS_LOOK_VERSION; the version is saved first, so a crash or restart
+    mid-way never makes it fire twice."""
+    s = _balls.settings()
+    if s.get("look_version") == BALLS_LOOK_VERSION:
+        return None
+    _balls.save_settings({"look_version": BALLS_LOOK_VERSION})
+    try:
+        out = _balls_remake_upcoming()
+    except Exception as e:      # never stops the tick
+        print(f"[autopilot] remake after the update failed: {e}", flush=True)
+        return None
+    print(f"[autopilot] new look ({BALLS_LOOK_VERSION}): remade {out['remade']} upcoming videos, "
+          f"{out['past']} past their time left as they are, {len(out['on_youtube'])} already on YouTube",
+          flush=True)
+    return out
+
+
+def _balls_remake_upcoming() -> dict:
     now = time.time()
     out = {"remade": 0, "replaced": 0, "on_youtube": [], "unchecked": False, "past": 0}
     videos = [v for v in _balls.videos() if not v.get("hidden")]
@@ -8322,7 +8395,7 @@ def balls_remake_upcoming() -> dict:
                                           "studio": f"https://studio.youtube.com/video/{yt['video_id']}/edit"})
     if out["remade"] or out["replaced"]:
         _balls_start_worker()
-    return dict(balls_state(), remake=out)
+    return out
 
 
 @protected.delete("/api/balls/videos/{vid}")
@@ -8357,6 +8430,7 @@ class BallsSettings(BaseModel):
     crowd_callouts: Optional[bool] = None
     crowd_anime: Optional[bool] = None
     crowd_other_day: Optional[bool] = None
+    crowd_every: Optional[int] = None
     crowd_slots: Optional[List[str]] = None
     league: Optional[bool] = None
     league_slot: Optional[str] = None
@@ -8399,6 +8473,10 @@ def balls_settings(req: BallsSettings) -> dict:
         data["crowd_anime"] = bool(req.crowd_anime)
     if req.crowd_other_day is not None:
         data["crowd_other_day"] = bool(req.crowd_other_day)
+    if req.crowd_every is not None:
+        if req.crowd_every not in (1, 2, 7):
+            raise HTTPException(400, "every 1, 2 or 7 days")
+        data["crowd_every"] = req.crowd_every
     if req.crowd_slots is not None:
         times = [t for t in req.crowd_slots if t]
         if len(times) > 4 or not all(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t) for t in times):
@@ -13503,7 +13581,7 @@ __NAV_LINKS__
     <div class="plan" id="ap-plan"></div>
     <div class="status bad" id="ap-warn" style="display:none;margin-top:10px"></div>
     <button id="remake" type="button" class="secondary">♻️ Remake upcoming videos with the newest look</button>
-    <div class="hint">After a design change: every video that isn’t public yet is made again from scratch, for the same times.</div>
+    <div class="hint">After a design change: every video that isn’t public yet is made again from scratch, for the same times. Big updates do this by themselves once.</div>
     <div class="status ok" id="remake-out" style="display:none;margin-top:10px"></div>
     <details><summary>Added under every description</summary><textarea id="s-desc" rows="3" placeholder="e.g. New one every day!"></textarea></details>
     <div class="days" id="days"></div>
@@ -13542,7 +13620,8 @@ __NAV_LINKS__
     <details class="more"><summary>ℹ️ How it works</summary><div class="hint">The people who comment on the channel’s videos become the balls, with their name and their own fighter. Every fight is a 1v1: a “me vs X” call-out first (oldest first), else the champion against the next person waiting — people who asked for a fight (“put me in”, “1v1 me”) go first. Empty spots are filled with people who were in before, then bots. The winner keeps the crown and defends it next time. It runs by itself: each fight is made just after its time with the comments up to then (Claude checks every name and comment, and “remove me” takes someone out) and posted straight away. The Railway waker has to call at those times (now 08:05, 15:05, 20:05). You only need this box to take someone out by hand.</div></details>
     <div class="status" id="cr-status" style="display:none;margin-top:10px"></div>
     <div class="cr-champ" id="cr-champ"></div>
-    <label class="toggle"><input id="cr-od" type="checkbox"> 📆 Every other day (the other days' fight times post a drop video instead) <span id="cr-od-today" style="opacity:.7"></span></label>
+    <label>📆 How often <select id="cr-every"><option value="1">every day</option><option value="2">every other day</option><option value="7">once a week (Sundays)</option></select> <span id="cr-od-today" style="opacity:.7"></span></label>
+    <div class="hint">The other days' fight times post a drop video instead.</div>
     <label class="toggle"><input id="cr-an" type="checkbox"> 🎬 Anime cut: VS intro, slow-mo kill-cam and K.O., and everyone gets their own anime fighter (1v1s)</label>
     <label class="toggle"><input id="cr-co" type="checkbox"> ⚔️ Call-outs: a comment like “me vs levi” gets that 1v1 in the next fight</label>
     <div class="hint" id="cr-co-h"></div>
@@ -13777,8 +13856,8 @@ function renderCrowd() {
   $('cr-champ').textContent = C.champ ? `👑 Holding the crown: ${ch(C.champ.char)} ${C.champ.name}` : '👑 Nobody holds the crown yet.';
   $('cr-co').checked = C.callouts_on;
   $('cr-an').checked = C.anime;
-  $('cr-od').checked = C.other_day;
-  $('cr-od-today').textContent = C.other_day ? (C.today ? '· a fight day today' : '· no fight today') : '';
+  $('cr-every').value = String(C.every || 1);
+  $('cr-od-today').textContent = (C.every || 1) > 1 ? (C.today ? '· a fight day today' : '· no fight today') : '';
   const cc = C.callout_check;
   const last = cc ? ` Last check ${sa(cc.at * 1000, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}: ` + (cc.video ? 'made a call-out fight.' : 'no call-outs, so nothing extra posted.') : '';
   $('cr-co-h').textContent = !C.callouts_on ? 'Off: “me vs” comments are just comments.' :
@@ -13824,7 +13903,7 @@ for (const id of ['cr-t1', 'cr-t2', 'cr-t3'])
   $(id).addEventListener('change', () => saveSettings({ crowd_slots: ['cr-t1', 'cr-t2', 'cr-t3'].map(x => $(x).value).filter(Boolean) }));
 $('cr-co').addEventListener('change', () => saveSettings({ crowd_callouts: $('cr-co').checked }));
 $('cr-an').addEventListener('change', () => saveSettings({ crowd_anime: $('cr-an').checked }));
-$('cr-od').addEventListener('change', () => saveSettings({ crowd_other_day: $('cr-od').checked }));
+$('cr-every').addEventListener('change', () => saveSettings({ crowd_every: +$('cr-every').value }));
 $('cr-now').onclick = async () => {
   const b = $('cr-now'); b.disabled = true;
   try { S = await api('/api/balls/crowd/refresh', { method: 'POST' }); render(); setTimeout(() => load().catch(() => {}), 4000); }
