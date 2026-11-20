@@ -1952,6 +1952,13 @@ merge it yourself; merging stays Dean's call per the rule above.
 
 ## Other standing preferences
 
+- **Agents for big jobs (20 Nov):** when Dean gives a big project -- intense
+  research (channel deep-dives, niche/competitor research) or a large
+  development job -- you may deploy subagents to split the work, without
+  asking first. Keep it lean: a few focused agents with clear, separate
+  briefs (not one per small question), do the cheap parts (data pulls you
+  already know how to do) yourself, and don't use them for small tasks.
+
 - **Railway cost (10 Nov):** Dean: don't use too much Railway, it gets
   expensive. Better visuals may cost a bit more render time, "just not a
   lot". Prefer work done once (pre-rendered assets, shipped in the repo)
