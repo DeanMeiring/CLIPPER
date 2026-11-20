@@ -1035,6 +1035,8 @@ def good_end(recipe: dict) -> tuple:
         return (20.0, 36.0)
     if recipe.get("format") == "ringfill":
         return (18.0, 45.0)
+    if recipe.get("format") == "mazerace" and recipe.get("ai"):
+        return (14.0, 34.0)      # trained racers take fewer wrong turns: shorter races
     if recipe.get("format") in ("territory", "mazerace"):
         return (20.0, 36.0)
     if recipe.get("format") == "sortrace":
@@ -1080,8 +1082,8 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
         # a close fight with a comeback: ~1 seed in 15, ~0.03 s each
         tries = max(tries, 480)
     if recipe.get("format") == "mazerace":
-        # a comeback in the maze: ~1 seed in 9, ~0.3 s each
-        tries = max(tries, 96)
+        # a comeback in the maze: ~1 seed in 9 (~1 in 13 with trained AIs), ~0.3 s each
+        tries = max(tries, 160 if recipe.get("ai") else 96)
     lo, hi = good_end(recipe)
     good = []
     start = recipe["seed"]
