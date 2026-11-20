@@ -1834,6 +1834,25 @@ merge it yourself; merging stays Dean's call per the rule above.
   `BALLS_LOOK_VERSION` in every PR that changes what the ball videos are or
   look like** (new kind, rotation, look); leave it for small fixes, since
   every bump re-makes all made upcoming videos (Railway CPU).
+  (4) **Territory war** (`clipper/ball_territory.py`, `format:
+  "territory"`, NO_PACK, "Which country owns the map?"): 2-4 flag teams on
+  a tile grid; each team's ball flips enemy tiles it hits (digs 3 tiles
+  before bouncing, up to 14 by the deadline -- plain Pong-wars barely
+  moved), "+1" balls and "BOOM!" bombs from ~3 s, a team under 4% is out,
+  the most tiles at the deadline (26-32 s) wins and floods the map; live
+  share bar + "NEW LEADER". ok = enough lead changes, a late or comeback
+  winner, `max_gap` <= 12 s (~1 seed in 4). ~1 min to make a 30 s video.
+  (5) **Maze race** (`clipper/ball_mazerace.py`, `format: "mazerace"`,
+  NO_PACK, "Pick one before it starts"): 4-5 flag balls race through a
+  per-seed 7x9 neon maze to a trophy in the middle at a steady speed,
+  each taking a wrong branch at half the junctions; live standings, "X
+  TAKES THE LEAD!", "X WINS!". ok = 3+ lead changes and the halftime
+  leader loses (~1 in 9; `pick_seed` tries 96). ~1 min a video. Both built
+  by subagents from Dean's go-ahead, with no art looks / hot start / loop.
+  Rotation `BALLS_DROP_CYCLE` (20 slots): box 4, zen 3, territory 3, maze
+  race 3, ringfill 2, duel 2, shrink, spikes, sortrace 1.
+  `BALLS_DROP_DEBUT` box (a crash box) / mazerace / territory 1 each since
+  20 Nov, so the remake after the deploy makes those first.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

@@ -6544,7 +6544,7 @@ def _balls_last_art(exclude: str) -> Optional[str]:
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
                          "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-                         "crowd", "ringfill", "sortrace")
+                         "crowd", "ringfill", "sortrace", "territory", "mazerace")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6583,8 +6583,13 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "zen", "ringfill", "duel", "sortrace", "shrink", "box", "spikes", "ringfill", "duel",
-                    "zen", "sortrace")
+BALLS_DROP_CYCLE = ("box", "territory", "zen", "mazerace", "ringfill", "duel", "box", "zen", "territory",
+                    "shrink", "mazerace", "box", "spikes", "zen", "territory", "ringfill", "mazerace", "duel", "box",
+                    "sortrace")
+# 20 Nov (the research: every 1M+ video in the niche asks one question with
+# a moment of truth, and pick-a-side videos get the comments): 20 slots --
+# box 4 (half of them the crash box), zen 3, territory 3, maze race 3, ring
+# fill 2, duel 2, shrink, spikes, sortrace 1 (its two had ~1k).
 # 17 Nov: two new kinds from reels Dean sent, 2 in 12 each -- the growing
 # circle that locks in as a ring (ball_ringfill) and the sorting race on a
 # painting or animal photo (ball_sortrace); escape made room.
@@ -6611,8 +6616,8 @@ BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "sur
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 # 18 Nov: Dean restarted after the pause and the ring fill / sorting race
 # only came "later" in the cycle: each goes out once first, then the cycle
-BALLS_DROP_DEBUT = {"ringfill": 1, "sortrace": 1}
-BALLS_DROP_DEBUT_SINCE = 1794988800     # 18 Nov 2026, 10:00 SA time
+BALLS_DROP_DEBUT = {"box": 1, "mazerace": 1, "territory": 1}    # the box: a crash box (_balls_box_crash)
+BALLS_DROP_DEBUT_SINCE = 1795125600     # 20 Nov 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
@@ -6623,7 +6628,8 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "race": "🏁 First to N wins", "tourney": "🏆 16-ball tournament",
                        "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor",
                        "crowd": "💬 Comment fight", "ringfill": "⭕ Will it fill the circle?",
-                       "sortrace": "🖼 Sorting race"}
+                       "sortrace": "🖼 Sorting race", "territory": "🗺️ Which country owns the map?",
+                       "mazerace": "🏁 Pick one: maze race"}
 
 
 def _balls_tz():
@@ -7503,6 +7509,7 @@ BALLS_SONG_KINDS = ("shrink",)
 BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
                        "survivor": "none", "crowd": "none", "ringfill": "none", "sortrace": "none",
+                       "territory": "none", "mazerace": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -8330,7 +8337,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-20 question formats"
+BALLS_LOOK_VERSION = "2026-11-20 question formats"      # crash box, maze race, territory war
 
 
 def _balls_auto_remake() -> Optional[dict]:
@@ -13785,7 +13792,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace', 'territory', 'mazerace'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {

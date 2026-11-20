@@ -306,10 +306,11 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
            "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-           "ringfill", "sortrace")
+           "ringfill", "sortrace", "territory", "mazerace")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
-NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd", "ringfill", "sortrace")   # crowd: ball_crowd (commenters)
+NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd", "ringfill", "sortrace", "territory",
+           "mazerace")   # crowd: ball_crowd (commenters)
 FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
@@ -424,6 +425,12 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     elif fmt == "sortrace":
         from clipper import ball_sortrace
         ball_sortrace.sortrace_recipe(recipe)
+    elif fmt == "territory":
+        from clipper import ball_territory
+        ball_territory.territory_recipe(recipe)
+    elif fmt == "mazerace":
+        from clipper import ball_mazerace
+        ball_mazerace.mazerace_recipe(recipe)
     elif fmt in NO_PACK:
         from clipper import ball_duel
         {"duel": ball_duel.duel_recipe, "race": ball_duel.race_recipe,
@@ -991,6 +998,12 @@ def _parts(recipe: dict):
     if recipe.get("format") == "ringfill":
         from clipper import ball_ringfill
         return ball_ringfill.RingFillSim, ball_ringfill.RingFillPainter
+    if recipe.get("format") == "territory":
+        from clipper import ball_territory
+        return ball_territory.TerritorySim, ball_territory.TerritoryPainter
+    if recipe.get("format") == "mazerace":
+        from clipper import ball_mazerace
+        return ball_mazerace.MazeRaceSim, ball_mazerace.MazeRacePainter
     if recipe.get("format") == "sortrace":
         from clipper import ball_sortrace
         return ball_sortrace.SortSim, ball_sortrace.SortPainter
@@ -1022,6 +1035,8 @@ def good_end(recipe: dict) -> tuple:
         return (20.0, 36.0)
     if recipe.get("format") == "ringfill":
         return (18.0, 45.0)
+    if recipe.get("format") in ("territory", "mazerace"):
+        return (20.0, 36.0)
     if recipe.get("format") == "sortrace":
         return (24.0, 34.0)
     if recipe.get("format") == "crowd":
@@ -1064,6 +1079,9 @@ def pick_seed(recipe: dict, tries: int = 48, workers: int | None = None, log=pri
     if recipe.get("format") == "duel" or (recipe.get("crowd") or {}).get("look") == "duel":
         # a close fight with a comeback: ~1 seed in 15, ~0.03 s each
         tries = max(tries, 480)
+    if recipe.get("format") == "mazerace":
+        # a comeback in the maze: ~1 seed in 9, ~0.3 s each
+        tries = max(tries, 96)
     lo, hi = good_end(recipe)
     good = []
     start = recipe["seed"]
@@ -1663,6 +1681,12 @@ def publish_text(recipe: dict) -> dict:
     if fmt == "sortrace":
         from clipper import ball_sortrace
         return ball_sortrace.publish_text(recipe)
+    if fmt == "territory":
+        from clipper import ball_territory
+        return ball_territory.publish_text(recipe)
+    if fmt == "mazerace":
+        from clipper import ball_mazerace
+        return ball_mazerace.publish_text(recipe)
     if fmt == "ringfill":
         return {"title": recipe["hook"][:100],
                 "description": ("A circle bounces and grows a little with every bounce. When it fills the space it "
