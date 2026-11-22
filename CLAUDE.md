@@ -1872,6 +1872,12 @@ merge it yourself; merging stays Dean's call per the rule above.
   covered by the crash dialog" and remade it. `ball_review` now adds
   `_CRASH_NOTE` for crash recipes and takes its last frame 0.3 s before
   the crash instead of 1.2 s after.
+- **Comment fights off (22 Nov):** Dean: "remove the comment battles".
+  `_balls_drop_plan_once` (flag `no_crowd_22nov`) sets `crowd` and
+  `crowd_callouts` off on the live settings and adds the fight times to
+  `slots`, so 08:00 / 15:00 / 20:00 are all drop videos; the invite line
+  under descriptions goes with `crowd`. The code stays (Fights tab can
+  turn it back on).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

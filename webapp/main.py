@@ -7068,6 +7068,13 @@ def _balls_drop_plan_once() -> None:
     7 Nov (later): four a day -- comment fights at 12:00 and 20:00, drop
     videos at 08:00 and 15:00."""
     s = _balls.settings()
+    if not s.get("no_crowd_22nov"):
+        # 22 Nov (Dean): no more comment fights; their time posts a drop video
+        times = sorted(set((s.get("slots") or []) + _balls_crowd_times(s)))
+        _balls.save_settings({"crowd": False, "crowd_callouts": False, "slots": times or ["08:00", "15:00", "20:00"],
+                              "no_crowd_22nov": True, "question_plan_20nov": True})
+        print(f"[autopilot] comment fights off; drop videos at {', '.join(times)}", flush=True)
+        s = _balls.settings()
     if not s.get("question_plan_20nov"):
         # 20 Nov (the research): comment fights once a week
         _balls.save_settings({"crowd_every": 7, "question_plan_20nov": True})
