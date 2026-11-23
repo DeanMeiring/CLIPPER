@@ -6158,6 +6158,8 @@ def _balls_make(vid: str) -> None:
     if fmt == "mazerace":
         # 20 Nov (Dean): the racers are small AIs trained on the maze (ball_mazerace.ai_recipe)
         ball_mazerace.ai_recipe(recipe)
+    # Dean (23 Nov): no sound effect every time it levels up (new picture)
+    recipe["quiet_unlock"] = True
     if fmt == "box" and _balls_box_crash(vid, opts):
         # 20 Nov: "+3 every escape until it crashes" (ball_arenas, recipe["crash"])
         recipe["crash"] = True
@@ -6166,6 +6168,10 @@ def _balls_make(vid: str) -> None:
     if fmt == "box" and not recipe.get("shape"):
         # Dean (9 Nov): other box shapes in the same look, taking turns
         recipe["shape"] = _balls_pick_shape(vid)
+    if fmt == "box" and not recipe.get("crash"):
+        # Dean (23 Nov): "let it break out of the box when it becomes too full"
+        recipe["burst"] = True
+        recipe["ending"] = random.Random(f"burst-end-{vid}").choice(("IT BURST!", "IT BROKE!", "TOO FULL!"))
     recipe["watermark"] = settings.get("watermark") or ""
     # every kind uses a picture pack now (Dean: the emoji are too generic)
     _balls.update(vid, lambda v: v.update(status="picking", progress=0.0, tried=0, error=None,
@@ -6548,7 +6554,7 @@ def _balls_last_art(exclude: str) -> Optional[str]:
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
                          "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-                         "crowd", "ringfill", "sortrace", "territory", "mazerace")
+                         "crowd", "ringfill", "sortrace", "territory", "mazerace", "overflow")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6587,9 +6593,13 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "territory", "zen", "mazerace", "ringfill", "duel", "box", "zen", "territory",
-                    "shrink", "mazerace", "box", "spikes", "zen", "territory", "ringfill", "mazerace", "duel", "box",
-                    "sortrace")
+BALLS_DROP_CYCLE = ("box", "overflow", "zen", "ringfill", "box", "shrink", "overflow", "zen", "box", "territory",
+                    "ringfill", "overflow", "box", "zen", "spikes", "ringfill", "box", "overflow", "shrink", "mazerace")
+# 23 Nov (Dean: "pivot more to satisfying videos"; the report: box median 16.3k,
+# ring fill 14.9k, zen 10.6k, everything else 1.1-3.6k): 20 slots, 18 of them
+# satisfying -- box 5, overflow bowl 4, zen 3, ring fill 3, growing ball 2,
+# spikes 1 -- plus territory and the maze race once each. Duels and the
+# sorting race are out.
 # 20 Nov (the research: every 1M+ video in the niche asks one question with
 # a moment of truth, and pick-a-side videos get the comments): 20 slots --
 # box 4 (half of them the crash box), zen 3, territory 3, maze race 3, ring
@@ -6620,8 +6630,8 @@ BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "sur
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 # 18 Nov: Dean restarted after the pause and the ring fill / sorting race
 # only came "later" in the cycle: each goes out once first, then the cycle
-BALLS_DROP_DEBUT = {"box": 1, "mazerace": 1, "territory": 1}    # the box: a crash box (_balls_box_crash)
-BALLS_DROP_DEBUT_SINCE = 1795125600     # 20 Nov 2026, 00:00 SA time
+BALLS_DROP_DEBUT = {"overflow": 1, "box": 1}    # 23 Nov: the overflow bowl and a box that bursts go first
+BALLS_DROP_DEBUT_SINCE = 1795384800     # 23 Nov 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
@@ -6633,7 +6643,7 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor",
                        "crowd": "💬 Comment fight", "ringfill": "⭕ Will it fill the circle?",
                        "sortrace": "🖼 Sorting race", "territory": "🗺️ Which country owns the map?",
-                       "mazerace": "🏁 Pick one: maze race"}
+                       "mazerace": "🏁 Pick one: maze race", "overflow": "🫗 Will it overflow?"}
 
 
 def _balls_tz():
@@ -7520,7 +7530,7 @@ BALLS_SONG_KINDS = ("shrink",)
 BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make the cursed noises
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
                        "survivor": "none", "crowd": "none", "ringfill": "none", "sortrace": "none",
-                       "territory": "none", "mazerace": "none",
+                       "territory": "none", "mazerace": "none", "overflow": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -8349,7 +8359,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-23 satisfying sounds"      # the meow gave way to satisfying hit sounds
+BALLS_LOOK_VERSION = "2026-11-23 satisfying pivot"      # overflow bowl, boxes burst, quiet level-ups
 
 
 def _balls_auto_remake() -> Optional[dict]:
@@ -13804,7 +13814,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace', 'territory', 'mazerace'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace', 'territory', 'mazerace', 'overflow'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {

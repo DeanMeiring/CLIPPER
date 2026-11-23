@@ -1103,6 +1103,12 @@ B_SMALL_HOLE = 100              # the heart and the diamond drain through their 
 B_CRASH_LAG0 = 0.25             # share of "full" where the lag starts
 B_CRASH_GLITCH = 0.7            # s of glitch before the crash box
 B_CRASH_HOLD = 2.6              # s after the crash until the end
+# recipe["burst"] (23 Nov, Dean: "let it break out of the box when it becomes
+# too full"): at full the walls crack apart, the pieces fly off and the balls
+# pour out of the frame, instead of stopping.
+B_BURST_HOLD = 2.6              # s from the burst until the end
+B_BURST_KICK = 520.0            # px/s outward push on every ball when it bursts
+B_SHARD_LEN = 70                # the walls break into pieces about this long
 B_PEG_R = 16
 # (a spinning box was tried: one ball rode the turning walls round and round
 # and hardly ever fell out, so it's not here)
@@ -1192,11 +1198,18 @@ class BoxSim(ArenaSim):
                 pg = pymunk.Circle(sp.static_body, B_PEG_R, (x, y))
                 pg.elasticity, pg.friction, pg.collision_type = 0.9, 0.2, 3
                 sp.add(pg)
+        self.wall_shapes, self.wall_lines = [], list(walls)
         for p, q in walls:
             w = pymunk.Segment(wall_body, p, q, 6)
             w.elasticity, w.friction, w.collision_type = 0.9, 0.2, 3
             sp.add(w)
+            self.wall_shapes.append(w)
         sp.on_collision(1, 3, begin=self._on_wall)
+        self.burst = bool(recipe.get("burst")) and not recipe.get("crash")
+        if self.burst:
+            self.fill = True
+        self.burst_at = None
+        self.shards: list = []
         self.count = 1
         self.escaped = 0
         self.waiting = 0
@@ -1207,8 +1220,38 @@ class BoxSim(ArenaSim):
         self._add()
         self.thresholds = [round(B_TARGET ** (k / self.last)) for k in range(self.last + 1)]
 
+    def _burst(self) -> None:
+        """The box breaks: walls out of the physics, every ball pushed out
+        from the middle, the walls into flying pieces (drawn by the painter)."""
+        self.burst_at = self.t
+        self.space.remove(*self.wall_shapes)
+        cx, cy = (B_L + B_R) / 2, (B_T + B_B) / 2
+        for b in self.balls:
+            body = b["body"]
+            dx, dy = body.position.x - cx, body.position.y - cy
+            d = max(1.0, math.hypot(dx, dy))
+            k = B_BURST_KICK * (0.5 + self.rng.random())
+            body.velocity = (body.velocity.x + dx / d * k, body.velocity.y + dy / d * k - 250)
+        for p, q in self.wall_lines:
+            L = math.hypot(q[0] - p[0], q[1] - p[1])
+            n = max(1, int(L // B_SHARD_LEN))
+            for i in range(n):
+                a = (p[0] + (q[0] - p[0]) * i / n, p[1] + (q[1] - p[1]) * i / n)
+                b2 = (p[0] + (q[0] - p[0]) * (i + 1) / n, p[1] + (q[1] - p[1]) * (i + 1) / n)
+                mx, my = (a[0] + b2[0]) / 2, (a[1] + b2[1]) / 2
+                dx, dy = mx - cx, my - cy
+                d = max(1.0, math.hypot(dx, dy))
+                sp = self.rng.uniform(300, 700)
+                self.shards.append({"x": mx, "y": my, "vx": dx / d * sp + self.rng.uniform(-80, 80),
+                                    "vy": dy / d * sp - self.rng.uniform(150, 450),
+                                    "ang": math.atan2(b2[1] - a[1], b2[0] - a[0]), "spin": self.rng.uniform(-9, 9),
+                                    "len": math.hypot(b2[0] - a[0], b2[1] - a[1])})
+        self.events.append((self.t, "thud", 0, 1.0))
+
     @property
     def finished(self) -> bool:
+        if self.burst and self.done_at is not None:
+            return self.t - self.done_at > B_BURST_HOLD or self.t > SECONDS_CAP
         if self.crash:
             return (self.done_at is not None and self.t - self.done_at > B_CRASH_HOLD) or self.t > SECONDS_CAP
         return super().finished
@@ -1313,6 +1356,20 @@ class BoxSim(ArenaSim):
         if self.crash and self.done_at is not None:
             self.t += dt            # crashed: everything stays frozen where it was
             return
+        if self.burst_at is not None:
+            for _ in range(2):
+                self.space.step(dt / 2)
+            for sh in self.shards:
+                sh["vy"] += 1300 * dt
+                sh["x"] += sh["vx"] * dt
+                sh["y"] += sh["vy"] * dt
+                sh["ang"] += sh["spin"] * dt
+            for b in list(self.balls):
+                if b["body"].position.y > H + 60 or not -80 < b["body"].position.x < W + 80:
+                    self.space.remove(b["body"], b["shape"])
+                    self.balls.remove(b)
+            self.t += dt
+            return
         for _ in range(2):
             self.space.step(dt / 2)
         live = 0
@@ -1357,6 +1414,8 @@ class BoxSim(ArenaSim):
                 self.final()
                 if live >= self.full:
                     self.finish(ok=True)
+                    if self.burst:
+                        self._burst()
                     if self.crash:      # no fanfare: it crashed
                         self.events = [e for e in self.events if e[1] != "fanfare"]
             elif self.count >= B_TARGET:
@@ -1387,8 +1446,17 @@ class BoxPainter(ArenaPainter):
         if getattr(sim, "crash", False):
             return self.crash_frame(sim)
         im = self.base(sim)
-        im.paste(self.static, (0, 0), self.static)
+        if getattr(sim, "burst_at", None) is None:
+            im.paste(self.static, (0, 0), self.static)
         d = ImageDraw.Draw(im, "RGBA")
+        if getattr(sim, "burst_at", None) is not None:
+            for sh in sim.shards:      # the broken walls flying off
+                c, s_, h = math.cos(sh["ang"]), math.sin(sh["ang"]), sh["len"] / 2
+                d.line([(sh["x"] - c * h, sh["y"] - s_ * h), (sh["x"] + c * h, sh["y"] + s_ * h)],
+                       fill=(245, 245, 255, 255), width=10)
+            age = sim.t - sim.burst_at
+            if age < 0.25:            # the crack: a quick white flash
+                d.rectangle((0, 0, W, H), fill=(255, 255, 255, int(150 * (1 - age / 0.25))))
         self.balls(im, sim)
         self.effects(d, sim)
         self.header(im, d, sim)

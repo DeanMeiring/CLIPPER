@@ -111,6 +111,10 @@ _CRASH_NOTE = ("This is the 'until it crashes' version: as the box fills, an FPS
                "of the video, not a broken render; the last frame here is from just before the crash.")
 
 
+_BURST_NOTE = ("This box bursts when it is full on purpose: the walls break into flying pieces, the balls "
+               "spray out of the frame and the ending text shows over them. That is the intended ending.")
+
+
 def frame_times(info: dict) -> List[float]:
     secs = float(info.get("seconds") or 30)
     end = info.get("done_at")
@@ -153,6 +157,8 @@ def review(video: Path, info: dict, title: str, api_key: str,
     art = _ART_NOTES.get(info.get("art") or "")
     if info.get("crash"):
         art = (art + " " + _CRASH_NOTE).strip()
+    elif info.get("burst"):
+        art = (art + " " + _BURST_NOTE).strip()
     if art:
         style = (style + " " + art).strip()
     if style:
