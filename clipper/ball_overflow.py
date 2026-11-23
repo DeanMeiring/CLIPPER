@@ -72,6 +72,41 @@ BACKS = [((14, 16, 26), (24, 28, 44)), ((20, 14, 28), (32, 24, 46)), ((10, 20, 2
 PLATE, PLATE_EDGE, GROOVE = (84, 94, 114), (150, 160, 182), (66, 74, 94)
 TILE, TILE_EDGE = (58, 66, 84), (92, 104, 128)
 
+# Looks. "slate" is the first design (BACKS / PALETTES above); recipes without a
+# "style" draw exactly as before. The others carry their own colours.
+_SLATE = dict(plate=PLATE, plate_edge=PLATE_EDGE, groove=GROOVE, tile=TILE, tile_edge=TILE_EDGE,
+              tick=((96, 108, 130), (60, 70, 90)), paddle=((196, 204, 222), (132, 142, 166), (120, 130, 156)),
+              hub=(222, 228, 240), title=(250, 250, 255), sub=(168, 180, 206), count=(255, 255, 255),
+              pop=(255, 255, 255), ending=(255, 214, 102), ending_stroke=(12, 12, 18))
+STYLES = {
+    "slate": _SLATE,
+    "candy": dict(back=(255, 205, 64), inner=(255, 246, 226), plate=(255, 255, 255), plate_edge=(24, 24, 28),
+                  groove=(255, 190, 210), tile=(30, 30, 36), tile_edge=(255, 255, 255),
+                  tick=((24, 24, 28), (120, 96, 40)), paddle=((255, 92, 120), (24, 24, 28), (255, 255, 255)),
+                  hub=(255, 255, 255), title=(20, 20, 24), sub=(90, 70, 30), count=(20, 20, 24),
+                  pop=(24, 24, 28), ending=(255, 92, 120), ending_stroke=(20, 20, 24),
+                  balls=[(255, 92, 120), (64, 160, 255), (60, 200, 120), (170, 100, 255), (255, 150, 40)]),
+    "neon": dict(back=(4, 4, 10), inner=(10, 8, 22), plate=(22, 18, 44), plate_edge=(0, 240, 255),
+                 groove=(255, 40, 200), tile=(40, 10, 60), tile_edge=(255, 40, 200),
+                 tick=((0, 240, 255), (60, 40, 110)), paddle=((0, 240, 255), (200, 255, 255), (10, 60, 90)),
+                 hub=(255, 255, 255), title=(255, 255, 255), sub=(0, 240, 255), count=(255, 255, 255),
+                 pop=(255, 255, 255), ending=(255, 40, 200), ending_stroke=(10, 0, 20),
+                 balls=[(255, 40, 200), (0, 240, 255), (180, 255, 60), (255, 230, 40), (150, 90, 255)]),
+    "ocean": dict(back=(6, 32, 60), inner=(12, 70, 104), plate=(236, 214, 168), plate_edge=(255, 240, 206),
+                  groove=(206, 180, 132), tile=(18, 52, 84), tile_edge=(120, 210, 230),
+                  tick=((120, 210, 230), (40, 90, 130)), paddle=((255, 250, 240), (200, 170, 120), (90, 160, 190)),
+                  hub=(255, 120, 90), title=(255, 255, 255), sub=(150, 220, 240), count=(255, 255, 255),
+                  pop=(255, 255, 255), ending=(255, 200, 90), ending_stroke=(6, 24, 44),
+                  balls=[(255, 120, 90), (255, 220, 120), (120, 230, 220), (255, 255, 255), (255, 170, 200)]),
+    "paper": dict(back=(246, 242, 232), inner=(255, 253, 246), plate=(232, 226, 210), plate_edge=(40, 40, 46),
+                  groove=(200, 192, 172), tile=(40, 40, 46), tile_edge=(246, 242, 232),
+                  tick=((40, 40, 46), (170, 164, 150)), paddle=((40, 40, 46), (40, 40, 46), (246, 242, 232)),
+                  hub=(255, 253, 246), title=(30, 30, 34), sub=(120, 114, 100), count=(30, 30, 34),
+                  pop=(40, 40, 46), ending=(230, 70, 60), ending_stroke=(30, 30, 34),
+                  balls=[(230, 70, 60), (40, 120, 220), (250, 180, 40), (40, 170, 120), (40, 40, 46)]),
+}
+STYLE_NAMES = ("candy", "neon", "ocean", "paper", "slate")
+
 
 def overflow_recipe(recipe: dict) -> dict:
     rng = random.Random(f"overflow-recipe-{recipe['seed']}")
@@ -79,7 +114,17 @@ def overflow_recipe(recipe: dict) -> dict:
                   back=rng.randrange(len(BACKS)), motion=rng.choice(MOTIONS),
                   speed=round(rng.uniform(0.92, 1.1), 3), ball_r=rng.choice((8.0, 8.5, 9.0)),
                   spin=rng.choice((1, -1)), ending=rng.choice(ENDINGS), bed="off")
+    recipe["style"] = random.Random(f"overflow-style-{recipe['seed']}").choice(STYLE_NAMES)
     return recipe
+
+
+def _style(recipe: dict) -> dict:
+    return STYLES.get(recipe.get("style") or "slate", _SLATE)
+
+
+def _palette(recipe: dict) -> list:
+    st = _style(recipe)
+    return st.get("balls") or PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)]
 
 
 def _u_to_beta(u):
@@ -140,7 +185,7 @@ class OverflowSim:
         self.rng = random.Random(f"overflow-{recipe['seed']}")
         self.r = float(recipe.get("ball_r") or 8.5)
         self.full = full_count(self.r)
-        self.ncol = len(PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)])
+        self.ncol = len(_palette(recipe))
         self.spd = SPEED * float(recipe.get("speed") or 1.0)
         self.t = 0.0
         self.chain = [(None, "start"), (None, "10 balls"), (None, "100 balls"), (None, "1,000 balls"),
@@ -498,8 +543,10 @@ class OverflowPainter:
 
         self.cv2 = cv2
         self.recipe = recipe
-        self.pal = PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)]
+        self.st = st = _style(recipe)
+        self.pal = _palette(recipe)
         back, inner = BACKS[int(recipe.get("back") or 0) % len(BACKS)]
+        back, inner = st.get("back", back), st.get("inner", inner)
         self.r = float(recipe.get("ball_r") or 8.5)
         self.bg = self._background(back, inner, rim=True)
         self.bg_np = np.asarray(self.bg).copy()
@@ -523,6 +570,7 @@ class OverflowPainter:
 
     def _background(self, back, inner, rim: bool) -> Image.Image:
         S = self.SS
+        st = self.st
         im = Image.new("RGB", (W * S, H * S), back)
         d = ImageDraw.Draw(im)
 
@@ -535,39 +583,39 @@ class OverflowPainter:
         mid = FREE + (FLOOR_A1 - FLOOR_A0) / 2
         for u0, u1 in ((FREE, mid), (mid, 2 * math.pi)):
             pts = sector(u0 + 0.012, u1 - 0.012, 0, Ri, 24)
-            d.polygon([P(*q) for q in pts], fill=PLATE)
-            d.line([P(*q) for q in (pts[0], pts[1])], fill=PLATE_EDGE, width=3 * S)
-            d.line([P(*q) for q in (pts[0], pts[-1])], fill=PLATE_EDGE, width=3 * S)
+            d.polygon([P(*q) for q in pts], fill=st["plate"])
+            d.line([P(*q) for q in (pts[0], pts[1])], fill=st["plate_edge"], width=3 * S)
+            d.line([P(*q) for q in (pts[0], pts[-1])], fill=st["plate_edge"], width=3 * S)
             um = (u0 + u1) / 2      # a groove along the middle of each plate, like the reel's
             a, b = Ri * 0.3, Ri * 0.8
             d.line([P(CX + a * math.cos(_u_to_beta(um)), CY + a * math.sin(_u_to_beta(um))),
-                    P(CX + b * math.cos(_u_to_beta(um)), CY + b * math.sin(_u_to_beta(um)))], fill=GROOVE, width=5 * S)
+                    P(CX + b * math.cos(_u_to_beta(um)), CY + b * math.sin(_u_to_beta(um)))], fill=st["groove"], width=5 * S)
         # the rim: a ring of dark tiles with small gaps
         if rim:
             for k in range(TILES):
                 pts = [P(*q) for q in _tile_poly(k)]
-                d.polygon(pts, fill=TILE, outline=TILE_EDGE)
+                d.polygon(pts, fill=st["tile"], outline=st["tile_edge"])
         # tick marks round the outside, a longer one every 30 degrees
         for k in range(48):
             a = 2 * math.pi * k / 48
             long = k % 4 == 0
             r0, r1 = R + 30, R + (50 if long else 40)
             d.line([P(CX + r0 * math.cos(a), CY + r0 * math.sin(a)), P(CX + r1 * math.cos(a), CY + r1 * math.sin(a))],
-                   fill=(96, 108, 130) if long else (60, 70, 90), width=(5 if long else 3) * S)
+                   fill=st["tick"][0] if long else st["tick"][1], width=(5 if long else 3) * S)
         # the hub: a half-disc on the plates' meeting point (flat side down)
-        d.pieslice([*P(CX - HUB_R, CY - HUB_R), *P(CX + HUB_R, CY + HUB_R)], 180, 360, fill=PLATE_EDGE)
-        d.rectangle([*P(CX - HUB_R, CY), *P(CX + HUB_R, CY + 6)], fill=PLATE_EDGE)
+        d.pieslice([*P(CX - HUB_R, CY - HUB_R), *P(CX + HUB_R, CY + HUB_R)], 180, 360, fill=st["plate_edge"])
+        d.rectangle([*P(CX - HUB_R, CY), *P(CX + HUB_R, CY + 6)], fill=st["plate_edge"])
         im = im.resize((W, H), Image.LANCZOS)
         d = ImageDraw.Draw(im)
         hook = self.recipe.get("hook") or HOOKS[0]
         size = 92
         while size > 50 and d.textlength(hook, font=_font(size)) > W - 100:
             size -= 4
-        d.text((W // 2, 200), hook, font=_font(size), fill=(250, 250, 255), anchor="mm")
+        d.text((W // 2, 200), hook, font=_font(size), fill=st["title"], anchor="mm")
         sub = self.recipe.get("sub") or SUBS[0]
         if any(w in hook.lower() for w in ("squish", "split", "makes two")):   # the title may be swapped
             sub = "will it overflow?"
-        d.text((W // 2, 292), sub, font=_font(46, "Inter-Bold.ttf"), fill=(168, 180, 206), anchor="mm")
+        d.text((W // 2, 292), sub, font=_font(46, "Inter-Bold.ttf"), fill=st["sub"], anchor="mm")
         return im
 
     def _balls(self, fr: np.ndarray, xy: np.ndarray, col: np.ndarray):
@@ -591,6 +639,7 @@ class OverflowPainter:
 
     def _paddle(self, fr: np.ndarray, u: float):
         cv2 = self.cv2
+        st = self.st
         sh = 16
         L = PADDLE_L
 
@@ -601,15 +650,15 @@ class OverflowPainter:
         def q(p):
             return (int(p[0] * sh), int(p[1] * sh))
         pts = np.array([q((CX, CY))] + [q(at(L, a)) for a in np.linspace(-PADDLE_W, PADDLE_W, 16)], np.int32)
-        cv2.fillPoly(fr, [pts], (196, 204, 222), cv2.LINE_AA, 4)
-        cv2.polylines(fr, [pts], True, (132, 142, 166), 3, cv2.LINE_AA, 4)
+        cv2.fillPoly(fr, [pts], st["paddle"][0], cv2.LINE_AA, 4)
+        cv2.polylines(fr, [pts], True, st["paddle"][1], 3, cv2.LINE_AA, 4)
         for f in (0.38, 0.5, 0.62, 0.74, 0.86):     # ruler marks across it
             dist = L * f
-            cv2.line(fr, q(at(dist, -PADDLE_W * 0.7)), q(at(dist, PADDLE_W * 0.25)), (120, 130, 156), 4, cv2.LINE_AA, 4)
+            cv2.line(fr, q(at(dist, -PADDLE_W * 0.7)), q(at(dist, PADDLE_W * 0.25)), st["paddle"][2], 4, cv2.LINE_AA, 4)
         hx_, hy_ = at(L * 0.93, PADDLE_W * 0.45)     # the little hole near the tip
-        cv2.circle(fr, q((hx_, hy_)), int(8 * sh), (120, 130, 156), 2, cv2.LINE_AA, 4)
-        cv2.circle(fr, q((CX, CY)), int(19 * sh), (132, 142, 166), -1, cv2.LINE_AA, 4)
-        cv2.circle(fr, q((CX, CY)), int(9 * sh), (222, 228, 240), -1, cv2.LINE_AA, 4)
+        cv2.circle(fr, q((hx_, hy_)), int(8 * sh), st["paddle"][2], 2, cv2.LINE_AA, 4)
+        cv2.circle(fr, q((CX, CY)), int(19 * sh), st["paddle"][1], -1, cv2.LINE_AA, 4)
+        cv2.circle(fr, q((CX, CY)), int(9 * sh), st["hub"], -1, cv2.LINE_AA, 4)
 
     def _pops(self, fr: np.ndarray, sim: OverflowSim):
         """A small white ring where a squished ball just popped (0.18 s)."""
@@ -622,7 +671,7 @@ class OverflowPainter:
                 continue
             k = age / 0.18
             cv2.circle(fr, (int(x * 16), int(y * 16)), int((self.r + 2 + 10 * k) * 16),
-                       (255, 255, 255), max(1, int(3 * (1 - k))), cv2.LINE_AA, 4)
+                       self.st["pop"], max(1, int(3 * (1 - k))), cv2.LINE_AA, 4)
 
     def _tiles(self, fr: np.ndarray, sim: OverflowSim):
         cv2 = self.cv2
@@ -636,8 +685,8 @@ class OverflowPainter:
                 dx, dy = x - cx0, y - cy0
                 out.append((int((tl["x"] + dx * c - dy * s) * 16), int((tl["y"] + dx * s + dy * c) * 16)))
             p = np.array(out, np.int32)
-            cv2.fillPoly(fr, [p], TILE, cv2.LINE_AA, 4)
-            cv2.polylines(fr, [p], True, TILE_EDGE, 2, cv2.LINE_AA, 4)
+            cv2.fillPoly(fr, [p], self.st["tile"], cv2.LINE_AA, 4)
+            cv2.polylines(fr, [p], True, self.st["tile_edge"], 2, cv2.LINE_AA, 4)
 
     def frame(self, sim: OverflowSim) -> Image.Image:
         if sim.tiles:
@@ -655,9 +704,9 @@ class OverflowPainter:
         d = ImageDraw.Draw(im)
         n = len(sim.bodies) if sim.done_at is None else (sim.n_final or len(sim.bodies))
         n = max(n, 1)
-        d.text((W // 2, 430), f"{n:,}", font=self.f_count, fill=(255, 255, 255), anchor="mm")
+        d.text((W // 2, 430), f"{n:,}", font=self.f_count, fill=self.st["count"], anchor="mm")
         d.text((W // 2 + d.textlength(f"{n:,}", font=self.f_count) / 2 + 14, 444), "ball" if n == 1 else "balls",
-               font=self.f_small, fill=(168, 180, 206), anchor="lm")
+               font=self.f_small, fill=self.st["sub"], anchor="lm")
         if sim.done_at is not None and sim.ok:
             age = sim.t - sim.done_at
             if age > 0.08:
@@ -668,8 +717,8 @@ class OverflowPainter:
                     full -= 6
                 sz = int(full * (0.53 + 0.47 * (1 - (1 - k) ** 3)) + 10 * math.sin(min(1.0, k) * math.pi))
                 f = self._ends.setdefault(sz, _font(sz))
-                d.text((W // 2, CY - 30), text, font=f, fill=(255, 214, 102),
-                       anchor="mm", stroke_width=max(4, sz // 14), stroke_fill=(12, 12, 18))
+                d.text((W // 2, CY - 30), text, font=f, fill=self.st["ending"],
+                       anchor="mm", stroke_width=max(4, sz // 14), stroke_fill=self.st["ending_stroke"])
         return im
 
 
