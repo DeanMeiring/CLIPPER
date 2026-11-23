@@ -1878,6 +1878,15 @@ merge it yourself; merging stays Dean's call per the rule above.
   `slots`, so 08:00 / 15:00 / 20:00 are all drop videos; the invite line
   under descriptions goes with `crowd`. The code stays (Fights tab can
   turn it back on).
+- **Satisfying sounds (23 Nov):** Dean found likes dropping and asked to
+  "lose the meow" for satisfying sounds; of 8 numpy samples he kept all but
+  the water drop. `ball_sounds.SATISFY` (crunch, marble, bubble, thock,
+  wood, ice, sand = crunch + a growing pour bed), `satisfy_hit` /
+  `satisfy_track` (one hit per bounce, `SATISFY_GAP` 0.012 s, each softer
+  as hits pile up; 24 takes per video), reached through `track()` like the
+  memes. `_balls_pick_meme` now rotates only these (the one used longest
+  ago) on the former meow kinds; the meow and meme voices stay in Make's
+  sound menu. `BALLS_LOOK_VERSION` bumped.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
