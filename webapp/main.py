@@ -6554,7 +6554,8 @@ def _balls_last_art(exclude: str) -> Optional[str]:
 
 BALLS_FORMAT_ROTATION = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
                          "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-                         "crowd", "ringfill", "sortrace", "territory", "mazerace", "overflow")
+                         "crowd", "ringfill", "sortrace", "territory", "mazerace", "overflow",
+                         "press", "gears", "syringe")
 # Which kind each posting slot gets, in turn (slot by slot, not day by
 # day). Dean's numbers (11 Oct): the gap ring (⭕ Escape) and 🧱 Break in
 # do best, the peg/gumball 🧬 Evolve did badly (~200 views), so Evolve is
@@ -6593,8 +6594,8 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "overflow", "ringfill", "zen", "box", "overflow", "ringfill", "zen", "box", "shrink",
-                    "overflow", "zen", "ringfill", "box", "spikes", "overflow", "zen", "ringfill", "box", "mazerace")
+BALLS_DROP_CYCLE = ("box", "overflow", "ringfill", "press", "zen", "gears", "box", "overflow", "syringe", "zen",
+                    "ringfill", "box", "press", "overflow", "zen", "gears", "ringfill", "box", "syringe", "shrink")
 # (23 Nov: the overflow bowl, rebuilt and approved, takes 4 of 20; territory made way)
 # 23 Nov (Dean: "pivot more to satisfying videos"; the report: box median 16.3k,
 # ring fill 14.9k, zen 10.6k, everything else 1.1-3.6k): 20 slots, 18 of them
@@ -6631,8 +6632,8 @@ BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "sur
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 # 18 Nov: Dean restarted after the pause and the ring fill / sorting race
 # only came "later" in the cycle: each goes out once first, then the cycle
-BALLS_DROP_DEBUT = {"overflow": 1}    # 23 Nov: the approved overflow bowl goes first
-BALLS_DROP_DEBUT_SINCE = 1795428892     # 23 Nov 2026, when it was approved
+BALLS_DROP_DEBUT = {"press": 1, "gears": 1, "syringe": 1}    # 23 Nov: the new squish machines go first
+BALLS_DROP_DEBUT_SINCE = 1795442921     # 23 Nov 2026, 16:00 SA
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
                        "center": "🕳 Hold the center", "spikes": "🔺 Spikes will grow",
@@ -6644,7 +6645,8 @@ BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring",
                        "royale": "👑 16-ball battle royale", "survivor": "🌍 Countries, 1 ring, 1 survivor",
                        "crowd": "💬 Comment fight", "ringfill": "⭕ Will it fill the circle?",
                        "sortrace": "🖼 Sorting race", "territory": "🗺️ Which country owns the map?",
-                       "mazerace": "🏁 Pick one: maze race", "overflow": "🫗 Will it overflow?"}
+                       "mazerace": "🏁 Pick one: maze race", "overflow": "🫗 Will it overflow?",
+                       "press": "🗜 Hydraulic press", "gears": "⚙️ Gear grinder", "syringe": "💉 Syringe"}
 
 
 def _balls_tz():
@@ -7532,6 +7534,7 @@ BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make t
                        "duel": "none", "race": "none", "tourney": "none", "royale": "none",   # just the fights' / race's own sounds
                        "survivor": "none", "crowd": "none", "ringfill": "none", "sortrace": "none",
                        "territory": "none", "mazerace": "none", "overflow": "none",
+                       "press": "none", "gears": "none", "syringe": "none",
                        **{k: "meow" for k in ("center", "spikes", "jaws", "spiral", "rays", "box", "zen",
                                               "trail", "shrink")}}   # the cursed meow, deeper every bounce
 
@@ -8360,7 +8363,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-23 overflow bowl live"      # rebuilt overflow bowl in 5 looks, in the rotation
+BALLS_LOOK_VERSION = "2026-11-23 squish machines"      # press, gears, syringe in the rotation
 
 
 def _balls_auto_remake() -> Optional[dict]:
@@ -13815,7 +13818,7 @@ $('m-format').addEventListener('change', () => {
   const kind = $('m-format').value || S.autopilot.today;
   for (const e of document.querySelectorAll('.evolve-only')) e.style.display = kind === 'evolve' ? '' : 'none';
   // the duel, the race and the tournament have no pictures: the balls are the contestants
-  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace', 'territory', 'mazerace', 'overflow'].includes(kind) ? 'none' : '';
+  for (const e of document.querySelectorAll('.pack-pick')) e.style.display = ['duel', 'race', 'tourney', 'royale', 'survivor', 'crowd', 'ringfill', 'sortrace', 'territory', 'mazerace', 'overflow', 'press', 'gears', 'syringe'].includes(kind) ? 'none' : '';
   songPickState();
 });
 function renderAutopilot() {
