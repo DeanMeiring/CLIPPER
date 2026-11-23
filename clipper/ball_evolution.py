@@ -180,10 +180,10 @@ TITLE_TEMPLATES = {
                  "One more circle every time", "Will the last one fill the middle?", "Bounce, grow, lock in",
                  "How many rings until it's full?", "It keeps growing", "The last circle fills the middle"],
     # the overflow bowl (ball_overflow): never the same title twice in a row
-    "overflow": ["Will It Overflow?", "Will the bowl overflow?", "Can the bowl hold them all?",
-                 "Every hit splits a ball", "One ball. How long until it spills?", "Will it spill over?",
-                 "How many balls until it overflows?", "Watch it fill the bowl", "Guess when it overflows",
-                 "It splits on every hit", "Can it stay inside the bowl?", "From one ball to overflowing"],
+    "overflow": ["Will It Overflow?", "Will the circle overflow?", "Can the circle hold them all?",
+                 "Every squish makes two", "How long until it breaks?", "Will it burst?",
+                 "How many balls until it overflows?", "Watch it fill the circle", "Guess when it overflows",
+                 "Squish = 2 balls", "Can the circle take it?", "From 8 balls to overflowing"],
     # the crash box (ball_arenas, recipe["crash"]): it fills until it "crashes"
     "boxcrash": ["+3 balls every escape until it crashes", "Every escape adds 3 until my computer gives up",
                  "How many balls before it crashes?", "+3 every escape. Guess when it crashes",

@@ -11,11 +11,12 @@ The balls never stop bouncing (no gravity, no friction, fully elastic, each
 ball's speed held in a band with a tiny random turn so none loops forever)
 and a plain hit is only a bounce. The one rule (Dean's favourite): a ball
 caught in the closing gap between the paddle and a plate is squished, and
-pops out as TWO balls on the other side of the paddle. The paddle is faster
-than the balls far from the hub, so it herds the ones ahead of it into the
-gap: every close squishes a strip of them and the count roughly doubles each
-sweep. When the circle is packed the rim shatters: its tiles fly off and
-the balls burst out in every direction (OVERFLOW!).
+pops out as TWO balls on the other side of the paddle (a small white ring
+marks the pop). The paddle stops a ball-width short of the rim, so most
+balls slip round its end and stay spread over the whole disc; only the ones
+caught in the pinch at each close multiply. It starts with a few balls and
+fills in ~19-28 s. When the circle is packed the rim shatters: its tiles
+fly off and the balls burst out in every direction (OVERFLOW!).
 
 Sim + painter for ``format: "overflow"``, a ``NO_PACK`` kind
 (``ball_evolution._parts`` dispatches here). Physics is pymunk with a
@@ -45,11 +46,15 @@ HUB_R = 46                      # the half-disc hub in the middle (and the paddl
 FLOOR_A0, FLOOR_A1 = math.radians(30), math.radians(150)   # the floor: 4 o'clock round to 8 o'clock
 FREE = 2 * math.pi - (FLOOR_A1 - FLOOR_A0)                  # the open part the paddle sweeps (240 deg)
 PADDLE_W = math.radians(12)     # the paddle's half-width (24 deg: 1/15 of the circle; 1/7.5 seen from the rim)
-PERIOD = 3.6                    # s for the paddle's full there-and-back
-SPEED = 850.0                   # px/s: each ball's speed, held in a band
+TIP_GAP = 20.0                  # px between the paddle's end and the rim: balls slip round it, so
+                                # only the ones caught in the pinch get squished, not the whole side
+PADDLE_L = R - RIM_T - TIP_GAP
+PERIOD = 3.0                    # s for the paddle's full there-and-back
+SPEED = 700.0                   # px/s: each ball's speed, held in a band
 SPEED_BAND = (0.8, 1.25)
-SQUISH_K = 1.0                  # squished once the gap where it sits is narrower than SQUISH_K x its width
+SQUISH_K = 1.6                  # squished once the gap where it sits is narrower than SQUISH_K x its width
 FILL = 0.50                     # the circle counts as packed at this share of its open area covered
+START_N = 8                     # balls at the start
 CAP = 2000                      # never more balls than this
 MOTIONS = ("swing", "swing", "flick")
 HOOKS = ["Will It Overflow?", "Will the circle overflow?", "Can the circle hold them all?",
@@ -138,7 +143,7 @@ class OverflowSim:
         self.ncol = len(PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)])
         self.spd = SPEED * float(recipe.get("speed") or 1.0)
         self.t = 0.0
-        self.chain = [(None, "1 ball"), (None, "10 balls"), (None, "100 balls"), (None, "1,000 balls"),
+        self.chain = [(None, "start"), (None, "10 balls"), (None, "100 balls"), (None, "1,000 balls"),
                       (None, "overflow")]
         self.unlocked_at = {0: 0.0}
         self.best = 0
@@ -176,7 +181,7 @@ class OverflowSim:
 
         self.paddle = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         self.paddle.position = (CX, CY)
-        L = R - RIM_T - 1
+        L = PADDLE_L
         pts = [(0, 0)] + [(L * math.cos(a), L * math.sin(a)) for a in np.linspace(-PADDLE_W, PADDLE_W, 7)]
         shape = pymunk.Poly(self.paddle, pts)
         shape.elasticity, shape.friction = 1.0, 0.0
@@ -188,12 +193,14 @@ class OverflowSim:
         self.cols: list = []
         self.xy = np.zeros((0, 2), np.float32)
         self.col = np.zeros(0, np.int16)
-        # one ball, somewhere in the top half, off in a random direction
-        u = self.rng.uniform(FREE * 0.3, FREE * 0.7)
-        d = self.rng.uniform(150, 300)
-        a = self.rng.uniform(0, 2 * math.pi)
-        self._add(CX + d * math.cos(_u_to_beta(u)), CY + d * math.sin(_u_to_beta(u)),
-                  (self.spd * math.cos(a), self.spd * math.sin(a)), self.rng.randrange(self.ncol))
+        # a few balls, spread over the open part, off in random directions
+        for k in range(START_N):
+            u = FREE * (k + 0.5) / START_N + self.rng.uniform(-0.1, 0.1)
+            d = self.rng.uniform(120, 360)
+            a = self.rng.uniform(0, 2 * math.pi)
+            self._add(CX + d * math.cos(_u_to_beta(u)), CY + d * math.sin(_u_to_beta(u)),
+                      (self.spd * math.cos(a), self.spd * math.sin(a)), k % self.ncol)
+        self.spawned = START_N
         self._sync()
 
     # ---- physics ---------------------------------------------------------
@@ -243,7 +250,7 @@ class OverflowSim:
         else:                 # closing on the 8 o'clock plate (u = 0)
             front, gap = self.u_p - PADDLE_W, self.u_p - PADDLE_W
             inside = (u < front + 0.02) | (u > 2 * math.pi - 0.05)
-        caught = np.nonzero(inside & (d * max(gap, 0.0) < 2 * self.r * SQUISH_K) & (d > HUB_R))[0]
+        caught = np.nonzero(inside & (d * max(gap, 0.0) < 2 * self.r * SQUISH_K) & (d > HUB_R) & (d < PADDLE_L + self.r * 0.5))[0]
         if not len(caught):
             return
         back = self.u_p - math.copysign(PADDLE_W, self.w_p)      # the paddle's back face
@@ -301,7 +308,7 @@ class OverflowSim:
         lo, hi = self.spd * SPEED_BAND[0], self.spd * SPEED_BAND[1]
         Ri = R - RIM_T - self.r - 1
         in_floor = u > FREE + 0.002
-        in_pad = np.abs(u - self.u_p) < PADDLE_W + self.r / np.maximum(d, 1) * 0.5
+        in_pad = (np.abs(u - self.u_p) < PADDLE_W + self.r / np.maximum(d, 1) * 0.5) & (d < PADDLE_L)
         for i, b in enumerate(self.bodies):
             vx, vy = b.velocity
             s = math.hypot(vx, vy)
@@ -585,7 +592,7 @@ class OverflowPainter:
     def _paddle(self, fr: np.ndarray, u: float):
         cv2 = self.cv2
         sh = 16
-        L = R - RIM_T - 1
+        L = PADDLE_L
 
         def at(dist, du):          # a point on the paddle: distance from the hub, angle off its middle
             b = _u_to_beta(u + du)
