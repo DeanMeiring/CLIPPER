@@ -1887,6 +1887,32 @@ merge it yourself; merging stays Dean's call per the rule above.
   memes. `_balls_pick_meme` now rotates only these (the one used longest
   ago) on the former meow kinds; the meow and meme voices stay in Make's
   sound menu. `BALLS_LOOK_VERSION` bumped.
+- **Satisfying pivot (23 Nov):** Dean: likes dropping, "pivot more to
+  satisfying videos"; the 23 Nov report backed it (box median 16.3k, ring
+  fill 14.9k, zen 10.6k, every other kind 1.1-3.6k). (1) **Overflow bowl**
+  (`clipper/ball_overflow.py`, `format: "overflow"`, NO_PACK, built by a
+  subagent from Instagram reel screenshots Dean sent -- theballrace's "Will
+  It Overflow? every hit splits a ball", 1.5M likes): a round bowl open at
+  the top, a V floor of two plates, a ruler-marked paddle swinging from the
+  hub; every paddle hit splits a ball (throttled later: <= 1.9·live^0.6
+  splits/s, `VMAX` 720 px/s so piles don't squirt out), ~1.5-2k balls, ends
+  "OVERFLOW!" when `SPILL_N` balls leave over the rim with the bowl full;
+  22-32 s, 24/24 seeds ok, ~1 min to make; its own crunch + sand-pour
+  `music_track`; titles `TITLE_TEMPLATES["overflow"]`. (2) **Burst box**
+  (`recipe["burst"]`, every non-crash box from now): at full `BoxSim._burst`
+  removes the walls, kicks every ball outward, the walls fly off as pieces
+  (`shards`, drawn by `BoxPainter`), a white flash, ending "IT BURST!" /
+  "IT BROKE!" / "TOO FULL!"; `B_BURST_HOLD` 2.6 s; Claude's last look gets
+  `_BURST_NOTE`. (3) No level-up sound: `recipe["quiet_unlock"]` (every new
+  make) skips the "unlock" chime and "fanfare" in `be.mix_audio`. (4)
+  `BALLS_DROP_CYCLE` 20 slots: box 5, overflow 4, zen 3, ring fill 3,
+  shrink 2, spikes, territory, maze race 1; duels and sorting race out;
+  `BALLS_DROP_DEBUT` box 1 since 23 Nov. The overflow bowl is held OUT of
+  the cycle and debut until Dean approves its rebuilt sample (he rejected the
+  first: balls must keep bouncing around the still circle and only multiply
+  when squished between paddle and plate); for now the cycle is box 5, ring
+  fill 5, zen 5, shrink 2, spikes / territory / maze race 1. Old boxes and every
+  recipe without the new fields are byte for byte as before (hash-checked).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

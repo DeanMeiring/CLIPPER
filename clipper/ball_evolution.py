@@ -179,6 +179,11 @@ TITLE_TEMPLATES = {
                  "It grows until it fits", "Fill it, then start again", "Circle inside a circle inside a circle",
                  "One more circle every time", "Will the last one fill the middle?", "Bounce, grow, lock in",
                  "How many rings until it's full?", "It keeps growing", "The last circle fills the middle"],
+    # the overflow bowl (ball_overflow): never the same title twice in a row
+    "overflow": ["Will It Overflow?", "Will the bowl overflow?", "Can the bowl hold them all?",
+                 "Every hit splits a ball", "One ball. How long until it spills?", "Will it spill over?",
+                 "How many balls until it overflows?", "Watch it fill the bowl", "Guess when it overflows",
+                 "It splits on every hit", "Can it stay inside the bowl?", "From one ball to overflowing"],
     # the crash box (ball_arenas, recipe["crash"]): it fills until it "crashes"
     "boxcrash": ["+3 balls every escape until it crashes", "Every escape adds 3 until my computer gives up",
                  "How many balls before it crashes?", "+3 every escape. Guess when it crashes",
@@ -306,11 +311,11 @@ def _font(size: int, name: str = "Inter-Black.ttf"):
 
 FORMATS = ("evolve", "escape", "touch", "breakin", "merge", "center", "spikes", "shrink", "jaws",
            "spiral", "rays", "box", "zen", "trail", "duel", "race", "tourney", "royale", "survivor",
-           "ringfill", "sortrace", "territory", "mazerace")
+           "ringfill", "sortrace", "territory", "mazerace", "overflow")
 #   escape/touch: ball_circles.py, breakin: ball_breakin.py, merge: ball_merge.py,
 #   duel/race/tourney/royale: ball_duel.py
 NO_PACK = ("duel", "race", "tourney", "royale", "survivor", "crowd", "ringfill", "sortrace", "territory",
-           "mazerace")   # crowd: ball_crowd (commenters)
+           "mazerace", "overflow")   # crowd: ball_crowd (commenters)
 FILL_KINDS = ("escape", "spiral", "box", "spikes", "trail")   # recipe["fill"]: finish the job after the final picture      # the balls are the contestants: no picture pack
 
 
@@ -431,6 +436,9 @@ def make_recipe(seed: int, theme=None, course=None, jar=None, fmt=None) -> dict:
     elif fmt == "mazerace":
         from clipper import ball_mazerace
         ball_mazerace.mazerace_recipe(recipe)
+    elif fmt == "overflow":
+        from clipper import ball_overflow
+        ball_overflow.overflow_recipe(recipe)
     elif fmt in NO_PACK:
         from clipper import ball_duel
         {"duel": ball_duel.duel_recipe, "race": ball_duel.race_recipe,
@@ -1004,6 +1012,9 @@ def _parts(recipe: dict):
     if recipe.get("format") == "mazerace":
         from clipper import ball_mazerace
         return ball_mazerace.MazeRaceSim, ball_mazerace.MazeRacePainter
+    if recipe.get("format") == "overflow":
+        from clipper import ball_overflow
+        return ball_overflow.OverflowSim, ball_overflow.OverflowPainter
     if recipe.get("format") == "sortrace":
         from clipper import ball_sortrace
         return ball_sortrace.SortSim, ball_sortrace.SortPainter
@@ -1035,6 +1046,8 @@ def good_end(recipe: dict) -> tuple:
         return (20.0, 36.0)
     if recipe.get("format") == "ringfill":
         return (18.0, 45.0)
+    if recipe.get("format") == "overflow":
+        return (18.0, 40.0)
     if recipe.get("format") == "mazerace" and recipe.get("ai"):
         return (14.0, 34.0)      # trained racers take fewer wrong turns: shorter races
     if recipe.get("format") in ("territory", "mazerace"):
@@ -1579,7 +1592,10 @@ def _mix_audio(sim: Sim) -> np.ndarray:
         cursed = ball_cursed_sounds.merge_track([(et, val) for et, kind, val, _v in events if kind == "pop"], n,
                                                 int(sim.recipe.get("seed") or 0))
         events = [e for e in events if e[1] != "pop"]
+    quiet = sim.recipe.get("quiet_unlock")
     for et, kind, val, vol in events:
+        if quiet and kind in ("unlock", "fanfare"):
+            continue        # Dean (23 Nov): no sound effect on every level up
         if kind in gaps:                  # a flood stays a soft patter, not a roar
             if et - last[kind] < gaps[kind] and not (kind == "pop" and val >= 3):
                 continue
@@ -1689,6 +1705,9 @@ def publish_text(recipe: dict) -> dict:
     if fmt == "mazerace":
         from clipper import ball_mazerace
         return ball_mazerace.publish_text(recipe)
+    if fmt == "overflow":
+        from clipper import ball_overflow
+        return ball_overflow.publish_text(recipe)
     if fmt == "ringfill":
         return {"title": recipe["hook"][:100],
                 "description": ("A circle bounces and grows a little with every bounce. When it fills the space it "
