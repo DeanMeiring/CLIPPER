@@ -1918,6 +1918,27 @@ merge it yourself; merging stays Dean's call per the rule above.
   fill 4, zen 4, shrink / spikes / maze race 1 (territory out);
   `BALLS_DROP_DEBUT` overflow 1. Old boxes and every
   recipe without the new fields are byte for byte as before (hash-checked).
+- **Squish machines (23 Nov):** Dean liked the overflow bowl and picked
+  three more from a board of six drawings (press, gears, syringe;
+  rolling pin, pac-man jaws and hourglass were the other three).
+  `clipper/ball_squish.py` (`format` "press" / "gears" / "syringe",
+  NO_PACK; `SquishSim` / `SquishPainter` subclass the overflow bowl's sim
+  and painter, so the ball splat, the crunch sound and the five `STYLES`
+  looks are shared; `recipe["style"]` from rng `squish-style-<seed>`).
+  Same rule: steady bouncing, no gravity, a ball caught where the machine
+  pinches pops out as two on the other side; full (`FILL` 0.40 of the
+  box) = the walls break into pieces and the balls burst out. `press`: a
+  ruler-marked plate (62% of the box's width, so balls slip round its
+  ends) on a rod, down and up every 2.4 s, squishes against the floor
+  and the top. `syringe`: the same in a tall tube with a plunger from
+  below and a cap (2.0 s). `gears`: two gears with only a `NIP` 22 px gap
+  between them; a ball reaching the gap comes out the other side as two,
+  balls near a gear are turned toward the gap (`GEAR_PULL`). 22-37 s
+  (`good_end` 18-40), ~1 min to make. `BALLS_DROP_CYCLE` 20: box 4,
+  overflow 3, ring fill 3, zen 3, press / gears / syringe 2, shrink 1;
+  `BALLS_DROP_DEBUT` one of each new kind. Dean let Claude merge this one
+  PR himself. Next idea, design only so far: a multi-layer machine whose
+  layers each turn the balls into the next item until the bottom fills.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
