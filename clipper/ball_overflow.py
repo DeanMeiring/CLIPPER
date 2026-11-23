@@ -1,28 +1,29 @@
-"""Will it overflow? Every hit splits a ball (Nov 2026).
+"""Will it overflow? Every squish makes two (Nov 2026).
 
-The idea of a reel with 1.5M likes ("every hit splits a ball"), drawn our
-own way: a big round bowl with a small opening at the top, a V-shaped floor
-and one long paddle pinned at the bottom that swings like a windscreen
-wiper (smoothly, or in the ``flick`` variant: wait at each side, sweep fast). It starts
-with ONE ball. Every time a ball hits the paddle it splits in two (the new
-one a little off the old one's path), so the count grows fast, the bowl
-fills, and when the pile reaches the rim the balls pour out over the top:
-OVERFLOW.
+The idea of a reel with 1.5M likes, drawn our own way: a still, closed
+circle whose rim is a ring of dark tiles. The bottom third is the floor:
+two wide plates (sectors from the hub in the middle out to the rim, at 4 and
+8 o'clock round to 6) with a half-disc hub. A wide paddle (a sector from the
+hub to the rim, its outer end following the rim) sweeps back and forth over
+the top, from one plate to the other, closing fully against each.
+
+The balls never stop bouncing (no gravity, no friction, fully elastic, each
+ball's speed held in a band with a tiny random turn so none loops forever)
+and a plain hit is only a bounce. The one rule (Dean's favourite): a ball
+caught in the closing gap between the paddle and a plate is squished, and
+pops out as TWO balls on the other side of the paddle. The paddle is faster
+than the balls far from the hub, so it herds the ones ahead of it into the
+gap: every close squishes a strip of them and the count roughly doubles each
+sweep. When the circle is packed the rim shatters: its tiles fly off and
+the balls burst out in every direction (OVERFLOW!).
 
 Sim + painter for ``format: "overflow"``, a ``NO_PACK`` kind
 (``ball_evolution._parts`` dispatches here). Physics is pymunk with a
-spatial hash and 9-10 px balls. Every new contact with the paddle (or the
-paddle sweeping a ball along) is a hit; early on every hit splits, later a
-throttle (``GROWTH * live^GROWTH_P`` splits/s) paces it so the bowl fills
-steadily over ~22-32 s instead of ~8 s. A speed limit (``VMAX``) keeps a
-squeezed pile from squirting out as a wave, so it only spills once it's
-full; the live count is capped at ~1.3x what the bowl holds (~1.4-2k balls).
-Balls are a numpy splat of pre-made sprites; the paddle is drawn over them.
-
-Sound is ours, numpy only (``music_track``): a micro-grain crunch per split
-(the design Dean approved for the satisfying sounds), rate-limited and
-getting denser and softer as the count grows, over a soft "sand pour" bed
-that grows with the pile, and a low swell + pour when it overflows.
+spatial hash; the squish is geometry (each substep: is the gap where a ball
+sits narrower than the ball?). Balls are drawn by a numpy splat of
+pre-made sprites. Sound is ours, numpy only (``music_track``): a
+micro-grain crunch per squish (rate-limited, softer as they get denser) and
+a crack + boom + scatter of grains when the rim shatters.
 """
 from __future__ import annotations
 
@@ -34,33 +35,28 @@ from PIL import Image, ImageDraw
 
 from clipper.ball_evolution import FPS, H, SR, W, _font
 
-END_HOLD = 1.8                  # the pour goes on this long after OVERFLOW (CLAUDE.md: 1.8 s everywhere)
+END_HOLD = 1.8                  # after the shatter (CLAUDE.md: 1.8 s everywhere)
 SECONDS_CAP = 58.0
-CX, CY, R = 540, 1010, 440      # the bowl
+CX, CY, R = 540, 1010, 440      # the circle; it never moves
 RIM_T = 8                       # the rim's physics half-thickness (segment radius)
-GAP_HALF = math.radians(19)     # the opening at the top (each side of 12 o'clock)
-RIM_A = math.radians(30)        # the floor plates meet the rim at 4 and 8 o'clock (30 deg under the middle)
-HUB = (CX, CY + R - 44)         # where the plates meet: the paddle's pivot
-HUB_R = 40                      # the half-disc over the pivot
-# the plates' slope (from the hub up to the rim)
-PLATE_A = math.atan2(HUB[1] - (CY + R * math.sin(RIM_A)), R * math.cos(RIM_A))
-GRAVITY = 1300.0
-SUBSTEPS = 2
-PUSH_V = 100.0                  # a ball touching the paddle splits on first contact, or again while the paddle sweeps it along at this speed
-GROWTH, GROWTH_P = 1.9, 0.6       # at most GROWTH * live^GROWTH_P splits a second (the pace)
-COOLDOWN = 0.12                 # a ball splits at most once per this many s
-BALL_E = 0.3
-VMAX = 720.0                    # px/s: no ball moves faster (see _sync)
-SPILL_N = 14                    # this many out over the top (with the bowl full) = OVERFLOW
-FULL_SHARE = 0.86               # ... and at least this share of what the bowl holds inside
-EARLY_SHARE, EARLY_MAX = 0.45, 4  # ok: at most 4 balls out before the bowl is 45% full
-PACKING = 0.80                  # 2D random packing of equal discs
+RIM_OUT = 18                    # the tiles reach this far outside R
+TILES = 44                      # tiles round the rim
+HUB_R = 46                      # the half-disc hub in the middle (and the paddle's pivot)
+FLOOR_A0, FLOOR_A1 = math.radians(30), math.radians(150)   # the floor: 4 o'clock round to 8 o'clock
+FREE = 2 * math.pi - (FLOOR_A1 - FLOOR_A0)                  # the open part the paddle sweeps (240 deg)
+PADDLE_W = math.radians(12)     # the paddle's half-width (24 deg: 1/15 of the circle; 1/7.5 seen from the rim)
+PERIOD = 3.6                    # s for the paddle's full there-and-back
+SPEED = 850.0                   # px/s: each ball's speed, held in a band
+SPEED_BAND = (0.8, 1.25)
+SQUISH_K = 1.0                  # squished once the gap where it sits is narrower than SQUISH_K x its width
+FILL = 0.50                     # the circle counts as packed at this share of its open area covered
+CAP = 2000                      # never more balls than this
 MOTIONS = ("swing", "swing", "flick")
-HOOKS = ["Will It Overflow?", "Will the bowl overflow?", "Can the bowl hold them all?",
-         "How fast does it overflow?", "One ball. Will it overflow?", "Will it spill over the top?",
-         "Every hit splits a ball", "How many until it overflows?"]
-SUBS = ["every hit splits a ball", "every hit makes two"]
-ENDINGS = ["OVERFLOW!", "IT OVERFLOWED!", "SPILLING OVER!"]
+HOOKS = ["Will It Overflow?", "Will the circle overflow?", "Can the circle hold them all?",
+         "How fast does it overflow?", "One ball. Will it overflow?", "Every squish makes two",
+         "How many until it breaks?", "Squish = 2 balls"]
+SUBS = ["every squish makes two", "squish = 2 balls"]
+ENDINGS = ["OVERFLOW!", "IT BROKE!", "OVERFLOW!"]
 PALETTES = [   # pastel balls: coral, lilac, mint, gold, sky -- and three more sets of our own
     [(255, 138, 128), (190, 160, 255), (120, 230, 190), (255, 214, 102), (120, 196, 255)],
     [(255, 160, 190), (255, 196, 140), (170, 230, 140), (140, 210, 240), (215, 170, 250)],
@@ -68,82 +64,66 @@ PALETTES = [   # pastel balls: coral, lilac, mint, gold, sky -- and three more s
     [(255, 230, 140), (150, 236, 200), (130, 190, 255), (255, 150, 150), (200, 170, 255)],
 ]
 BACKS = [((14, 16, 26), (24, 28, 44)), ((20, 14, 28), (32, 24, 46)), ((10, 20, 24), (20, 34, 40))]
+PLATE, PLATE_EDGE, GROOVE = (84, 94, 114), (150, 160, 182), (66, 74, 94)
+TILE, TILE_EDGE = (58, 66, 84), (92, 104, 128)
 
 
 def overflow_recipe(recipe: dict) -> dict:
     rng = random.Random(f"overflow-recipe-{recipe['seed']}")
-    hook = rng.choice(HOOKS)
-    sub = SUBS[0] if hook != "Every hit splits a ball" else "will it overflow?"
-    recipe.update(hook=hook, sub=sub, palette=rng.randrange(len(PALETTES)), back=rng.randrange(len(BACKS)),
-                  motion=rng.choice(MOTIONS), speed=round(rng.uniform(0.9, 1.12), 3),
-                  ball_r=rng.choice((9.0, 9.5, 10.0)), spin=rng.choice((1, -1)),
-                  ending=rng.choice(ENDINGS), bed="off")
+    recipe.update(hook=rng.choice(HOOKS), sub=rng.choice(SUBS), palette=rng.randrange(len(PALETTES)),
+                  back=rng.randrange(len(BACKS)), motion=rng.choice(MOTIONS),
+                  speed=round(rng.uniform(0.92, 1.1), 3), ball_r=rng.choice((8.0, 8.5, 9.0)),
+                  spin=rng.choice((1, -1)), ending=rng.choice(ENDINGS), bed="off")
     return recipe
 
 
-def floor_poly() -> list:
-    """The floor under the V: hub, 4 o'clock, along the rim, 8 o'clock."""
-    a4, a8 = RIM_A, math.pi - RIM_A
-    arc = [(CX + R * math.cos(a), CY + R * math.sin(a)) for a in np.linspace(a4, a8, 60)]
-    return [HUB] + arc
+def _u_to_beta(u):
+    """Open-part angle u (0 at the 8 o'clock plate, FREE at the 4 o'clock one,
+    through 12 o'clock) -> screen angle (radians, clockwise from 3 o'clock)."""
+    return FLOOR_A1 + u
 
 
-def capacity(r: float) -> int:
-    """About how many balls of radius r fill the bowl (inside the rim, above the floor)."""
-    Ri = R - RIM_T
-    pts = floor_poly()
-    floor = abs(sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1]))) / 2
-    return int((math.pi * Ri * Ri - floor) * PACKING / (math.pi * r * r))
-
-
-PADDLE_L, PADDLE_H0, PADDLE_H1 = 405.0, 10.0, 46.0
-PERIOD = 3.0                    # s for the paddle's full there-and-back
-PADDLE_E = 0.45                 # paddle bounciness (higher flings balls out of the top early)
-# swing as far as the plates: the tip's edge just reaches them (no corner where balls could rest unswept)
-SWING_A = math.pi / 2 - PLATE_A - math.atan2(PADDLE_H1, PADDLE_L) + math.radians(1.5)
-
-
-def paddle_geom(recipe: dict):
-    """(pivot, length, half-width at the pivot, half-width at the tip)."""
-    return HUB, PADDLE_L, PADDLE_H0, PADDLE_H1
-
-
-def _sweep(x: float, k: float = 0.35):
-    """Position and speed along one sweep, x in 0..1: mostly even speed, eased
-    a little at the ends (it still reaches the plates at speed, so balls lying
-    there get hit)."""
+def _sweep(x: float, k: float = 0.3):
+    """Position and speed along one sweep, x in 0..1: mostly even speed, eased a little at the ends."""
     return (1 - k) * x + k * x * x * (3 - 2 * x), (1 - k) + k * 6 * x * (1 - x)
 
 
-def paddle_angle(recipe: dict, t: float):
-    """The paddle's angle (radians, 0 = pointing straight up, + = clockwise) and
-    its angular speed. ``swing``: a windscreen wiper; ``flick``: it waits a
-    moment at each side, then sweeps across faster."""
+def paddle_u(recipe: dict, t: float):
+    """The paddle's middle as an open-part angle, and its angular speed (rad/s).
+    ``swing``: steady back and forth; ``flick``: rests closed on each plate a moment."""
     sp = float(recipe.get("speed") or 1.0)
-    A = SWING_A * int(recipe.get("spin") or 1)
-    T = PERIOD / sp                       # a full there-and-back
-    hold = 0.16 if recipe.get("motion") == "flick" else 0.0
+    lo, hi = PADDLE_W, FREE - PADDLE_W
+    if int(recipe.get("spin") or 1) < 0:
+        lo, hi = hi, lo
+    T = PERIOD / sp
+    hold = 0.12 if recipe.get("motion") == "flick" else 0.0
     half = 0.5 - hold
-    u = (t / T) % 1.0
-    if u < hold:
-        return -A, 0.0
-    if u < 0.5:
-        s, ds = _sweep((u - hold) / half)
-        return -A + 2 * A * s, 2 * A * ds / (half * T)
-    if u < 0.5 + hold:
-        return A, 0.0
-    s, ds = _sweep((u - 0.5 - hold) / half)
-    return A - 2 * A * s, -2 * A * ds / (half * T)
+    v = (t / T + 0.25) % 1.0             # start mid-sweep, so the first close comes quickly
+    if v < hold:
+        return lo, 0.0
+    if v < 0.5:
+        s, ds = _sweep((v - hold) / half)
+        return lo + (hi - lo) * s, (hi - lo) * ds / (half * T)
+    if v < 0.5 + hold:
+        return hi, 0.0
+    s, ds = _sweep((v - 0.5 - hold) / half)
+    return hi - (hi - lo) * s, -(hi - lo) * ds / (half * T)
 
 
-def paddle_poly(recipe: dict, ang: float) -> list:
-    (px, py), L, h0, h1 = paddle_geom(recipe)
-    c, s = math.cos(ang), math.sin(ang)
-    out = []
-    for lx, ly in ((-h0, 0), (h0, 0), (h1, -L), (-h1, -L)):
-        # body frame: y up the paddle is -y on screen; rotate clockwise by ang
-        out.append((px + lx * c - ly * s, py + lx * s + ly * c))
-    return out
+def sector(u0: float, u1: float, r0: float, r1: float, n: int = 12) -> list:
+    """Screen points of the ring sector between open-part angles u0..u1 and radii r0..r1 (r0 0 = to the middle)."""
+    out = [(CX + r1 * math.cos(_u_to_beta(u)), CY + r1 * math.sin(_u_to_beta(u))) for u in np.linspace(u0, u1, n)]
+    if r0 <= 0:
+        return [(CX, CY)] + out
+    return out + [(CX + r0 * math.cos(_u_to_beta(u)), CY + r0 * math.sin(_u_to_beta(u)))
+                  for u in np.linspace(u1, u0, n)]
+
+
+def full_count(r: float) -> int:
+    """How many balls of radius r make the open part 'packed'."""
+    Ri = R - RIM_T
+    area = (FREE - 2 * PADDLE_W) / 2 * (Ri * Ri - HUB_R * HUB_R)
+    return min(CAP - 50, int(area * FILL / (math.pi * r * r)))
 
 
 class OverflowSim:
@@ -153,10 +133,10 @@ class OverflowSim:
         self.pm = pymunk
         self.recipe = recipe
         self.rng = random.Random(f"overflow-{recipe['seed']}")
-        self.r = float(recipe.get("ball_r") or 9.5)
-        self.capacity = capacity(self.r)
-        self.cap = int(self.capacity * 1.3)
+        self.r = float(recipe.get("ball_r") or 8.5)
+        self.full = full_count(self.r)
         self.ncol = len(PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)])
+        self.spd = SPEED * float(recipe.get("speed") or 1.0)
         self.t = 0.0
         self.chain = [(None, "1 ball"), (None, "10 balls"), (None, "100 balls"), (None, "1,000 balls"),
                       (None, "overflow")]
@@ -167,60 +147,60 @@ class OverflowSim:
         self.max_gap = 0.0
         self.ok = False
         self.events: list = []          # the shared mixer's ball sounds: none (ours are in music_track)
-        self.hits: list = []            # (t, vol): one per split
-        self.splits: list = []          # (t, live count)
-        self.spilled = 0
-        self.early_spills = 0
-        self.inside = 1
-        self._queue: list = []
-        self._tokens = 3.0
+        self.hits: list = []            # (t, vol): one per squish
+        self.squishes: list = []        # (t, count after)
+        self.pops: list = []            # (t, x, y): where a squished ball popped out (the painter flashes them)
+        self.tiles: list = []           # after the shatter: flying rim tiles
+        self.n_final = 0
 
         sp = self.space = pymunk.Space()
-        sp.gravity = (0, GRAVITY)
-        sp.iterations = 10
-        sp.use_spatial_hash(2 * self.r + 2, 12000)
+        sp.gravity = (0, 0)
+        sp.iterations = 8
+        sp.use_spatial_hash(2 * self.r + 2, 8000)
+        self.rim = []
         n = 120
         for i in range(n):
             a0, a1 = 2 * math.pi * i / n, 2 * math.pi * (i + 1) / n
-            mid = (a0 + a1) / 2
-            if abs(_wrap(mid + math.pi / 2)) < GAP_HALF:      # the opening at the top
-                continue
             s = pymunk.Segment(sp.static_body, (CX + R * math.cos(a0), CY + R * math.sin(a0)),
                                (CX + R * math.cos(a1), CY + R * math.sin(a1)), RIM_T)
-            s.elasticity, s.friction, s.collision_type = 0.3, 0.5, 3
+            s.elasticity, s.friction = 1.0, 0.0
+            self.rim.append(s)
             sp.add(s)
-        for a in (math.pi - RIM_A, RIM_A):                   # the V floor: 8 and 4 o'clock to the hub
-            s = pymunk.Segment(sp.static_body, HUB, (CX + R * math.cos(a), CY + R * math.sin(a)), RIM_T)
-            s.elasticity, s.friction, s.collision_type = 0.3, 0.5, 3
-            sp.add(s)
-        hub = pymunk.Circle(sp.static_body, HUB_R, HUB)
-        hub.elasticity, hub.friction = 0.3, 0.5
+        for u0, u1 in ((FREE, FREE + (FLOOR_A1 - FLOOR_A0) / 2), (FREE + (FLOOR_A1 - FLOOR_A0) / 2, 2 * math.pi)):
+            floor = pymunk.Poly(sp.static_body, sector(u0, u1, 0, R - 2, 8))
+            floor.elasticity, floor.friction = 1.0, 0.0
+            sp.add(floor)
+        hub = pymunk.Circle(sp.static_body, HUB_R, (CX, CY))
+        hub.elasticity, hub.friction = 1.0, 0.0
         sp.add(hub)
 
         self.paddle = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-        (px, py), L, h0, h1 = paddle_geom(recipe)
-        self.paddle.position = (px, py)
-        # pymunk's angle turns +x toward +y (clockwise on screen), like paddle_poly
-        shape = pymunk.Poly(self.paddle, [(-h0, 0), (h0, 0), (h1, -L), (-h1, -L)], radius=2)
-        shape.elasticity, shape.friction, shape.collision_type = PADDLE_E, 0.3, 2
+        self.paddle.position = (CX, CY)
+        L = R - RIM_T - 1
+        pts = [(0, 0)] + [(L * math.cos(a), L * math.sin(a)) for a in np.linspace(-PADDLE_W, PADDLE_W, 7)]
+        shape = pymunk.Poly(self.paddle, pts)
+        shape.elasticity, shape.friction = 1.0, 0.0
         sp.add(self.paddle, shape)
+        self.u_p, self.w_p = paddle_u(recipe, 0.0)
         self._set_paddle(0.0)
-        self._filter = pymunk.ShapeFilter()
-        sp.on_collision(1, 2, pre_solve=self._on_paddle)
 
         self.bodies: list = []
         self.cols: list = []
-        self.out: list = []               # True once a ball has left the bowl
-        self.last_split: list = []
         self.xy = np.zeros((0, 2), np.float32)
         self.col = np.zeros(0, np.int16)
-        self._add(CX + self.rng.uniform(-60, 60), CY - 250, (self.rng.uniform(-40, 40), 0), self.rng.randrange(self.ncol))
+        # one ball, somewhere in the top half, off in a random direction
+        u = self.rng.uniform(FREE * 0.3, FREE * 0.7)
+        d = self.rng.uniform(150, 300)
+        a = self.rng.uniform(0, 2 * math.pi)
+        self._add(CX + d * math.cos(_u_to_beta(u)), CY + d * math.sin(_u_to_beta(u)),
+                  (self.spd * math.cos(a), self.spd * math.sin(a)), self.rng.randrange(self.ncol))
         self._sync()
 
     # ---- physics ---------------------------------------------------------
     def _set_paddle(self, t: float):
-        ang, w = paddle_angle(self.recipe, t)
-        self.paddle.angle = ang
+        u, w = paddle_u(self.recipe, t)
+        self.u_p, self.w_p = u, w
+        self.paddle.angle = _u_to_beta(u)
         self.paddle.angular_velocity = w
         self.space.reindex_shapes_for_body(self.paddle)
 
@@ -230,82 +210,67 @@ class OverflowSim:
         b.position = (x, y)
         b.velocity = v
         s = pm.Circle(b, self.r)
-        s.elasticity, s.friction, s.collision_type = BALL_E, 0.3, 1
-        s.idx = len(self.bodies)
+        s.elasticity, s.friction = 1.0, 0.0
         self.space.add(b, s)
         self.bodies.append(b)
         self.cols.append(c)
-        self.out.append(False)
-        self.last_split.append(-9.0)
-        return s
 
-    def _on_paddle(self, arbiter, space, data):
-        if self.done_at is not None and self.t - self.done_at > END_HOLD - 0.4:
-            return
-        s = arbiter.shapes[0]
-        i = getattr(s, "idx", None)
-        if i is None or self.t - self.last_split[i] < COOLDOWN:
-            return
-        b = s.body
-        p = arbiter.contact_point_set.points[0].point_a if arbiter.contact_point_set.points else b.position
-        vp = self.paddle.velocity_at_world_point(p)
-        if not arbiter.is_first_contact and math.hypot(vp.x, vp.y) < PUSH_V:
-            # a hit: a new contact, or the paddle sweeping it along
-            return
-        self.last_split[i] = self.t
-        self._queue.append(i)
-
-    def _splits(self, dt: float):
-        live = sum(1 for o in self.out if not o) + sum(1 for o in self.out if o) // 3
-        # the pace: at most GROWTH * live^GROWTH_P splits a second (unthrottled
-        # the bowl is full in ~8 s); sublinear, so the bowl fills steadily
-        # instead of sitting empty for half the video; early on every hit splits
-        rate = max(3.0, GROWTH * live ** GROWTH_P)
-        self._tokens = min(self._tokens + dt * rate, max(3.0, 0.15 * rate))
-        # after OVERFLOW only enough to keep the pour going (not a fountain)
-        for i in self._queue:
-            if live >= self.cap or self._tokens < 1 or (self.done_at is not None and self.inside >= self.capacity):
-                break
-            self._tokens -= 1
+    def _remove(self, idx: list):
+        drop = set(idx)
+        for i in idx:
             b = self.bodies[i]
-            vx, vy = b.velocity
-            sp = math.hypot(vx, vy)
-            a = math.atan2(vy, vx) if sp > 1 else -math.pi / 2
-            da = self.rng.choice((-1, 1)) * self.rng.uniform(0.25, 0.6)
-            k = self.rng.uniform(0.85, 1.08)
-            nv = (max(sp, 220) * k * math.cos(a + da), max(sp, 220) * k * math.sin(a + da))
-            spot = self._room(b.position, a + da)
-            if spot is None:
-                # packed in: it squeezes in next to it anyway and the pile swells
-                # (pushed apart gently: the speed limit keeps it from bursting)
-                o = self.rng.uniform(0, 2 * math.pi)
-                spot = (b.position.x + 0.7 * self.r * math.cos(o), b.position.y + 0.7 * self.r * math.sin(o))
-            x, y = spot
-            c = self.rng.randrange(self.ncol) if self.rng.random() < 0.55 else self.cols[i]
-            s = self._add(x, y, nv, c)
-            self.last_split[s.idx] = self.t
-            live += 1
-            self.spawned += 1
-            vol = 1.0 / (1.0 + live / 400.0)
-            self.hits.append((self.t, vol))
-            self.splits.append((self.t, live))
-        self._queue.clear()
+            self.space.remove(b, *b.shapes)
+        keep = [i for i in range(len(self.bodies)) if i not in drop]
+        self.bodies = [self.bodies[i] for i in keep]
+        self.cols = [self.cols[i] for i in keep]
 
-    def _room(self, p, a):
-        """A free spot right next to the ball (its new half goes there), or None.
-        Spawning into other balls would blast the pile apart."""
-        for dist, dirs in ((2.05, (0, 1, -1, 2, -2, 3, -3, 4)), (3.0, (0, 1, -1, 2, -2, 3, -3, 4)),
-                           (4.2, (0, 1, -1, 2, -2, 3, -3, 4))):
-            for k in dirs:
-                o = a + k * math.pi / 4 + (dist > 2.1) * math.pi / 8
-                x, y = p.x + dist * self.r * math.cos(o), p.y + dist * self.r * math.sin(o)
-                if math.hypot(x - CX, y - CY) > R - RIM_T - self.r - 1:
-                    continue
-                if y > HUB[1] - abs(x - CX) * math.tan(PLATE_A) - (RIM_T + self.r) / math.cos(PLATE_A):
-                    continue
-                if not self.space.point_query((x, y), self.r * 0.98, self._filter):
-                    return x, y
-        return None
+    def _polar(self):
+        xy = np.array([tuple(b.position) for b in self.bodies], np.float64).reshape(-1, 2)
+        dx, dy = xy[:, 0] - CX, xy[:, 1] - CY
+        d = np.hypot(dx, dy)
+        u = (np.arctan2(dy, dx) - FLOOR_A1) % (2 * math.pi)
+        return xy, d, u
+
+    def _squish(self):
+        """Balls in the closing gap between the paddle and a plate: each pops out
+        as two just behind the paddle's back face."""
+        if self.done_at is not None or not self.bodies or abs(self.w_p) < 1e-3:
+            return
+        xy, d, u = self._polar()
+        if self.w_p > 0:      # closing on the 4 o'clock plate (u = FREE)
+            front, gap = self.u_p + PADDLE_W, FREE - (self.u_p + PADDLE_W)
+            inside = (u > front - 0.02) & (u < FREE + 0.05)
+        else:                 # closing on the 8 o'clock plate (u = 0)
+            front, gap = self.u_p - PADDLE_W, self.u_p - PADDLE_W
+            inside = (u < front + 0.02) | (u > 2 * math.pi - 0.05)
+        caught = np.nonzero(inside & (d * max(gap, 0.0) < 2 * self.r * SQUISH_K) & (d > HUB_R))[0]
+        if not len(caught):
+            return
+        back = self.u_p - math.copysign(PADDLE_W, self.w_p)      # the paddle's back face
+        sgn = -math.copysign(1.0, self.w_p)                        # away from it
+        Ri = R - RIM_T - self.r - 2
+        born = []
+        for i in caught:
+            if len(self.bodies) - len(caught) + len(born) + 2 > CAP:
+                break
+            dd = float(min(max(d[i], HUB_R + self.r + 4), Ri))
+            off = (self.r + 3) / dd
+            for k, dr in enumerate((0.0, 2.3 * self.r)):
+                rr = dd + dr if dd + dr < Ri else dd - dr
+                ub = back + sgn * (off + (k * 0.6 * self.r / rr))
+                bx, by = CX + rr * math.cos(_u_to_beta(ub)), CY + rr * math.sin(_u_to_beta(ub))
+                # pushed away from the paddle (its tangent direction), a little spread
+                tb = _u_to_beta(ub) + sgn * math.pi / 2 + self.rng.uniform(-0.5, 0.5)
+                born.append((bx, by, (self.spd * 1.1 * math.cos(tb), self.spd * 1.1 * math.sin(tb)),
+                             self.cols[i] if k == 0 else self.rng.randrange(self.ncol)))
+            self.pops.append((self.t, float(xy[i, 0]), float(xy[i, 1])))
+            self.hits.append((self.t, 1.0 / (1.0 + len(self.bodies) / 300.0)))
+        n_caught = len(born) // 2
+        self._remove([int(i) for i in caught[:n_caught]])
+        for bx, by, v, c in born:
+            self._add(bx, by, v, c)
+        self.spawned += n_caught
+        self.squishes.append((self.t, len(self.bodies)))
 
     @property
     def finished(self) -> bool:
@@ -313,75 +278,93 @@ class OverflowSim:
 
     def step(self):
         dt = 1 / FPS
-        h = dt / SUBSTEPS
-        for k in range(SUBSTEPS):
+        sub = 3
+        h = dt / sub
+        for k in range(sub):
             self._set_paddle(self.t + (k + 1) * h)
+            self._squish()
             self.space.step(h)
-            self._splits(h)
         self.t += dt
+        if self.done_at is None:
+            self._keep_inside()
+        else:
+            self._fly(dt)
         self._sync()
         self._milestones()
 
+    def _keep_inside(self):
+        """Steady speeds (a band, a tiny random turn) and nobody inside the
+        floor, the paddle or past the rim."""
+        if not self.bodies:
+            return
+        xy, d, u = self._polar()
+        lo, hi = self.spd * SPEED_BAND[0], self.spd * SPEED_BAND[1]
+        Ri = R - RIM_T - self.r - 1
+        in_floor = u > FREE + 0.002
+        in_pad = np.abs(u - self.u_p) < PADDLE_W + self.r / np.maximum(d, 1) * 0.5
+        for i, b in enumerate(self.bodies):
+            vx, vy = b.velocity
+            s = math.hypot(vx, vy)
+            turn = self.rng.uniform(-0.04, 0.04)
+            if s < 1:
+                a = self.rng.uniform(0, 2 * math.pi)
+                vx, vy, s = math.cos(a), math.sin(a), 1.0
+            k = min(max(s, lo), hi) / s
+            c, sn = math.cos(turn), math.sin(turn)
+            b.velocity = ((vx * c - vy * sn) * k, (vx * sn + vy * c) * k)
+            fix = None
+            if d[i] > Ri:
+                fix = (Ri, u[i])
+            if in_floor[i]:
+                fix = (min(d[i], Ri), 0.01 if u[i] - FREE > (2 * math.pi - FREE) / 2 else FREE - 0.01)
+            elif in_pad[i] and d[i] > HUB_R:
+                # behind the paddle (the side it's moving away from): never a pinch
+                side = -1.0 if self.w_p >= 0 else 1.0
+                fix = (min(d[i], Ri), self.u_p + side * (PADDLE_W + (self.r + 2) / max(d[i], 1)))
+            if d[i] < HUB_R + self.r - 1:
+                fix = (HUB_R + self.r + 1, u[i] if fix is None else fix[1])
+            if fix is not None:
+                rr, uu = fix
+                uu = min(max(uu, 0.005), FREE - 0.005)
+                b.position = (CX + rr * math.cos(_u_to_beta(uu)), CY + rr * math.sin(_u_to_beta(uu)))
+
+    def _shatter(self):
+        """The rim breaks: its tiles fly out, the balls burst out in every direction."""
+        for s in self.rim:
+            self.space.remove(s)
+        self.rim = []
+        rng = self.rng
+        for k in range(TILES):
+            a = 2 * math.pi * (k + 0.5) / TILES
+            sp = rng.uniform(380, 820)
+            self.tiles.append({"k": k, "x": CX + (R + 5) * math.cos(a), "y": CY + (R + 5) * math.sin(a),
+                               "vx": sp * math.cos(a) + rng.uniform(-80, 80),
+                               "vy": sp * math.sin(a) - rng.uniform(100, 300),
+                               "rot": 0.0, "vr": rng.uniform(-7, 7)})
+        for b in self.bodies:
+            dx, dy = b.position.x - CX, b.position.y - CY
+            dd = math.hypot(dx, dy) or 1.0
+            out = rng.uniform(500, 1000) * (0.5 + 0.5 * dd / R)
+            b.velocity = (b.velocity.x * 0.4 + out * dx / dd, b.velocity.y * 0.4 + out * dy / dd)
+
+    def _fly(self, dt):
+        for tl in self.tiles:
+            tl["vy"] += 1600 * dt
+            tl["x"] += tl["vx"] * dt
+            tl["y"] += tl["vy"] * dt
+            tl["rot"] += tl["vr"] * dt
+        gone = [i for i, b in enumerate(self.bodies)
+                if not (-80 < b.position.x < W + 80 and -80 < b.position.y < H + 80)]
+        if gone:
+            self._remove(gone)
+
     def _sync(self):
-        """Positions into numpy, spills counted, leaks put back, fallen balls dropped."""
         if not self.bodies:
             self.xy = np.zeros((0, 2), np.float32)
+            self.col = np.zeros(0, np.int16)
             return
-        xy = np.array([tuple(b.position) for b in self.bodies], np.float32)
-        # a speed limit: a pile squeezed between the paddle and the rim would
-        # otherwise squirt balls out at any speed and empty the bowl as a wave
-        vmax = VMAX
-        for b in self.bodies:
-            vx, vy = b.velocity
-            if vx * vx + vy * vy > vmax * vmax:
-                k = vmax / math.hypot(vx, vy)
-                b.velocity = (vx * k, vy * k)
-        d = np.hypot(xy[:, 0] - CX, xy[:, 1] - CY)
-        out = np.array(self.out)
-        leaving = (~out) & (d > R + 1)
-        for i in np.nonzero(leaving)[0]:
-            ang = math.atan2(xy[i, 1] - CY, xy[i, 0] - CX)
-            if abs(_wrap(ang + math.pi / 2)) < GAP_HALF + 0.05:
-                self.out[i] = True               # out over the top: a spill
-                self.spilled += 1
-                if self.inside < EARLY_SHARE * self.capacity:
-                    self.early_spills += 1
-            else:                                # squeezed through the rim: put it back
-                b = self.bodies[i]
-                rr = R - RIM_T - self.r - 1
-                b.position = (CX + rr * math.cos(ang), CY + rr * math.sin(ang))
-                b.velocity = (0, 0)
-                xy[i] = b.position
-        # squeezed under a floor plate (the paddle pinches balls against them): back on top
-        tan = math.tan(PLATE_A)
-        floor = HUB[1] - np.abs(xy[:, 0] - CX) * tan
-        under = (~out) & (xy[:, 1] > floor - RIM_T * 0.5) & (d <= R + 1)
-        for i in np.nonzero(under)[0]:
-            b = self.bodies[i]
-            lift = (RIM_T + self.r + 1) / math.cos(PLATE_A)
-            b.position = (float(xy[i, 0]), float(floor[i] - lift))
-            b.velocity = (b.velocity.x * 0.3, min(0.0, b.velocity.y))
-            xy[i] = b.position
-        gone = (xy[:, 1] > H + 40) | (xy[:, 0] < -60) | (xy[:, 0] > W + 60)
-        if gone.any():
-            keep = []
-            for i, g in enumerate(gone):
-                if g:
-                    b = self.bodies[i]
-                    self.space.remove(b, *b.shapes)
-                else:
-                    keep.append(i)
-            self.bodies = [self.bodies[i] for i in keep]
-            self.cols = [self.cols[i] for i in keep]
-            self.out = [self.out[i] for i in keep]
-            self.last_split = [self.last_split[i] for i in keep]
-            for j, b in enumerate(self.bodies):
-                for s in b.shapes:
-                    s.idx = j
-            xy = xy[keep]
-        self.xy = xy
+        self.xy = np.array([tuple(b.position) for b in self.bodies], np.float32)
         self.col = np.array(self.cols, np.int16)
-        self.inside = len(self.out) - sum(self.out)
 
     def _milestones(self):
         n = self.spawned
@@ -389,65 +372,57 @@ class OverflowSim:
             if k not in self.unlocked_at and n >= need:
                 self.unlocked_at[k] = self.t
                 self.best = k
-        if (self.done_at is None and self.spilled >= SPILL_N and self.inside >= FULL_SHARE * self.capacity):
+        times = sorted(self.unlocked_at.values())
+        if self.done_at is None and len(self.bodies) >= self.full:
             self.done_at = self.t
             self.unlocked_at[4] = self.t
             self.best = 4
-            times = sorted(self.unlocked_at.values())
+            self.ok = True
+            self.n_final = len(self.bodies)
             self.max_gap = max((b - a for a, b in zip(times, times[1:])), default=0.0)
-            self.ok = self.early_spills <= EARLY_MAX
-        if self.done_at is None:
-            times = sorted(self.unlocked_at.values())
+            self.max_gap = max(self.max_gap, self.t - times[-1])
+            self._shatter()
+        elif self.done_at is None:
             self.max_gap = max(max((b - a for a, b in zip(times, times[1:])), default=0.0), self.t - times[-1])
             if self.t > SECONDS_CAP - END_HOLD - 0.1:
-                self.done_at = self.t            # never overflowed: end anyway (not ok)
-                self.ok = False
+                self.done_at = self.t            # never filled: end anyway (not ok)
 
     # ---- sound -----------------------------------------------------------
     def music_track(self, n: int) -> np.ndarray:
-        """Crunch per split (denser and softer as it grows), a sand-pour bed, the overflow swell."""
+        """A crunch per squish (denser and softer as they get more), the crack at the shatter."""
         g = np.random.default_rng(int(self.recipe.get("seed") or 0) + 77)
-        mix = np.zeros(n + SR, np.float64)
+        mix = np.zeros(n + 2 * SR, np.float64)
         bank = [_crunch(g) for _ in range(28)]
-        ts = np.array([t for t, _ in self.splits]) if self.splits else np.zeros(0)
+        ts = np.array([t for t, _ in self.hits]) if self.hits else np.zeros(0)
         last = -1.0
-        for t, live in self.splits:
+        for t, _v in self.hits:
             i = int(t * SR)
             if i >= n:
                 continue
-            # hits per second around now: the gate opens up and each hit gets softer
             rate = (np.searchsorted(ts, t + 0.25) - np.searchsorted(ts, t - 0.25)) * 2.0
-            gap = 1.0 / (7.0 + 45.0 * min(1.0, rate / 120.0))
+            gap = 1.0 / (8.0 + 50.0 * min(1.0, rate / 120.0))
             if t - last < gap:
                 continue
             last = t
             h = bank[g.integers(len(bank))]
-            gain = g.uniform(0.5, 1.0) / math.sqrt(1.0 + min(rate, 400) / 25.0)
+            gain = g.uniform(0.55, 1.0) / math.sqrt(1.0 + min(rate, 400) / 30.0)
             seg = mix[i:i + len(h)]
             seg += h[:len(seg)] * gain
-        # the sand pour: bandpassed noise growing with how full the bowl is
-        fill = np.zeros(len(mix))
-        if self.splits:
-            st = np.array([t for t, _ in self.splits])
-            sl = np.array([c for _, c in self.splits], float)
-            tt = np.arange(len(mix)) / SR
-            fill = np.interp(tt, st, np.minimum(1.0, sl / self.capacity), left=0.0)
-        bed = _band(g.standard_normal(len(mix)), 1500, 7000)
-        bed /= max(1e-9, float(np.abs(bed).max()))
-        amp = 0.05 * fill ** 1.5
-        if self.done_at is not None:                    # the pour over the rim: louder, then it settles
-            tt = np.arange(len(mix)) / SR - self.done_at
-            amp = amp + 0.07 * np.clip(tt / 0.4, 0, 1) * np.exp(-np.clip(tt, 0, None) / 3.0)
+        if self.ok and self.done_at is not None:
             i = int(self.done_at * SR)
-            k = int(1.6 * SR)
-            ts2 = np.arange(k) / SR
-            f = 55 + 40 * np.exp(-ts2 * 3)
-            swell = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.minimum(1, ts2 / 0.08) * np.exp(-ts2 * 2.2) * 0.25
+            k = int(1.5 * SR)
+            tt = np.arange(k) / SR
+            crack = _band(g.standard_normal(k), 900, 12000) * np.exp(-tt / 0.045) * 0.9
+            f = 70 + 60 * np.exp(-tt * 8)
+            boom = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / 0.35) * 0.8
+            burst = crack + boom
+            for _ in range(70):                 # the tiles and balls scattering: a shower of grains
+                at = int(g.uniform(0.02, 0.8) ** 1.6 * SR)
+                h = bank[g.integers(len(bank))] * g.uniform(0.15, 0.5)
+                burst[at:at + len(h)] += h[:max(0, k - at)]
             seg = mix[i:i + k]
-            seg += swell[:len(seg)]
-        mix += bed * amp
-        # a little room (FFT convolution)
-        m = int(0.08 * SR)
+            seg += burst[:len(seg)]
+        m = int(0.08 * SR)                      # a little room (FFT convolution)
         ir = g.standard_normal(m) * np.exp(-np.arange(m) / (0.015 * SR)) * 0.04
         ir[0] = 1.0
         L = 1 << int(math.ceil(math.log2(len(mix) + m)))
@@ -455,10 +430,6 @@ class OverflowSim:
         peak = float(np.abs(mix).max()) or 1.0
         mix = np.tanh(mix / peak * 1.6) * 0.89
         return mix[:n].astype(np.float32)
-
-
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 def _band(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
@@ -503,6 +474,15 @@ def _sprite(r: float, col: tuple, S: int = 4):
     return np.clip(rgb, 0, 255), a[..., 3] / 255.0, size
 
 
+def _tile_poly(k: int) -> list:
+    """Tile k of the rim, as screen points (small gaps between tiles)."""
+    g = math.radians(0.9)
+    a0, a1 = 2 * math.pi * k / TILES + g, 2 * math.pi * (k + 1) / TILES - g
+    ri, ro = R - RIM_T, R + RIM_OUT
+    out = [(CX + ro * math.cos(a), CY + ro * math.sin(a)) for a in np.linspace(a0, a1, 4)]
+    return out + [(CX + ri * math.cos(a), CY + ri * math.sin(a)) for a in np.linspace(a1, a0, 4)]
+
+
 class OverflowPainter:
     SS = 2
 
@@ -513,10 +493,11 @@ class OverflowPainter:
         self.recipe = recipe
         self.pal = PALETTES[int(recipe.get("palette") or 0) % len(PALETTES)]
         back, inner = BACKS[int(recipe.get("back") or 0) % len(BACKS)]
-        self.r = float(recipe.get("ball_r") or 9.5)
-        self.bg = self._background(back, inner)
+        self.r = float(recipe.get("ball_r") or 8.5)
+        self.bg = self._background(back, inner, rim=True)
         self.bg_np = np.asarray(self.bg).copy()
-        # sprites: pixel offsets of the edge (blended) and the core (solid)
+        self.bg_open = None
+        self._back, self._inner = back, inner
         rgbs, alpha, size = [], None, 0
         for col in self.pal:
             rgb, alpha, size = _sprite(self.r, col)
@@ -531,10 +512,9 @@ class OverflowPainter:
         self.c_rgb = np.stack([r[self.c_dy, self.c_dx] for r in rgbs]).round().astype(np.uint8)
         self.f_count = _font(84)
         self.f_small = _font(40, "Inter-Bold.ttf")
-        self.f_end = _font(132)
         self._ends = {}
 
-    def _background(self, back, inner) -> Image.Image:
+    def _background(self, back, inner, rim: bool) -> Image.Image:
         S = self.SS
         im = Image.new("RGB", (W * S, H * S), back)
         d = ImageDraw.Draw(im)
@@ -544,44 +524,33 @@ class OverflowPainter:
 
         Ri = R - RIM_T
         d.ellipse([*P(CX - Ri, CY - Ri), *P(CX + Ri, CY + Ri)], fill=inner)
-        # the floor: everything under the V, in the plates' grey, with a lighter top edge
-        a8, a4 = math.pi - RIM_A, RIM_A
-        p8 = (CX + R * math.cos(a8), CY + R * math.sin(a8))
-        p4 = (CX + R * math.cos(a4), CY + R * math.sin(a4))
-        plate = (84, 94, 114)
-        d.polygon([P(*q) for q in floor_poly()], fill=plate)
-        for q in (p8, p4):
-            d.line([P(*HUB), P(*q)], fill=(150, 160, 182), width=2 * RIM_T * S)
-        for q in (p8, p4):     # a groove along each plate, like the reel's
-            mx, my = HUB[0] + (q[0] - HUB[0]) * 0.3, HUB[1] + (q[1] - HUB[1]) * 0.3 + 46
-            ex, ey = HUB[0] + (q[0] - HUB[0]) * 0.72, HUB[1] + (q[1] - HUB[1]) * 0.72 + 46
-            d.line([P(mx, my), P(ex, ey)], fill=(66, 74, 94), width=4 * S)
-        # the rim: thick slate grey, open at the top, with round ends
-        rim = (104, 116, 138)
-        t0 = -math.pi / 2 + GAP_HALF
-        t1 = -math.pi / 2 - GAP_HALF + 2 * math.pi
-        Ro, Rn = R + 16, R - RIM_T
-        # (Pillow's arc grows its width inward from the box: the box is the outer edge)
-        d.arc([*P(CX - Ro, CY - Ro), *P(CX + Ro, CY + Ro)],
-              math.degrees(t0), math.degrees(t1), fill=rim, width=int((Ro - Rn) * S))
-        for a in (t0, t1):
-            mx, my = CX + (Ro + Rn) / 2 * math.cos(a), CY + (Ro + Rn) / 2 * math.sin(a)
-            rr = (Ro - Rn) / 2
-            d.ellipse([*P(mx - rr, my - rr), *P(mx + rr, my + rr)], fill=rim)
+        # the floor: two wide plates, 4 o'clock -> 6 and 6 -> 8 o'clock, each with a groove
+        mid = FREE + (FLOOR_A1 - FLOOR_A0) / 2
+        for u0, u1 in ((FREE, mid), (mid, 2 * math.pi)):
+            pts = sector(u0 + 0.012, u1 - 0.012, 0, Ri, 24)
+            d.polygon([P(*q) for q in pts], fill=PLATE)
+            d.line([P(*q) for q in (pts[0], pts[1])], fill=PLATE_EDGE, width=3 * S)
+            d.line([P(*q) for q in (pts[0], pts[-1])], fill=PLATE_EDGE, width=3 * S)
+            um = (u0 + u1) / 2      # a groove along the middle of each plate, like the reel's
+            a, b = Ri * 0.3, Ri * 0.8
+            d.line([P(CX + a * math.cos(_u_to_beta(um)), CY + a * math.sin(_u_to_beta(um))),
+                    P(CX + b * math.cos(_u_to_beta(um)), CY + b * math.sin(_u_to_beta(um)))], fill=GROOVE, width=5 * S)
+        # the rim: a ring of dark tiles with small gaps
+        if rim:
+            for k in range(TILES):
+                pts = [P(*q) for q in _tile_poly(k)]
+                d.polygon(pts, fill=TILE, outline=TILE_EDGE)
         # tick marks round the outside, a longer one every 30 degrees
         for k in range(48):
             a = 2 * math.pi * k / 48
-            if abs(_wrap(a + math.pi / 2)) < GAP_HALF + math.radians(4):
-                continue
             long = k % 4 == 0
-            r0, r1 = R + 26, R + (48 if long else 38)
+            r0, r1 = R + 30, R + (50 if long else 40)
             d.line([P(CX + r0 * math.cos(a), CY + r0 * math.sin(a)), P(CX + r1 * math.cos(a), CY + r1 * math.sin(a))],
-                   fill=(96, 108, 130) if long else (66, 76, 96), width=(5 if long else 3) * S)
-        # the hub: a half-disc where the plates meet
-        hx, hy = HUB
-        d.pieslice([*P(hx - HUB_R, hy - HUB_R), *P(hx + HUB_R, hy + HUB_R)], 180, 360, fill=(150, 160, 182))
+                   fill=(96, 108, 130) if long else (60, 70, 90), width=(5 if long else 3) * S)
+        # the hub: a half-disc on the plates' meeting point (flat side down)
+        d.pieslice([*P(CX - HUB_R, CY - HUB_R), *P(CX + HUB_R, CY + HUB_R)], 180, 360, fill=PLATE_EDGE)
+        d.rectangle([*P(CX - HUB_R, CY), *P(CX + HUB_R, CY + 6)], fill=PLATE_EDGE)
         im = im.resize((W, H), Image.LANCZOS)
-        # the titles never change: drawn once
         d = ImageDraw.Draw(im)
         hook = self.recipe.get("hook") or HOOKS[0]
         size = 92
@@ -589,10 +558,9 @@ class OverflowPainter:
             size -= 4
         d.text((W // 2, 200), hook, font=_font(size), fill=(250, 250, 255), anchor="mm")
         sub = self.recipe.get("sub") or SUBS[0]
-        if "split" in hook.lower() and "split" in sub:      # the title may be swapped for another hook
+        if any(w in hook.lower() for w in ("squish", "split", "makes two")):   # the title may be swapped
             sub = "will it overflow?"
-        d.text((W // 2, 292), sub, font=_font(46, "Inter-Bold.ttf"),
-               fill=(168, 180, 206), anchor="mm")
+        d.text((W // 2, 292), sub, font=_font(46, "Inter-Bold.ttf"), fill=(168, 180, 206), anchor="mm")
         return im
 
     def _balls(self, fr: np.ndarray, xy: np.ndarray, col: np.ndarray):
@@ -614,44 +582,79 @@ class OverflowPainter:
         ok = (Y >= 0) & (Y < H) & (X >= 0) & (X < W)
         flat[(Y * W + X)[ok]] = self.c_rgb[col][ok]
 
-    def _paddle(self, fr: np.ndarray, t: float):
+    def _paddle(self, fr: np.ndarray, u: float):
         cv2 = self.cv2
-        ang, _w = paddle_angle(self.recipe, t)
         sh = 16
-        pts = np.array([[int(x * sh), int(y * sh)] for x, y in paddle_poly(self.recipe, ang)], np.int32)
+        L = R - RIM_T - 1
+
+        def at(dist, du):          # a point on the paddle: distance from the hub, angle off its middle
+            b = _u_to_beta(u + du)
+            return (CX + dist * math.cos(b), CY + dist * math.sin(b))
+
+        def q(p):
+            return (int(p[0] * sh), int(p[1] * sh))
+        pts = np.array([q((CX, CY))] + [q(at(L, a)) for a in np.linspace(-PADDLE_W, PADDLE_W, 16)], np.int32)
         cv2.fillPoly(fr, [pts], (196, 204, 222), cv2.LINE_AA, 4)
         cv2.polylines(fr, [pts], True, (132, 142, 166), 3, cv2.LINE_AA, 4)
-        (px, py), L, h0, h1 = paddle_geom(self.recipe)
-        c, s_ = math.cos(ang), math.sin(ang)
-
-        def at(lx, ly):        # paddle body frame -> screen, like paddle_poly
-            return (px + lx * c - ly * s_, py + lx * s_ + ly * c)
         for f in (0.38, 0.5, 0.62, 0.74, 0.86):     # ruler marks across it
-            half = (h0 + (h1 - h0) * f) * 0.55
-            a, b = at(-half, -L * f), at(half * 0.6, -L * f)
-            cv2.line(fr, (int(a[0] * sh), int(a[1] * sh)), (int(b[0] * sh), int(b[1] * sh)),
-                     (120, 130, 156), 4, cv2.LINE_AA, 4)
-        hx_, hy_ = at(h1 * 0.4, -L * 0.95)           # the little hole near the tip
-        cv2.circle(fr, (int(hx_ * sh), int(hy_ * sh)), int(7 * sh), (120, 130, 156), 2, cv2.LINE_AA, 4)
-        cv2.circle(fr, (int(px * sh), int(py * sh)), int(19 * sh), (132, 142, 166), -1, cv2.LINE_AA, 4)
-        cv2.circle(fr, (int(px * sh), int(py * sh)), int(9 * sh), (222, 228, 240), -1, cv2.LINE_AA, 4)
+            dist = L * f
+            cv2.line(fr, q(at(dist, -PADDLE_W * 0.7)), q(at(dist, PADDLE_W * 0.25)), (120, 130, 156), 4, cv2.LINE_AA, 4)
+        hx_, hy_ = at(L * 0.93, PADDLE_W * 0.45)     # the little hole near the tip
+        cv2.circle(fr, q((hx_, hy_)), int(8 * sh), (120, 130, 156), 2, cv2.LINE_AA, 4)
+        cv2.circle(fr, q((CX, CY)), int(19 * sh), (132, 142, 166), -1, cv2.LINE_AA, 4)
+        cv2.circle(fr, q((CX, CY)), int(9 * sh), (222, 228, 240), -1, cv2.LINE_AA, 4)
+
+    def _pops(self, fr: np.ndarray, sim: OverflowSim):
+        """A small white ring where a squished ball just popped (0.18 s)."""
+        cv2 = self.cv2
+        for t, x, y in reversed(sim.pops[-400:]):
+            age = sim.t - t
+            if age > 0.18:
+                break
+            if age < 0:
+                continue
+            k = age / 0.18
+            cv2.circle(fr, (int(x * 16), int(y * 16)), int((self.r + 2 + 10 * k) * 16),
+                       (255, 255, 255), max(1, int(3 * (1 - k))), cv2.LINE_AA, 4)
+
+    def _tiles(self, fr: np.ndarray, sim: OverflowSim):
+        cv2 = self.cv2
+        for tl in sim.tiles:
+            pts = _tile_poly(tl["k"])
+            a = 2 * math.pi * (tl["k"] + 0.5) / TILES
+            cx0, cy0 = CX + (R + 5) * math.cos(a), CY + (R + 5) * math.sin(a)
+            c, s = math.cos(tl["rot"]), math.sin(tl["rot"])
+            out = []
+            for x, y in pts:
+                dx, dy = x - cx0, y - cy0
+                out.append((int((tl["x"] + dx * c - dy * s) * 16), int((tl["y"] + dx * s + dy * c) * 16)))
+            p = np.array(out, np.int32)
+            cv2.fillPoly(fr, [p], TILE, cv2.LINE_AA, 4)
+            cv2.polylines(fr, [p], True, TILE_EDGE, 2, cv2.LINE_AA, 4)
 
     def frame(self, sim: OverflowSim) -> Image.Image:
-        fr = self.bg_np.copy()
-        # the paddle over the balls: balls it pins against a plate sit under it
+        if sim.tiles:
+            if self.bg_open is None:
+                self.bg_open = np.asarray(self._background(self._back, self._inner, rim=False)).copy()
+            fr = self.bg_open.copy()
+        else:
+            fr = self.bg_np.copy()
         self._balls(fr, sim.xy, sim.col)
-        self._paddle(fr, sim.t)
+        self._paddle(fr, sim.u_p)
+        self._pops(fr, sim)
+        if sim.tiles:
+            self._tiles(fr, sim)
         im = Image.fromarray(fr)
         d = ImageDraw.Draw(im)
-        n = sim.spawned
+        n = len(sim.bodies) if sim.done_at is None else (sim.n_final or len(sim.bodies))
+        n = max(n, 1)
         d.text((W // 2, 430), f"{n:,}", font=self.f_count, fill=(255, 255, 255), anchor="mm")
         d.text((W // 2 + d.textlength(f"{n:,}", font=self.f_count) / 2 + 14, 444), "ball" if n == 1 else "balls",
-               font=self.f_small,
-               fill=(168, 180, 206), anchor="lm")
-        if sim.done_at is not None and 4 in sim.unlocked_at:          # it really overflowed
+               font=self.f_small, fill=(168, 180, 206), anchor="lm")
+        if sim.done_at is not None and sim.ok:
             age = sim.t - sim.done_at
-            if age > 0.05:
-                k = min(1.0, (age - 0.05) / 0.22)
+            if age > 0.08:
+                k = min(1.0, (age - 0.08) / 0.22)
                 text = self.recipe.get("ending") or ENDINGS[0]
                 full = 132
                 while full > 64 and d.textlength(text, font=_font(full)) > W - 110:
@@ -665,6 +668,7 @@ class OverflowPainter:
 
 def publish_text(recipe: dict) -> dict:
     return {"title": recipe["hook"][:100],
-            "description": ("One ball drops into the bowl. Every time a ball hits the paddle, it splits into two, "
-                            "so the count keeps doubling until the bowl can't hold them all.\n\n"
+            "description": ("One ball bounces around the circle. A plain hit is just a bounce, but when the paddle "
+                            "squishes a ball against the floor, it pops out as two on the other side. When the "
+                            "circle is packed, the rim breaks.\n\n"
                             "Did you think it would overflow? 👇\n\n#satisfying #asmr #physics #simulation")}

@@ -1907,7 +1907,11 @@ merge it yourself; merging stays Dean's call per the rule above.
   make) skips the "unlock" chime and "fanfare" in `be.mix_audio`. (4)
   `BALLS_DROP_CYCLE` 20 slots: box 5, overflow 4, zen 3, ring fill 3,
   shrink 2, spikes, territory, maze race 1; duels and sorting race out;
-  `BALLS_DROP_DEBUT` overflow + box 1 each since 23 Nov. Old boxes and every
+  `BALLS_DROP_DEBUT` box 1 since 23 Nov. The overflow bowl is held OUT of
+  the cycle and debut until Dean approves its rebuilt sample (he rejected the
+  first: balls must keep bouncing around the still circle and only multiply
+  when squished between paddle and plate); for now the cycle is box 5, ring
+  fill 5, zen 5, shrink 2, spikes / territory / maze race 1. Old boxes and every
   recipe without the new fields are byte for byte as before (hash-checked).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball

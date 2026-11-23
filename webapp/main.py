@@ -6593,8 +6593,10 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "overflow", "zen", "ringfill", "box", "shrink", "overflow", "zen", "box", "territory",
-                    "ringfill", "overflow", "box", "zen", "spikes", "ringfill", "box", "overflow", "shrink", "mazerace")
+BALLS_DROP_CYCLE = ("box", "ringfill", "zen", "box", "shrink", "ringfill", "zen", "box", "territory", "zen",
+                    "ringfill", "box", "spikes", "zen", "ringfill", "box", "shrink", "zen", "ringfill", "mazerace")
+# (the overflow bowl is held back until Dean approves its rebuilt sample: it
+# gets 4 of these slots then)
 # 23 Nov (Dean: "pivot more to satisfying videos"; the report: box median 16.3k,
 # ring fill 14.9k, zen 10.6k, everything else 1.1-3.6k): 20 slots, 18 of them
 # satisfying -- box 5, overflow bowl 4, zen 3, ring fill 3, growing ball 2,
@@ -6630,7 +6632,7 @@ BALLS_DEBUT = {"royale": 1, "tourney": 1, "duel": 3, "race": 2, "merge": 2, "sur
 BALLS_DEBUT_SINCE = 1792360800          # 19 Oct 2026, 00:00 SA time
 # 18 Nov: Dean restarted after the pause and the ring fill / sorting race
 # only came "later" in the cycle: each goes out once first, then the cycle
-BALLS_DROP_DEBUT = {"overflow": 1, "box": 1}    # 23 Nov: the overflow bowl and a box that bursts go first
+BALLS_DROP_DEBUT = {"box": 1}    # 23 Nov: a box that bursts goes first (the overflow bowl once Dean approves it)
 BALLS_DROP_DEBUT_SINCE = 1795384800     # 23 Nov 2026, 00:00 SA time
 BALLS_FORMAT_LABELS = {"evolve": "🧬 Evolve", "escape": "⭕ Escape the ring", "touch": "✨ Touch & multiply",
                        "breakin": "🧱 Break in", "merge": "🌀 Merge to final form",
