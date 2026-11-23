@@ -1907,11 +1907,16 @@ merge it yourself; merging stays Dean's call per the rule above.
   make) skips the "unlock" chime and "fanfare" in `be.mix_audio`. (4)
   `BALLS_DROP_CYCLE` 20 slots: box 5, overflow 4, zen 3, ring fill 3,
   shrink 2, spikes, territory, maze race 1; duels and sorting race out;
-  `BALLS_DROP_DEBUT` box 1 since 23 Nov. The overflow bowl is held OUT of
-  the cycle and debut until Dean approves its rebuilt sample (he rejected the
-  first: balls must keep bouncing around the still circle and only multiply
-  when squished between paddle and plate); for now the cycle is box 5, ring
-  fill 5, zen 5, shrink 2, spikes / territory / maze race 1. Old boxes and every
+  `BALLS_DROP_DEBUT` box 1 since 23 Nov. Rebuilt per Dean's notes (still circle, balls keep
+  bouncing at a steady speed with no gravity, a ball only splits when
+  squished between the paddle and a plate; the rim's tiles shatter at the
+  end) and approved 23 Nov ("it looks good"). Five looks
+  (`ball_overflow.STYLES`, `recipe["style"]` from its own rng
+  `overflow-style-<seed>`): candy (yellow, black outlines), neon, ocean,
+  paper, slate (the first design; a recipe without `style` draws byte for
+  byte as before). `BALLS_DROP_CYCLE` 20 slots: box 5, overflow 4, ring
+  fill 4, zen 4, shrink / spikes / maze race 1 (territory out);
+  `BALLS_DROP_DEBUT` overflow 1. Old boxes and every
   recipe without the new fields are byte for byte as before (hash-checked).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
