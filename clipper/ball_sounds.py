@@ -28,7 +28,8 @@ import numpy as np
 from .ball_evolution import SR
 
 KINDS = ("tune", "meow", "phonk", "song", "knock", "none",
-         "demon_meow", "quack", "huh", "bruh", "goat", "bonk", "boing")
+         "demon_meow", "quack", "huh", "bruh", "goat", "bonk", "boing",
+         "crunch", "marble", "bubble", "thock", "wood", "ice", "sand")
 MEOW_GAP = 0.22         # seconds between meows at most
 PHONK_GAP = 0.12
 KNOCK_GAP = 0.05
@@ -123,8 +124,16 @@ MEMES = {
 }
 LABELS = {"meow": "🐱 cursed meow", "demon_meow": "😈 demon meow", "quack": "🦆 deep quack",
           "huh": "❓ huh?", "bruh": "😐 bruh", "goat": "🐐 goat", "bonk": "🔨 bonk", "boing": "🌀 boing",
-          "phonk": "🥁 phonk", "knock": "🔊 ball sounds"}
-TRACK_KINDS = ("meow", "phonk", "knock", "none") + tuple(MEMES)
+          "phonk": "🥁 phonk", "knock": "🔊 ball sounds",
+          "crunch": "🥨 crunch", "marble": "🔮 glass marble", "bubble": "🫧 bubble wrap",
+          "thock": "⌨️ keyboard thock", "wood": "🪵 wood tock", "ice": "🧊 ice crack", "sand": "⏳ crunch + sand"}
+# Satisfying hit sounds (Dean, 23 Nov: "lose the meow sound and focus more
+# on satisfying sounds"; he picked these from 8 samples, all but the water
+# drop). One short hit per bounce, no deepening: crisp when sparse, a
+# crunchy rush when dense (each softer as they pile up). Numpy only.
+SATISFY = ("crunch", "marble", "bubble", "thock", "wood", "ice", "sand")
+SATISFY_GAP = 0.012     # at most one hit this close to the last
+TRACK_KINDS = ("meow", "phonk", "knock", "none") + tuple(MEMES) + SATISFY
 
 
 def _harmonics(f0: np.ndarray, formants: list, n: int, buzz: float = 0.12, sub: float = 0.0) -> np.ndarray:
@@ -318,11 +327,93 @@ def meme_track(kind: str, hits: list, n: int) -> np.ndarray:
     return out
 
 
+def _bp(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    X = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1 / SR)
+    X[(f < lo) | (f > hi)] = 0
+    return np.fft.irfft(X, len(x))
+
+
+def _dec(n: int, tau: float) -> np.ndarray:
+    return np.exp(-np.arange(n) / (tau * SR))
+
+
+def satisfy_hit(kind: str, r: np.random.Generator) -> np.ndarray:
+    """One hit of a satisfying sound (each call a little different)."""
+    if kind in ("crunch", "sand"):
+        out = np.zeros(int(0.06 * SR))
+        for _ in range(int(r.integers(4, 10))):        # micro-grains: chip / gravel crunch
+            at, m = int(r.uniform(0, 0.03) * SR), int(r.uniform(0.002, 0.007) * SR)
+            out[at:at + m] += _bp(r.standard_normal(m * 4), 1800, 9000)[:m] * _dec(m, 0.0015) * r.uniform(0.3, 1)
+        m = int(0.02 * SR)
+        out[:m] += 0.25 * np.sin(2 * np.pi * r.uniform(110, 160) * np.arange(m) / SR) * _dec(m, 0.006)
+        return out * (0.55 if kind == "sand" else 1.0)
+    if kind == "marble":
+        m = int(0.12 * SR)
+        t, base = np.arange(m) / SR, r.uniform(2600, 3600)
+        w = sum(a * np.sin(2 * np.pi * base * k * t) * _dec(m, d)
+                for k, a, d in ((1, 1, 0.03), (1.71, 0.6, 0.02), (2.53, 0.4, 0.012)))
+        w[:60] += _bp(r.standard_normal(240), 4000, 15000)[:60] * 0.8
+        return w
+    if kind == "bubble":
+        m = int(0.05 * SR)
+        t = np.arange(m) / SR
+        w = _bp(r.standard_normal(m * 2), 300, r.uniform(2200, 3500))[:m] * _dec(m, 0.006) * 2.2
+        return w + 0.3 * np.sin(2 * np.pi * (900 - 6000 * t) * t) * _dec(m, 0.008)
+    if kind == "thock":
+        m = int(0.08 * SR)
+        t = np.arange(m) / SR
+        w = np.sin(2 * np.pi * r.uniform(220, 320) * t) * _dec(m, 0.012)
+        w += 0.35 * np.sin(2 * np.pi * r.uniform(1600, 2000) * t) * _dec(m, 0.004)
+        w[:90] += _bp(r.standard_normal(360), 3000, 12000)[:90] * 0.9
+        return w
+    if kind == "wood":
+        m = int(0.1 * SR)
+        t, f = np.arange(m) / SR, r.uniform(750, 1050)
+        w = np.sin(2 * np.pi * f * t) * _dec(m, 0.018) + 0.45 * np.sin(2 * np.pi * f * 2.76 * t) * _dec(m, 0.007)
+        w[:50] += _bp(r.standard_normal(200), 2000, 9000)[:50] * 0.5
+        return w
+    m = int(0.05 * SR)                                  # ice
+    t = np.arange(m) / SR
+    w = _bp(r.standard_normal(m * 2), 4500, 16000)[:m] * _dec(m, 0.003) * 1.6
+    return w + 0.35 * np.sin(2 * np.pi * (r.uniform(5000, 7000) * t - 30000 * t * t)) * _dec(m, 0.01)
+
+
+def satisfy_track(kind: str, hits: list, n: int, seed: int = 0) -> np.ndarray:
+    """One hit per bounce; the denser the hits, the softer each one, so a
+    full box is a crunchy rush, not a roar. 24 takes, reused."""
+    out = np.zeros(n, dtype=np.float32)
+    if not hits:
+        return out
+    r = np.random.default_rng(seed)
+    takes = [satisfy_hit(kind, r).astype(np.float32) for _ in range(24)]
+    times = [t for t, _ in hits]
+    last, k, j = -1.0, 0, 0
+    for t, vol in hits:
+        if t - last < SATISFY_GAP:
+            continue
+        while times[j] < t - 0.5:
+            j += 1
+        dense = sum(1 for x in times[j:j + 200] if x <= t + 0.5)   # hits in the second around it
+        g = (0.45 + 0.55 * vol) / (1 + dense / 25) ** 0.5
+        w = takes[k % len(takes)]
+        i = int(t * SR)
+        seg = out[i:i + len(w)]
+        seg += w[:len(seg)] * g
+        last, k = t, k + 1
+    if kind == "sand":                                  # a soft pour that grows with the count
+        bed = _bp(r.standard_normal(n), 1500, 7000).astype(np.float32)
+        out += bed * np.linspace(0, 0.06, n, dtype=np.float32) * float(np.max(np.abs(out)) or 1)
+    return out
+
+
 def track(kind: str, hits: list, n: int) -> np.ndarray:
     """The bounce sound for a whole video: one meow / riff note / tap per
     hit ("none": silence)."""
     if kind in MEMES:
         return meme_track(kind, hits, n)
+    if kind in SATISFY:
+        return satisfy_track(kind, hits, n)
     out = np.zeros(n, dtype=np.float32)
     if kind == "none":
         return out

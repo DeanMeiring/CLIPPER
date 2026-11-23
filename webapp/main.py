@@ -7529,7 +7529,7 @@ BALLS_NO_SONG_SOUND = {"merge": "knock",          # ball taps; the merges make t
 # in subs, so more sounds like it: these take turns on the kinds that had the
 # cursed meow (+ Escape, which fills its ring), the one used longest ago next
 # (ball_sounds.MEMES: each gets deeper as the video fills up).
-BALLS_MEME_SOUNDS = ("meow",) + tuple(ball_sounds.MEMES)
+BALLS_MEME_SOUNDS = ("meow",) + tuple(ball_sounds.MEMES) + ball_sounds.SATISFY
 BALLS_MEME_KINDS = tuple(k for k, v in BALLS_NO_SONG_SOUND.items() if v == "meow")   # Escape out since 12 Nov
 
 
@@ -7545,9 +7545,10 @@ def _balls_pick_meme(exclude: str, fmt: str = "") -> str:
     """The cursed meow BALLS_MEOW_SHARE of the time, else the other meme
     sound used longest ago (never used first, in BALLS_MEME_SOUNDS order).
     Escape has no bounce track of its own, so it never gets the old meow."""
-    if fmt in BALLS_NO_SONG_SOUND and random.Random(f"meme-{exclude}").random() < BALLS_MEOW_SHARE:
-        return "meow"
-    pool = tuple(ball_sounds.MEMES)
+    # 23 Nov (Dean: "lose the meow sound and focus more on satisfying
+    # sounds"): the satisfying hit sounds take turns instead, the one used
+    # longest ago next; the meow and meme voices only when picked in Make
+    pool = ball_sounds.SATISFY
     made = [v for v in _balls.videos() if v["id"] != exclude
             and (v.get("recipe") or {}).get("bounce_sound") in BALLS_MEME_SOUNDS]
     made.sort(key=lambda v: v.get("made_at") or v.get("created_at") or 0)
@@ -8348,7 +8349,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-20 maze AIs"      # the maze racers are trained AIs
+BALLS_LOOK_VERSION = "2026-11-23 satisfying sounds"      # the meow gave way to satisfying hit sounds
 
 
 def _balls_auto_remake() -> Optional[dict]:
@@ -14398,7 +14399,7 @@ function renderTracks() {
   for (const t of SG.songs) opt(t.id, `🎵 ${t.name}`);
   opt('none', '🔊 No song: ball + cursed sounds');
   // a meme sound by hand (deeper as it fills up) on the meow kinds, Escape and Merge
-  for (const [k, label] of SOUND_CHOICES) opt('sfx:' + k, `${label}: on every bounce, deeper as it fills`);
+  for (const [k, label] of SOUND_CHOICES) opt('sfx:' + k, `${label}: on every bounce`);
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
   if (typeof S !== 'undefined' && S) songPickState();
 }
