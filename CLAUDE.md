@@ -1937,7 +1937,16 @@ merge it yourself; merging stays Dean's call per the rule above.
   (`good_end` 18-40), ~1 min to make. `BALLS_DROP_CYCLE` 20: box 4,
   overflow 3, ring fill 3, zen 3, press / gears / syringe 2, shrink 1;
   `BALLS_DROP_DEBUT` one of each new kind. Dean let Claude merge this one
-  PR himself. Next idea, design only so far: a multi-layer machine whose
+  PR himself. 24 Nov: every squish make failed ("no good run ... in seeds"):
+  `pick_seed` rejects a run whose `max_gap` is over `MAX_UNLOCK_GAP` 18 s,
+  and the milestone ladder (10/100/1,000 balls) had 16-21 s between 100
+  and 1,000; slower recipes (speed 0.92, ball 9 px) also didn't fill by
+  40 s. The first test used `--exact`, which skips picking -- test new
+  kinds through `pick_seed`. Now `SquishSim._milestones` sets `max_gap` to
+  the longest wait without a squish (~1 s), `FILL` 0.40, `START_N` 20,
+  press plate 68% / 2.2 s, syringe 70% / 2.0 s, `GEAR_PULL` 0.11, and
+  `good_end` 15-40: slowest and fastest settings fill in 18-28 s on every
+  seed (a seed barely changes the time). Next idea, design only so far: a multi-layer machine whose
   layers each turn the balls into the next item until the bottom fills.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball

@@ -8363,7 +8363,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-23 squish machines"      # press, gears, syringe in the rotation
+BALLS_LOOK_VERSION = "2026-11-24 squish seed fix"      # remakes the squish videos that failed seed picking
 
 
 def _balls_auto_remake() -> Optional[dict]:

@@ -38,19 +38,19 @@ SECONDS_CAP = 58.0
 SPEED = 640.0
 SQUISH_K = 1.6
 FILL = 0.40
-START_N = 12
+START_N = 20
 CAP = 2000
 WALL = 14                    # wall half-thickness (physics) and drawn tile depth
 PT = 30                      # press plate / plunger thickness
 
 # arenas: inner box (x0, x1, y0, y1)
 BOXES = {"press": (150, 930, 560, 1640), "syringe": (330, 750, 540, 1660), "gears": (120, 960, 540, 1660)}
-PLATE_SHARE = {"press": 0.62, "syringe": 0.70}     # plate width / box width: balls slip round the ends
-PERIOD = {"press": 2.4, "syringe": 2.0}            # s for a full down-and-up
+PLATE_SHARE = {"press": 0.68, "syringe": 0.70}     # plate width / box width: balls slip round the ends
+PERIOD = {"press": 2.2, "syringe": 2.0}            # s for a full down-and-up
 GEAR_Y = 1100
 NIP = 22                                           # px between the two gears' rims
 GEAR_TEETH = 18
-GEAR_PULL = 0.10                                   # how hard a ball near a gear is turned toward the gap
+GEAR_PULL = 0.11                                   # how hard a ball near a gear is turned toward the gap
 
 HOOKS = {"press": ["Will the press crush them all?", "Every press makes more", "How many until the box breaks?"],
          "syringe": ["Will it overflow the tube?", "Every push makes more", "How many until the cap pops?"],
@@ -308,6 +308,17 @@ class SquishSim(ov.OverflowSim):
                 ny = min(max(ny, y0 + r + 1), y1 - r - 1)
             if (nx, ny) != (x, y):
                 b.position = (nx, ny)
+
+    def _milestones(self):
+        """As the bowl's, but ``max_gap`` (what ``pick_seed`` checks against
+        MAX_UNLOCK_GAP) is the longest wait without a squish: these machines
+        have no picture ladder, and their 100 -> 1,000 balls stretch ran
+        16-21 s, so the ladder gap failed almost every seed."""
+        super()._milestones()
+        times = [0.0] + [t for t, _ in self.squishes]
+        end = self.done_at if self.done_at is not None else self.t
+        gaps = [b - a for a, b in zip(times, times[1:])] + [end - times[-1]]
+        self.max_gap = max(gaps)
 
     def _shatter(self):
         """The walls break into pieces that fly off; the balls burst out."""
