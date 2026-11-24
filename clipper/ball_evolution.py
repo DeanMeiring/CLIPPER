@@ -1062,8 +1062,10 @@ def good_end(recipe: dict) -> tuple:
         return (20.0, 36.0)
     if recipe.get("format") == "ringfill":
         return (18.0, 45.0)
-    if recipe.get("format") in ("overflow", "press", "gears", "syringe"):
+    if recipe.get("format") == "overflow":
         return (18.0, 40.0)
+    if recipe.get("format") in ("press", "gears", "syringe"):
+        return (15.0, 40.0)      # the squish machines fill in ~18-28 s, about the same on every seed
     if recipe.get("format") == "mazerace" and recipe.get("ai"):
         return (14.0, 34.0)      # trained racers take fewer wrong turns: shorter races
     if recipe.get("format") in ("territory", "mazerace"):
