@@ -6594,9 +6594,10 @@ BALLS_FORMAT_CYCLE = ("duel", "escape", "shrink", "royale", "tourney", "center",
 # in this cycle, in the sticker / comic looks (BALLS_DROP_ARTS). Box 3 in 7 (an odd length, so with two
 # drop slots a day it isn't always the morning one); jaws was tried and its
 # trails turn into a tangle in that look.
-BALLS_DROP_CYCLE = ("box", "overflow", "ringfill", "press", "zen", "gears", "box", "overflow", "syringe", "zen",
-                    "ringfill", "box", "press", "overflow", "zen", "gears", "ringfill", "box", "syringe", "shrink")
-# (23 Nov: the overflow bowl, rebuilt and approved, takes 4 of 20; territory made way)
+BALLS_DROP_CYCLE = ("ringfill", "box", "zen", "overflow", "ringfill", "press", "shrink", "box", "ringfill", "gears",
+                    "zen", "overflow", "ringfill", "box", "syringe", "zen", "ringfill", "press", "spikes", "shrink")
+# (27 Nov: ring fill 3 for 3 on hits -- 68.6k in 48 h, 34k, 15.9k -- so 5 of 20;
+#  box 3, zen 3, overflow 2, press 2, shrink 2, gears / syringe / spikes 1)
 # 23 Nov (Dean: "pivot more to satisfying videos"; the report: box median 16.3k,
 # ring fill 14.9k, zen 10.6k, everything else 1.1-3.6k): 20 slots, 18 of them
 # satisfying -- box 5, overflow bowl 4, zen 3, ring fill 3, growing ball 2,
@@ -8363,7 +8364,7 @@ def balls_remake_upcoming() -> dict:
 # every made video that hasn't posted yet, once (Dean, 20 Nov: "I don't have
 # to go press a button because I forget"). Small fixes leave it alone, so
 # the queued videos aren't made again for nothing.
-BALLS_LOOK_VERSION = "2026-11-24 squish seed fix"      # remakes the squish videos that failed seed picking
+BALLS_LOOK_VERSION = "2026-11-27 more ring fill"      # ring fill 5 of 20 drop slots
 
 
 def _balls_auto_remake() -> Optional[dict]:
