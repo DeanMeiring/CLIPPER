@@ -1948,6 +1948,13 @@ merge it yourself; merging stays Dean's call per the rule above.
   `good_end` 15-40: slowest and fastest settings fill in 18-28 s on every
   seed (a seed barely changes the time). Next idea, design only so far: a multi-layer machine whose
   layers each turn the balls into the next item until the bottom fills.
+- **More ring fill (27 Nov):** ring fill went 3 for 3 on hits ("Will it
+  fill the whole circle?" 68.6k in 48 h, "Fill it, then start again" 34k+,
+  15.9k); squish machines, comment fights, sorting race, brand duels sat
+  at ~1.1k. Dean: more of it, "but don't go full" -- vary it instead.
+  `BALLS_DROP_CYCLE` 20: ring fill 5, box 3, zen 3, overflow 2, press 2,
+  shrink 2, gears / syringe / spikes 1. Next: ring fill variants (shapes,
+  reverse, crash ending) so they don't read as one template.
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for
