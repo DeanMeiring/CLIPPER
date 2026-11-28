@@ -1955,6 +1955,12 @@ merge it yourself; merging stays Dean's call per the rule above.
   `BALLS_DROP_CYCLE` 20: ring fill 5, box 3, zen 3, overflow 2, press 2,
   shrink 2, gears / syringe / spikes 1. Next: ring fill variants (shapes,
   reverse, crash ending) so they don't read as one template.
+- **Pause (28 Nov):** Dean thought the channel was soft-locked again
+  and asked to stop posting until Monday: `BALLS_PAUSE_UNTIL` (Mon 30 Nov
+  00:00 SA) makes `_balls_autopilot_tick` only run the daily learning
+  until then (no planning, making, uploads or Instagram). He also said
+  this change and the Monday 02:00 analysis changes go straight to `main`
+  without a PR (those two only).
 - **Music only on the growing ball (21 Oct):** Dean: his songs only on
   `shrink` ("🔴 Ball grows every bounce"); every other kind plays just ball
   sounds and cursed sounds. `_balls_sound` in `_balls_make`: a song for

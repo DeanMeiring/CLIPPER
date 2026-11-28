@@ -8117,6 +8117,9 @@ _balls_last_tick: dict = {}
 _balls_autopilot_thread: Optional[threading.Thread] = None
 
 
+BALLS_PAUSE_UNTIL = 1795989600     # Mon 30 Nov 2026 00:00 SA: autopilot paused until then
+
+
 def _balls_autopilot_tick(reason: str = "loop") -> dict:
     global _balls_last_tick
     if not _balls_tick_lock.acquire(blocking=False):
@@ -8126,6 +8129,12 @@ def _balls_autopilot_tick(reason: str = "loop") -> dict:
         s = _balls.settings()
         if not s.get("autopilot"):
             return {"autopilot": False}
+        if time.time() < BALLS_PAUSE_UNTIL:
+            # Dean (28 Nov): the channel looked soft-locked again, so no
+            # posting or making until Monday; the daily numbers still come in
+            if _balls_learn_due(s) and _youtube_token_stores[BALLS_PROFILE].is_connected():
+                threading.Thread(target=_balls_learn_bg, args=("daily",), daemon=True).start()
+            return {"paused_until": BALLS_PAUSE_UNTIL}
         _balls_auto_remake()
         _balls_resume()
         if _balls_learn_due(s) and _youtube_token_stores[BALLS_PROFILE].is_connected():
